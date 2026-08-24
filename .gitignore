@@ -1,0 +1,38 @@
+# Dependencies
+/node_modules/
+
+# Next.js output
+/.next/
+/out/
+
+# Tests and coverage
+/coverage/
+/playwright-report/
+/test-results/
+
+# TypeScript-generated files
+*.tsbuildinfo
+next-env.d.ts
+
+# Environment files and deployment state
+.env*
+!.env.example
+/.vercel/
+
+# Generated sql.js runtime assets (created by postinstall)
+/public/*.wasm
+
+# Local source material is not part of the distributable application
+/references/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Operating-system and editor debris
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp

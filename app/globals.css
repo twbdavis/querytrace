@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Blueprint theme tokens — mirrors styles/theme.ts (the TS source of truth). */
+:root {
+  /* Surfaces — canvas pushed darker so nodes float above it */
+  --bg-app: #090d18; /* page chrome background */
+  --bg-canvas: #0c1122; /* React Flow canvas */
+  --bg-node: #171e38; /* table node body */
+  --bg-node-header: #26305a; /* table node header bar */
+  --bg-panel: #10152b; /* side panels, editor bg, playback pill */
+  --bg-row-alt: rgba(255, 255, 255, 0.03); /* zebra striping: alpha overlay */
+
+  /* Lines */
+  --border-default: #333f6b;
+  --border-strong: #4a5890;
+
+  /* Text — near-white primary, faint indigo cast only */
+  --text-primary: #eef2ff;
+  --text-secondary: #a5b1d8;
+  --text-muted: #626e9d;
+
+  /* Role accents */
+  --accent-active: #8b98ff; /* periwinkle: active tables, join keys, edges */
+  --accent-pulse: #c7d2fe; /* brighter periwinkle: traveling edge pulses */
+  --accent-filter: #fcd34d; /* gold: WHERE columns, null-extended rows */
+  --accent-group: #f0abfc; /* orchid: GROUP BY column highlight */
+  --accent-result: #5eead4; /* mint: projection columns, result rows, inspect */
+  --accent-error: #fb7185; /* rose: errors */
+
+  /* Row state backgrounds (pre-mixed, don't compute at runtime) */
+  --row-lit-bg: rgba(139, 152, 255, 0.2);
+  --row-lit-border: #8b98ff;
+  --row-null-border: #fcd34d; /* dashed */
+  --row-inspect-bg: rgba(94, 234, 212, 0.2);
+}
+
+html,
+body {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: rgba(139, 152, 255, 0.3);
+}
+
+/* visible keyboard focus everywhere, in theme */
+*:focus-visible {
+  outline: 2px solid var(--accent-active);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* invisible scrollbar for the playback dock's stage-chip strip */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* thin chalk-line scrollbars on drafting paper */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* clause of the query currently being executed by the trace animation */
+.queryExecHighlight {
+  background: var(--row-lit-bg);
+  border-radius: 3px;
+  transition: background 0.3s;
+}
+
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes modal-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-dialog-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes result-row-enter {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.panel-enter { animation: panel-enter 180ms ease-out both; }
+.modal-backdrop-enter { animation: modal-backdrop-enter 150ms ease-out both; }
+.modal-dialog-enter { animation: modal-dialog-enter 200ms ease-out both; }
+.result-row-enter { animation: result-row-enter 250ms ease-out both; }
+
+kbd {
+  @apply rounded border border-line bg-node px-1 py-0.5 font-data text-[9px] text-ink-dim;
+}
+
+@media (max-width: 639px) {
+  button,
+  [role='button'] {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bus-current,
+  .edge-pulse {
+    display: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
