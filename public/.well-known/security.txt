@@ -1,0 +1,5 @@
+Contact: mailto:thomas.davis@mcacom.com
+Expires: 2027-08-24T00:00:00.000Z
+Canonical: https://www.querytrace.net/.well-known/security.txt
+Policy: https://github.com/twbdavis/querytrace/blob/main/SECURITY.md
+Preferred-Languages: en
