@@ -27,7 +27,7 @@ sheet so students can watch the active SQL clause and its rows at the same time.
 
 ## Run it
 
-Requires Node.js 20.9 or newer.
+Requires Node.js 24 or newer.
 
 ```bash
 npm ci

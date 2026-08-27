@@ -17,7 +17,7 @@ const data = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'QueryTrace — Visual SQL Learning DBMS',
+  title: 'QueryTrace',
   description:
     'Learn SQL by watching queries execute: joins pulse along foreign keys, filtered rows fade, and groups collapse into results, all on live tables in your browser.',
 };
