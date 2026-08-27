@@ -11,7 +11,7 @@ interface SchemaModalProps {
 }
 
 const DDL_TEMPLATE = `-- Define tables with CREATE TABLE, mark keys, then INSERT the rows.
--- Constraint syntax (slideset 4):
+-- Constraint syntax:
 --   PRIMARY KEY on the identifying column
 --   PRIMARY KEY (col1, col2) for a composite identifier
 --   AUTO_INCREMENT is accepted for an INTEGER PRIMARY KEY

@@ -6,6 +6,10 @@ The teaching DBMS runs client-side: SQLite compiled to WASM (sql.js), isolated i
 Type a query (or pick a lesson) and QueryTrace decomposes execution into logical stages,
 replaying them like a debugger:
 
+All bundled scenarios, records, names, prompts, and expected results are fictional
+examples created for QueryTrace. They teach general SQL concepts without reproducing
+third-party classroom exercises or answer sets.
+
 - **FROM / JOIN** — matched key pairs light up in both tables and pulses travel along the FK edge; outer-join rows kept without a match get a dashed border
 - **WHERE** — eliminated rows fade with a strikethrough
 - **GROUP BY / HAVING** — rows are color-coded by group; eliminated groups fade as units
@@ -57,7 +61,7 @@ decomposes the parsed AST (node-sql-parser) into stages and runs intermediate
 PK-projection queries against sql.js to compute exact row provenance:
 
 - provenance uses each ordinary SQLite table's stable rowid, independent of
-  whether its course-facing key is text, integer, or composite
+  whether its learner-facing key is text, integer, or composite
 - each join step selects rowids from all tables joined so far (NULLs mark outer-join extension)
 - WHERE / HAVING are computed as diffs against the previous stage's rowid sets
 - GROUP BY and scalar aggregates use `GROUP_CONCAT(rowid)` so each result maps
@@ -76,7 +80,7 @@ The detailed row-provenance pipeline is used wherever the query can be safely
 decomposed; compound and derived-table queries expose their inner/branch results
 and exact SQLite final result.
 
-The schema builder intentionally accepts the course's safe construction subset:
+The schema builder intentionally accepts a safe construction subset:
 CREATE TABLE plus INSERT INTO ... VALUES. Data-changing DML and destructive DDL
 are not executed in visual query mode.
 
@@ -90,3 +94,7 @@ node-sql-parser · Zustand · CodeMirror 6 · Tailwind CSS · Playwright
 Every push and pull request runs type checking, all trace-engine tests, a
 production build, and the browser suite in Chromium, Firefox, and WebKit through
 GitHub Actions.
+
+## AI disclosure
+
+This README was generated with AI assistance from OpenAI Codex (GPT-5).

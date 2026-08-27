@@ -1,8 +1,6 @@
-/* Preloadable schemas. SHARES, DONOR and EMP carry the exact data printed in
-   the ISTM 315 SQL Workbook (Fall 2025). SALES is reconstructed from the
-   workbook's ER diagram (Sale, DeliveryItem, Dept, Employee, Supplier with
-   Manages / Works in / Boss of) with illustrative rows sized so the workbook
-   practice queries all produce meaningful, fully visible results. */
+/* Original teaching datasets designed for QueryTrace. They cover the same
+   relational patterns and SQL operations as the lesson sequence without
+   reproducing any external course examples or answer data. */
 
 export interface ColumnMeta {
   name: string;
@@ -20,10 +18,8 @@ export interface TableMeta {
 
 export interface FkEdgeDef {
   id: string;
-  /** Parent table (arrow tail sits at its PK column). */
   source: string;
   sourceHandle: string;
-  /** Dependent table (arrowhead lands on its FK column). */
   target: string;
   targetHandle: string;
 }
@@ -34,7 +30,6 @@ export interface SchemaDef {
   description: string;
   ddl: string;
   starterQuery: string;
-  /** Optional hand layout; schemas without one are auto-arranged. */
   positions?: Record<string, { x: number; y: number }>;
 }
 
@@ -46,13 +41,11 @@ CREATE TABLE student (
   gpa REAL NOT NULL,
   year INTEGER NOT NULL
 );
-
 CREATE TABLE instructor (
   instructor_id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   department TEXT NOT NULL
 );
-
 CREATE TABLE course (
   course_id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,
@@ -61,7 +54,6 @@ CREATE TABLE course (
   instructor_id INTEGER NOT NULL,
   CONSTRAINT course_fk FOREIGN KEY (instructor_id) REFERENCES instructor (instructor_id)
 );
-
 CREATE TABLE enrollment (
   enrollment_id INTEGER PRIMARY KEY,
   student_id INTEGER NOT NULL,
@@ -71,283 +63,202 @@ CREATE TABLE enrollment (
   CONSTRAINT enroll_student_fk FOREIGN KEY (student_id) REFERENCES student (student_id),
   CONSTRAINT enroll_course_fk FOREIGN KEY (course_id) REFERENCES course (course_id)
 );
-
-INSERT INTO student (student_id, name, major, gpa, year) VALUES
-  (1,  'Ava Chen',     'CS',      3.9,  3),
-  (2,  'Marcus Webb',  'CS',      3.2,  2),
-  (3,  'Priya Patel',  'CS',      3.7,  4),
-  (4,  'Jordan Lee',   'CS',      2.8,  1),
-  (5,  'Sofia Reyes',  'Math',    3.6,  3),
-  (6,  'Ethan Brooks', 'Math',    3.1,  2),
-  (7,  'Lily Zhang',   'Math',    3.8,  4),
-  (8,  'Noah Kim',     'Physics', 2.9,  1),
-  (9,  'Emma Davis',   'Physics', 3.5,  3),
-  (10, 'Omar Hassan',  'Biology', 3.4,  2),
-  (11, 'Grace Miller', 'Biology', 3.95, 4),
-  (12, 'Leo Martin',   'Art',     2.5,  1);
-
-INSERT INTO instructor (instructor_id, name, department) VALUES
-  (1, 'Dr. Susan Hale',   'Computer Science'),
-  (2, 'Dr. Raj Mehta',    'Mathematics'),
-  (3, 'Dr. Elena Petrov', 'Physics'),
-  (4, 'Dr. James Okafor', 'Biology'),
+INSERT INTO student VALUES
+  (1, 'Ava Chen', 'CS', 3.9, 3), (2, 'Marcus Webb', 'CS', 3.2, 2),
+  (3, 'Priya Patel', 'CS', 3.7, 4), (4, 'Jordan Lee', 'CS', 2.8, 1),
+  (5, 'Sofia Reyes', 'Math', 3.6, 3), (6, 'Ethan Brooks', 'Math', 3.1, 2),
+  (7, 'Lily Zhang', 'Math', 3.8, 4), (8, 'Noah Kim', 'Physics', 2.9, 1),
+  (9, 'Emma Davis', 'Physics', 3.5, 3), (10, 'Omar Hassan', 'Biology', 3.4, 2),
+  (11, 'Grace Miller', 'Biology', 3.95, 4), (12, 'Leo Martin', 'Art', 2.5, 1);
+INSERT INTO instructor VALUES
+  (1, 'Dr. Susan Hale', 'Computer Science'), (2, 'Dr. Raj Mehta', 'Mathematics'),
+  (3, 'Dr. Elena Petrov', 'Physics'), (4, 'Dr. James Okafor', 'Biology'),
   (5, 'Dr. Marie Dubois', 'Fine Arts');
-
-INSERT INTO course (course_id, title, department, credits, instructor_id) VALUES
+INSERT INTO course VALUES
   (1, 'Intro to Programming', 'Computer Science', 4, 1),
-  (2, 'Data Structures',      'Computer Science', 4, 1),
-  (3, 'Calculus I',           'Mathematics',      4, 2),
-  (4, 'Linear Algebra',       'Mathematics',      3, 2),
-  (5, 'Mechanics',            'Physics',          4, 3),
-  (6, 'Genetics',             'Biology',          3, 4),
-  (7, 'Quantum Physics',      'Physics',          3, 3),
-  (8, 'Watercolor Studio',    'Fine Arts',        2, 5);
-
-INSERT INTO enrollment (enrollment_id, student_id, course_id, grade, semester) VALUES
-  (1,  1,  1, 'A',  'Fall 2025'),
-  (2,  1,  2, 'A-', 'Fall 2025'),
-  (3,  1,  3, 'B+', 'Spring 2026'),
-  (4,  2,  1, 'B',  'Fall 2025'),
-  (5,  2,  2, 'C+', 'Spring 2026'),
-  (6,  3,  2, 'A',  'Fall 2025'),
-  (7,  3,  4, 'B+', 'Spring 2026'),
-  (8,  4,  1, 'C',  'Fall 2025'),
-  (9,  5,  3, 'A',  'Fall 2025'),
-  (10, 5,  4, 'A-', 'Spring 2026'),
-  (11, 6,  3, 'B',  'Fall 2025'),
-  (12, 6,  1, 'B-', 'Spring 2026'),
-  (13, 7,  4, 'A',  'Fall 2025'),
-  (14, 7,  3, 'A-', 'Spring 2026'),
-  (15, 8,  5, 'B',  'Fall 2025'),
-  (16, 9,  5, 'A',  'Fall 2025'),
-  (17, 9,  6, 'B+', 'Spring 2026'),
-  (18, 10, 6, 'A',  'Fall 2025'),
-  (19, 10, 5, 'C+', 'Spring 2026'),
-  (20, 4,  6, 'D',  'Spring 2026');
+  (2, 'Data Structures', 'Computer Science', 4, 1),
+  (3, 'Calculus I', 'Mathematics', 4, 2), (4, 'Linear Algebra', 'Mathematics', 3, 2),
+  (5, 'Mechanics', 'Physics', 4, 3), (6, 'Genetics', 'Biology', 3, 4),
+  (7, 'Quantum Physics', 'Physics', 3, 3), (8, 'Watercolor Studio', 'Fine Arts', 2, 5);
+INSERT INTO enrollment VALUES
+  (1, 1, 1, 'A', 'Fall 2025'), (2, 1, 2, 'A-', 'Fall 2025'),
+  (3, 1, 3, 'B+', 'Spring 2026'), (4, 2, 1, 'B', 'Fall 2025'),
+  (5, 2, 2, 'C+', 'Spring 2026'), (6, 3, 2, 'A', 'Fall 2025'),
+  (7, 3, 4, 'B+', 'Spring 2026'), (8, 4, 1, 'C', 'Fall 2025'),
+  (9, 5, 3, 'A', 'Fall 2025'), (10, 5, 4, 'A-', 'Spring 2026'),
+  (11, 6, 3, 'B', 'Fall 2025'), (12, 6, 1, 'B-', 'Spring 2026'),
+  (13, 7, 4, 'A', 'Fall 2025'), (14, 7, 3, 'A-', 'Spring 2026'),
+  (15, 8, 5, 'B', 'Fall 2025'), (16, 9, 5, 'A', 'Fall 2025'),
+  (17, 9, 6, 'B+', 'Spring 2026'), (18, 10, 6, 'A', 'Fall 2025'),
+  (19, 10, 5, 'C+', 'Spring 2026'), (20, 4, 6, 'D', 'Spring 2026');
 `;
 
-const SHARES_DDL = `
-CREATE TABLE SHARES (
-  SHRCODE  CHAR(3) PRIMARY KEY,
-  SHRFIRM  VARCHAR(30) NOT NULL,
-  SHRPRICE DECIMAL(8,2),
-  SHRQTY   INTEGER,
-  SHRDIV   DECIMAL(6,2),
-  SHRPE    INTEGER
+const CATALOG_DDL = `
+CREATE TABLE PRODUCT (
+  ITEMCODE CHAR(3) PRIMARY KEY,
+  ITEMNAME VARCHAR(30) NOT NULL,
+  UNITPRICE DECIMAL(8,2),
+  STOCKQTY INTEGER,
+  DISCOUNTRATE DECIMAL(5,2),
+  RATING INTEGER
 );
-
-INSERT INTO SHARES VALUES
-  ('AR',  'Abyssinian Ruby',     31.82, 22010,   1.32, 13),
-  ('BE',  'Burmese Elephant',     0.07, 154713,  0.01, 3),
-  ('BS',  'Bolivian Sheep',      12.75, 231678,  1.78, 11),
-  ('CS',  'Canadian Sugar',      52.78, 4716,    2.50, 15),
-  ('FC',  'Freedonia Copper',    27.50, 10529,   1.84, 16),
-  ('ILZ', 'Indian Lead & Zinc',  37.75, 6390,    3.00, 12),
-  ('NG',  'Nigerian Geese',      35.00, 12323,   1.68, 10),
-  ('PT',  'Patagonian Tea',      55.25, 12635,   2.50, 10),
-  ('ROF', 'Royal Ostrich Farms', 33.75, 1234923, 3.00, 6),
-  ('SLG', 'Sri Lankan Gold',     50.37, 32868,   2.68, 16);
+INSERT INTO PRODUCT VALUES
+  ('BAG', 'Canvas Tote', 18.50, 48, 0.10, 4),
+  ('BOT', 'Glass Bottle', 12.00, 120, 0.05, 3),
+  ('BRU', 'Bamboo Brush', 9.75, 75, 0.00, 4),
+  ('CND', 'Cedar Candle', 24.00, 36, 0.15, 5),
+  ('DSK', 'Desk Organizer', 32.50, 28, 0.10, 4),
+  ('JRN', 'Linen Journal', 16.25, 64, 0.05, 5),
+  ('KIT', 'Repair Kit', 45.00, 18, 0.20, 5),
+  ('LMP', 'Reading Lamp', 54.00, 22, 0.10, 5),
+  ('MUG', 'Stoneware Mug', 14.50, 90, 0.05, 4),
+  ('PLN', 'Weekly Planner', 21.00, 55, 0.00, 3);
 `;
 
-const DONOR_DDL = `
-CREATE TABLE DONOR (
-  DONORNO INTEGER PRIMARY KEY,
-  DLNAME  VARCHAR(20),
-  DFNAME  VARCHAR(20),
-  DPHONE  CHAR(7),
-  DSTATE  CHAR(2),
-  DCITY   VARCHAR(20)
+const COMMUNITY_DDL = `
+CREATE TABLE MEMBER (
+  MEMBER_ID INTEGER PRIMARY KEY,
+  LAST_NAME VARCHAR(20),
+  FIRST_NAME VARCHAR(20),
+  PHONE CHAR(7),
+  REGION CHAR(2),
+  CITY VARCHAR(20)
 );
-
-CREATE TABLE YEAR (
-  YEAR     INTEGER PRIMARY KEY,
-  YEARGOAL INTEGER
+CREATE TABLE CAMPAIGN (
+  CAMPAIGN_YEAR INTEGER PRIMARY KEY,
+  TARGET INTEGER
 );
-
-CREATE TABLE GIFT (
-  AMOUNT  DECIMAL(8,2),
-  YEAR    INTEGER NOT NULL,
-  DONORNO INTEGER NOT NULL,
-  PRIMARY KEY (YEAR, DONORNO),
-  CONSTRAINT gift_year_fk FOREIGN KEY (YEAR) REFERENCES YEAR (YEAR) ON DELETE CASCADE,
-  CONSTRAINT gift_donor_fk FOREIGN KEY (DONORNO) REFERENCES DONOR (DONORNO) ON DELETE CASCADE
+CREATE TABLE PLEDGE (
+  AMOUNT DECIMAL(8,2),
+  CAMPAIGN_YEAR INTEGER NOT NULL,
+  MEMBER_ID INTEGER NOT NULL,
+  PRIMARY KEY (CAMPAIGN_YEAR, MEMBER_ID),
+  CONSTRAINT pledge_campaign_fk FOREIGN KEY (CAMPAIGN_YEAR)
+    REFERENCES CAMPAIGN (CAMPAIGN_YEAR) ON DELETE CASCADE,
+  CONSTRAINT pledge_member_fk FOREIGN KEY (MEMBER_ID)
+    REFERENCES MEMBER (MEMBER_ID) ON DELETE CASCADE
 );
-
-INSERT INTO DONOR VALUES
-  (101, 'Abrams',     'Louis',    '5559018', 'GA', 'London'),
-  (102, 'Aldinger',   'Dmitry',   '5551521', 'GA', 'Paris'),
-  (103, 'Beckman',    'Gulsen',   '5558247', 'WA', 'Sao Paulo'),
-  (104, 'Berdahl',    'Samuel',   '5558149', 'WI', 'Sydney'),
-  (105, 'Borneman',   'Joanna',   '5551888', 'MD', 'Bombay'),
-  (106, 'Brock',      'Scott',    '5552142', 'AL', 'London'),
-  (107, 'Buyert',     'Aylin',    '5559355', 'AK', 'New York'),
-  (108, 'Cetinsoy',   'Girwan',   '5556346', 'AZ', 'Rome'),
-  (109, 'Chisholm',   'John',     '5554482', 'MA', 'Oslo'),
-  (110, 'Crowder',    'Anthony',  '5556513', 'NC', 'Stockholm'),
-  (111, 'Dishman',    'Michelle', '5553903', 'NC', 'Helsinki'),
-  (112, 'Duke',       'Peter',    '5554939', 'FL', 'Tokyo'),
-  (113, 'Evans',      'Ann',      '5554336', 'GA', 'Singapore'),
-  (114, 'Frawley',    'Todd',     '5554785', 'MN', 'Perth'),
-  (115, 'Guo',        'John',     '5556247', 'MN', 'Moscow'),
-  (116, 'Hammann',    'John',     '5555369', 'ND', 'Kabul'),
-  (117, 'Hays',       'Cami',     '5551352', 'SD', 'Lima'),
-  (118, 'Hefts',      'Thomas',   '5556872', 'MT', 'London'),
-  (119, 'Herskowitz', 'Robert',   '5558103', 'ME', 'Oslo');
-
-INSERT INTO YEAR VALUES (2012, 5000), (2013, 5000), (2014, 5500), (2015, 5000);
-
-INSERT INTO GIFT VALUES
-  (82,   2012, 117), (186,  2012, 119), (223,  2012, 114), (373,  2012, 101),
-  (543,  2012, 102), (582,  2012, 110), (666,  2012, 112), (838,  2012, 109),
-  (887,  2012, 111), (1185, 2012, 103),
-  (268,  2013, 116), (297,  2013, 110), (332,  2013, 111), (558,  2013, 115),
-  (667,  2013, 105), (674,  2013, 108), (772,  2013, 119), (899,  2013, 102),
-  (939,  2013, 101), (1362, 2013, 103),
-  (84,   2014, 110), (111,  2014, 102), (155,  2014, 108), (332,  2014, 107),
-  (345,  2014, 116), (499,  2014, 109), (560,  2014, 113), (835,  2014, 114),
-  (882,  2014, 111), (5208, 2014, 103),
-  (17,   2015, 118), (60,   2015, 106), (265,  2015, 116), (657,  2015, 117),
-  (812,  2015, 112), (823,  2015, 110), (1865, 2015, 103);
+INSERT INTO MEMBER VALUES
+  (201, 'Navarro', 'Lena', '5552101', 'NW', 'Cedar Bay'),
+  (202, 'Kim', 'Owen', '5552102', 'NW', 'Harborview'),
+  (203, 'Okafor', 'Amara', '5552103', 'SE', 'Pine Ridge'),
+  (204, 'Bennett', 'Theo', '5552104', 'SW', 'Mesa Vista'),
+  (205, 'Rossi', 'Maya', '5552105', 'NE', 'Brookfield'),
+  (206, 'Singh', 'Ravi', '5552106', 'MW', 'Lakehurst'),
+  (207, 'Alvarez', 'Lena', '5552107', 'SW', 'Redstone'),
+  (208, 'Chen', 'Eli', '5552108', 'NE', 'Fairview'),
+  (209, 'Morgan', 'Maya', '5552109', 'SE', 'Ashford'),
+  (210, 'Dubois', 'Noa', '5552110', 'MW', 'Glenhaven'),
+  (211, 'Patel', 'Imani', '5552111', 'NW', 'Cedar Bay'),
+  (212, 'Brooks', 'Eli', '5552112', 'NE', 'Westport');
+INSERT INTO CAMPAIGN VALUES
+  (2022, 1800), (2023, 2000), (2024, 2400), (2025, 2600);
+INSERT INTO PLEDGE VALUES
+  (120, 2022, 201), (275, 2022, 203), (450, 2022, 205),
+  (180, 2022, 206), (325, 2022, 208), (600, 2022, 210),
+  (200, 2023, 201), (150, 2023, 202), (500, 2023, 203),
+  (225, 2023, 207), (375, 2023, 209), (425, 2023, 211),
+  (240, 2024, 202), (700, 2024, 203), (310, 2024, 205),
+  (260, 2024, 206), (480, 2024, 208), (520, 2024, 210), (190, 2024, 212),
+  (300, 2025, 201), (650, 2025, 203), (420, 2025, 205), (390, 2025, 209);
 `;
 
-const EMP_DDL = `
-CREATE TABLE EMP (
-  EMPNO     INTEGER PRIMARY KEY,
-  EMPFNAME  VARCHAR(20),
-  EMPSALARY INTEGER,
-  DEPTNAME  VARCHAR(20),
-  BOSS      INTEGER,
-  CONSTRAINT emp_boss_fk FOREIGN KEY (BOSS) REFERENCES EMP (EMPNO)
+const STAFF_DDL = `
+CREATE TABLE STAFF (
+  STAFF_ID INTEGER PRIMARY KEY,
+  FIRST_NAME VARCHAR(20),
+  SALARY INTEGER,
+  TEAM VARCHAR(20),
+  MANAGER_ID INTEGER,
+  CONSTRAINT staff_manager_fk FOREIGN KEY (MANAGER_ID) REFERENCES STAFF (STAFF_ID)
 );
-
-INSERT INTO EMP VALUES
-  (1,  'Alice',  75000, 'Management', 1),
-  (2,  'Ned',    45000, 'Marketing',  1),
-  (3,  'Andrew', 25000, 'Marketing',  2),
-  (4,  'Clare',  22000, 'Marketing',  2),
-  (5,  'Todd',   38000, 'Accounting', 1),
-  (6,  'Nancy',  22000, 'Accounting', 5),
-  (7,  'Brier',  43000, 'Purchasing', 1),
-  (8,  'Sarah',  56000, 'Purchasing', 7),
-  (9,  'Sophie', 35000, 'Personnel',  1),
-  (10, 'Bryan',  42000, 'Personnel',  9),
-  (11, 'Chad',   32000, 'Personnel',  9);
+INSERT INTO STAFF VALUES
+  (1, 'Rowan', 82000, 'Leadership', 1), (2, 'Keira', 52000, 'Design', 1),
+  (3, 'Milo', 34000, 'Design', 2), (4, 'Talia', 38000, 'Design', 2),
+  (5, 'Jonah', 61000, 'Engineering', 1), (6, 'Priya', 47000, 'Engineering', 5),
+  (7, 'Felix', 73000, 'Engineering', 5), (8, 'Zuri', 49000, 'Operations', 1),
+  (9, 'Mateo', 36000, 'Operations', 8), (10, 'Hana', 44000, 'Support', 8),
+  (11, 'Iris', 32000, 'Support', 10);
 `;
 
-const SALES_DDL = `
-CREATE TABLE DEPT (
-  DNAME  VARCHAR(20) PRIMARY KEY,
-  DFLOOR INTEGER,
-  DPHONE CHAR(8)
+const MAKERSPACE_DDL = `
+CREATE TABLE AREA (
+  AREA_NAME VARCHAR(20) PRIMARY KEY,
+  FLOOR_NO INTEGER,
+  EXTENSION CHAR(8)
 );
-
-CREATE TABLE EMPLOYEE (
-  ENUM    INTEGER PRIMARY KEY,
-  ENAME   VARCHAR(20),
-  ESALARY INTEGER,
-  DNAME   VARCHAR(20),
-  BOSS    INTEGER,
-  CONSTRAINT emp_dept_fk FOREIGN KEY (DNAME) REFERENCES DEPT (DNAME),
-  CONSTRAINT emp_boss_fk FOREIGN KEY (BOSS) REFERENCES EMPLOYEE (ENUM)
+CREATE TABLE WORKER (
+  WORKER_ID INTEGER PRIMARY KEY,
+  WORKER_NAME VARCHAR(20),
+  WAGE INTEGER,
+  AREA_NAME VARCHAR(20),
+  SUPERVISOR_ID INTEGER,
+  CONSTRAINT worker_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME),
+  CONSTRAINT worker_supervisor_fk FOREIGN KEY (SUPERVISOR_ID) REFERENCES WORKER (WORKER_ID)
 );
-
-CREATE TABLE ITEM (
-  INAME  VARCHAR(30) PRIMARY KEY,
-  ITYPE  CHAR(1),
-  ICOLOR VARCHAR(10)
+CREATE TABLE MATERIAL (
+  MATERIAL_NAME VARCHAR(30) PRIMARY KEY,
+  MATERIAL_TYPE CHAR(1),
+  COLOR VARCHAR(10)
 );
-
-CREATE TABLE SALE (
-  SALENO  INTEGER PRIMARY KEY,
-  SALEQTY INTEGER,
-  INAME   VARCHAR(30),
-  DNAME   VARCHAR(20),
-  CONSTRAINT sale_item_fk FOREIGN KEY (INAME) REFERENCES ITEM (INAME),
-  CONSTRAINT sale_dept_fk FOREIGN KEY (DNAME) REFERENCES DEPT (DNAME)
+CREATE TABLE CHECKOUT (
+  CHECKOUT_ID INTEGER PRIMARY KEY,
+  QUANTITY INTEGER,
+  MATERIAL_NAME VARCHAR(30),
+  AREA_NAME VARCHAR(20),
+  CONSTRAINT checkout_material_fk FOREIGN KEY (MATERIAL_NAME) REFERENCES MATERIAL (MATERIAL_NAME),
+  CONSTRAINT checkout_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME)
 );
-
-CREATE TABLE SUPPLIER (
-  SUPNO INTEGER PRIMARY KEY,
-  SNAME VARCHAR(20)
+CREATE TABLE VENDOR (
+  VENDOR_ID INTEGER PRIMARY KEY,
+  VENDOR_NAME VARCHAR(20)
 );
-
-CREATE TABLE DELIVERY (
-  DELNO  INTEGER PRIMARY KEY,
-  DELQTY INTEGER,
-  INAME  VARCHAR(30),
-  DNAME  VARCHAR(20),
-  SUPNO  INTEGER,
-  CONSTRAINT del_item_fk FOREIGN KEY (INAME) REFERENCES ITEM (INAME),
-  CONSTRAINT del_dept_fk FOREIGN KEY (DNAME) REFERENCES DEPT (DNAME),
-  CONSTRAINT del_sup_fk FOREIGN KEY (SUPNO) REFERENCES SUPPLIER (SUPNO)
+CREATE TABLE RESTOCK (
+  RESTOCK_ID INTEGER PRIMARY KEY,
+  QUANTITY INTEGER,
+  MATERIAL_NAME VARCHAR(30),
+  AREA_NAME VARCHAR(20),
+  VENDOR_ID INTEGER,
+  CONSTRAINT restock_material_fk FOREIGN KEY (MATERIAL_NAME) REFERENCES MATERIAL (MATERIAL_NAME),
+  CONSTRAINT restock_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME),
+  CONSTRAINT restock_vendor_fk FOREIGN KEY (VENDOR_ID) REFERENCES VENDOR (VENDOR_ID)
 );
-
-INSERT INTO DEPT VALUES
-  ('Management', 5, '555-0100'),
-  ('Recreation', 2, '555-0110'),
-  ('Books',      1, '555-0120'),
-  ('Clothes',    2, '555-0130'),
-  ('Equipment',  3, '555-0140'),
-  ('Navigation', 1, '555-0150');
-
-INSERT INTO EMPLOYEE VALUES
-  (1, 'Alice', 75000, 'Management', 1),
-  (2, 'Ned',   45000, 'Recreation', 1),
-  (3, 'Andrew',25000, 'Books',      1),
-  (4, 'Clare', 22000, 'Clothes',    2),
-  (5, 'Todd',  38000, 'Navigation', 1),
-  (6, 'Nancy', 22000, 'Equipment',  5);
-
-INSERT INTO ITEM VALUES
-  ('Elephant polo stick',   'R', 'Brown'),
-  ('Slingshot',             'R', 'Brown'),
-  ('Safari chair',          'R', 'Khaki'),
-  ('Pocket knife',          'E', 'Brown'),
-  ('Tent',                  'E', 'Green'),
-  ('Boots',                 'C', 'Brown'),
-  ('Map case',              'N', 'Brown'),
-  ('Geo positioning system','N', 'Silver'),
-  ('Compass',               'N', 'Brown'),
-  ('Star chart',            'B', NULL);
-
-INSERT INTO SALE VALUES
-  (1001, 2, 'Elephant polo stick',    'Recreation'),
-  (1002, 1, 'Slingshot',              'Recreation'),
-  (1003, 4, 'Boots',                  'Clothes'),
-  (1004, 1, 'Map case',               'Navigation'),
-  (1005, 2, 'Pocket knife',           'Equipment'),
-  (1006, 1, 'Pocket knife',           'Recreation'),
-  (1007, 3, 'Tent',                   'Equipment'),
-  (1008, 1, 'Compass',                'Navigation'),
-  (1009, 2, 'Boots',                  'Recreation'),
-  (1010, 1, 'Geo positioning system', 'Navigation'),
-  (1011, 5, 'Slingshot',              'Recreation'),
-  (1012, 1, 'Safari chair',           'Recreation');
-
-INSERT INTO SUPPLIER VALUES
-  (101, 'Global Gear'),
-  (102, 'Outdoor Traders'),
-  (103, 'Nomad Supplies');
-
-INSERT INTO DELIVERY VALUES
-  (51, 10, 'Elephant polo stick',    'Recreation', 101),
-  (52, 5,  'Slingshot',              'Recreation', 102),
-  (53, 8,  'Boots',                  'Clothes',    103),
-  (54, 3,  'Map case',               'Navigation', 101),
-  (55, 6,  'Pocket knife',           'Equipment',  102),
-  (56, 4,  'Tent',                   'Equipment',  101),
-  (57, 2,  'Star chart',             'Books',      103),
-  (58, 3,  'Compass',                'Navigation', 102),
-  (59, 2,  'Geo positioning system', 'Navigation', 101),
-  (60, 5,  'Safari chair',           'Recreation', 103);
+INSERT INTO AREA VALUES
+  ('Administration', 4, '555-3100'), ('Textiles', 2, '555-3110'),
+  ('Woodshop', 1, '555-3120'), ('Ceramics', 1, '555-3130'),
+  ('Electronics', 3, '555-3140'), ('Print Lab', 2, '555-3150');
+INSERT INTO WORKER VALUES
+  (1, 'Sage', 78000, 'Administration', 1), (2, 'Niko', 51000, 'Textiles', 1),
+  (3, 'Ari', 46000, 'Woodshop', 1), (4, 'Leila', 44000, 'Ceramics', 2),
+  (5, 'Quinn', 56000, 'Electronics', 1), (6, 'Dara', 43000, 'Print Lab', 5);
+INSERT INTO MATERIAL VALUES
+  ('Cotton Thread', 'T', 'Blue'), ('Denim Roll', 'T', 'Blue'),
+  ('Canvas Sheet', 'T', 'Natural'), ('Maple Board', 'W', 'Tan'),
+  ('Clay Block', 'C', 'Gray'), ('Sensor Pack', 'E', 'Blue'),
+  ('Solder Wire', 'E', 'Silver'), ('Ink Set', 'P', NULL),
+  ('Screen Mesh', 'P', 'White'), ('Glaze Jar', 'C', 'Blue');
+INSERT INTO CHECKOUT VALUES
+  (3001, 3, 'Cotton Thread', 'Textiles'), (3002, 2, 'Denim Roll', 'Textiles'),
+  (3003, 5, 'Canvas Sheet', 'Textiles'), (3004, 4, 'Maple Board', 'Woodshop'),
+  (3005, 6, 'Clay Block', 'Ceramics'), (3006, 2, 'Sensor Pack', 'Electronics'),
+  (3007, 1, 'Solder Wire', 'Electronics'), (3008, 3, 'Ink Set', 'Print Lab'),
+  (3009, 2, 'Screen Mesh', 'Print Lab'), (3010, 4, 'Glaze Jar', 'Ceramics'),
+  (3011, 1, 'Denim Roll', 'Textiles'), (3012, 2, 'Cotton Thread', 'Textiles');
+INSERT INTO VENDOR VALUES
+  (401, 'Northline Supply'), (402, 'Craft Harbor'), (403, 'Circuit Foundry');
+INSERT INTO RESTOCK VALUES
+  (51, 20, 'Cotton Thread', 'Textiles', 401), (52, 12, 'Denim Roll', 'Textiles', 402),
+  (53, 16, 'Canvas Sheet', 'Textiles', 401), (54, 10, 'Maple Board', 'Woodshop', 402),
+  (55, 24, 'Clay Block', 'Ceramics', 401), (56, 15, 'Sensor Pack', 'Electronics', 403),
+  (57, 18, 'Solder Wire', 'Electronics', 403), (58, 10, 'Ink Set', 'Print Lab', 402),
+  (59, 14, 'Screen Mesh', 'Print Lab', 401), (60, 12, 'Glaze Jar', 'Ceramics', 402);
 `;
 
 export const PRELOADED_SCHEMAS: SchemaDef[] = [
   {
     id: 'university',
-    name: 'University (sandbox)',
-    description:
-      'Student, course, instructor and enrollment tables. A general sandbox with primary key–foreign key mates across four tables.',
+    name: 'University sandbox',
+    description: 'Student, course, instructor and enrollment tables for open-ended relational query practice.',
     ddl: UNIVERSITY_DDL,
     starterQuery:
       'SELECT s.name, c.title\nFROM student s\nJOIN enrollment e ON s.student_id = e.student_id\nJOIN course c ON e.course_id = c.course_id',
@@ -359,40 +270,35 @@ export const PRELOADED_SCHEMAS: SchemaDef[] = [
     },
   },
   {
-    id: 'shares',
-    name: 'SHARES (workbook 1)',
-    description:
-      'One table of ten stock holdings. The workbook uses it for basic queries: projection, WHERE, computed columns, LIKE and aggregates.',
-    ddl: SHARES_DDL,
-    starterQuery: 'SELECT SHRFIRM, SHRCODE FROM SHARES',
+    id: 'catalog',
+    name: 'Product catalog',
+    description: 'Ten fictional shop products for projection, filtering, computed columns, pattern matching and sorting.',
+    ddl: CATALOG_DDL,
+    starterQuery: 'SELECT ITEMNAME, ITEMCODE FROM PRODUCT',
   },
   {
-    id: 'donor',
-    name: 'DONOR (workbook 2)',
-    description:
-      'Donors, yearly goals and gifts. DONOR is the parent table; GIFT is the dependent table with two foreign keys. Donor 104 has never given (useful for outer joins).',
-    ddl: DONOR_DDL,
-    starterQuery: 'SELECT DLNAME, DFNAME, DSTATE FROM DONOR',
+    id: 'community',
+    name: 'Community campaigns',
+    description: 'Members, campaign targets and pledges. PLEDGE has a composite key and two foreign keys; one member has no pledge for outer-join practice.',
+    ddl: COMMUNITY_DDL,
+    starterQuery: 'SELECT LAST_NAME, FIRST_NAME, REGION FROM MEMBER',
   },
   {
-    id: 'sales',
-    name: 'SALES (workbook 3)',
-    description:
-      'Departments, employees, items, sales, deliveries and suppliers, built from the workbook ER diagram. Sample data sized so every workbook query has visible results.',
-    ddl: SALES_DDL,
-    starterQuery:
-      "SELECT INAME, ICOLOR FROM ITEM WHERE ICOLOR = 'Brown' AND ITYPE = 'R'",
+    id: 'makerspace',
+    name: 'Makerspace inventory',
+    description: 'Areas, workers, materials, checkouts, restocks and vendors for NULL checks and chained multi-table joins.',
+    ddl: MAKERSPACE_DDL,
+    starterQuery: "SELECT MATERIAL_NAME, COLOR FROM MATERIAL WHERE COLOR = 'Blue' AND MATERIAL_TYPE = 'T'",
   },
   {
-    id: 'emp',
-    name: 'EMP (workbook 4)',
-    description:
-      'A single employee table where BOSS is a foreign key back to EMPNO in the same table. Used for GROUP BY and HAVING practice.',
-    ddl: EMP_DDL,
-    starterQuery: 'SELECT DEPTNAME, AVG(EMPSALARY) FROM EMP GROUP BY DEPTNAME',
+    id: 'staff',
+    name: 'Staff hierarchy',
+    description: 'A fictional staff table where MANAGER_ID references STAFF_ID in the same relation. Used for GROUP BY, HAVING and self-joins.',
+    ddl: STAFF_DDL,
+    starterQuery: 'SELECT TEAM, AVG(SALARY) FROM STAFF GROUP BY TEAM',
   },
 ];
 
 export function schemaById(id: string): SchemaDef | undefined {
-  return PRELOADED_SCHEMAS.find((s) => s.id === id);
+  return PRELOADED_SCHEMAS.find((schema) => schema.id === id);
 }

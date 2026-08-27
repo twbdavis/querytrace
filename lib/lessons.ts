@@ -1,10 +1,5 @@
-/* Lessons follow the ISTM 315 sequence: DML SELECT basics (slideset 5), then
-   joins and outer joins (slideset 6), practicing on the workbook databases.
-   Every query uses only syntax taught in the course: SELECT / FROM / WHERE /
-   GROUP BY / HAVING / ORDER BY, comparison + AND/OR/NOT, LIKE, IN,
-   BETWEEN...AND, IS NULL, the five aggregates (COUNT/SUM/AVG/MIN/MAX),
-   field aliases with AS '...', table aliases without AS, JOIN ... ON and
-   LEFT OUTER JOIN. */
+/* The examples are original to QueryTrace. The sequence preserves the taught
+   progression from SELECT fundamentals through joins, sets and subqueries. */
 
 export interface Lesson {
   id: string;
@@ -20,217 +15,211 @@ export const LESSONS: Lesson[] = [
   {
     id: 'projection',
     section: 'Basic queries',
-    schemaId: 'shares',
+    schemaId: 'catalog',
     title: '1. SELECT ... FROM (projection)',
     concept:
-      'A query never changes the table; it projects columns out of it. Workbook: "List all share names and their codes." Watch the chosen columns light up while every row stays alive.',
-    query: 'SELECT SHRFIRM, SHRCODE FROM SHARES',
-    tryIt: 'List full details for all shares with SELECT * FROM SHARES.',
+      'A query does not change its source table; it projects selected columns into a result. Watch the chosen product columns light up while every row stays active.',
+    query: 'SELECT ITEMNAME, ITEMCODE FROM PRODUCT',
+    tryIt: 'Return every column and row with SELECT * FROM PRODUCT.',
   },
   {
     id: 'where',
     section: 'Basic queries',
-    schemaId: 'shares',
+    schemaId: 'catalog',
     title: '2. WHERE (filtering rows)',
     concept:
-      'WHERE tests every row against a condition; rows that fail visibly fade out. Workbook: "List full details for all shares with a price < $15."',
-    query: 'SELECT * FROM SHARES WHERE SHRPRICE < 15',
-    tryIt:
-      'Change it to the next exercise: name and price of all shares with a price of at least $10 (SHRPRICE >= 10).',
+      'WHERE tests each row against a condition. Rows that fail the test visibly fade out before projection occurs.',
+    query: 'SELECT * FROM PRODUCT WHERE UNITPRICE < 20',
+    tryIt: 'Return the name and price of products costing at least 25 with UNITPRICE >= 25.',
   },
   {
     id: 'boolean-logic',
     section: 'Basic queries',
-    schemaId: 'shares',
+    schemaId: 'catalog',
     title: '3. AND, OR, NOT + parentheses',
     concept:
-      'Boolean conditions combine with AND, OR and NOT. AND is evaluated before OR, just as multiplication precedes addition; parentheses explicitly change that order.',
+      'Boolean conditions combine with AND, OR and NOT. AND is evaluated before OR; parentheses make a different evaluation order explicit.',
     query:
-      "SELECT SHRCODE, SHRFIRM, SHRPRICE\nFROM SHARES\nWHERE (SHRPRICE < 15 OR SHRPE = 16) AND NOT SHRCODE = 'SLG'",
-    tryIt:
-      'Remove the parentheses and compare the surviving rows. The AND condition will then apply only to SHRPE = 16.',
+      "SELECT ITEMCODE, ITEMNAME, UNITPRICE\nFROM PRODUCT\nWHERE (UNITPRICE < 20 OR RATING = 5) AND NOT ITEMCODE = 'LMP'",
+    tryIt: 'Remove the parentheses and compare which products survive the filter.',
   },
   {
     id: 'computed',
     section: 'Basic queries',
-    schemaId: 'shares',
+    schemaId: 'catalog',
     title: '4. Computed columns + ORDER BY',
     concept:
-      "Workbook: \"List the name, share price, share quantity, and total value of shares held (number of shares times share price), sorting in descending order of total value.\" Note the course rule: a field alias cannot be referred to elsewhere in the query, so ORDER BY repeats the expression.",
+      'Expressions can compute result columns. This lesson calculates inventory value and sorts it high to low. A field alias cannot be reused elsewhere in the same query, so ORDER BY repeats the expression.',
     query:
-      "SELECT SHRFIRM, SHRPRICE, SHRQTY, SHRPRICE * SHRQTY AS 'Total Value'\nFROM SHARES\nORDER BY SHRPRICE * SHRQTY DESC",
-    tryIt:
-      'Find shares with a yield exceeding 5 percent: WHERE SHRDIV / SHRPRICE > 0.05.',
+      "SELECT ITEMNAME, UNITPRICE, STOCKQTY, UNITPRICE * STOCKQTY AS 'Inventory Value'\nFROM PRODUCT\nORDER BY UNITPRICE * STOCKQTY DESC",
+    tryIt: 'Compute a discounted price with UNITPRICE * (1 - DISCOUNTRATE).',
   },
   {
     id: 'like-in-between',
     section: 'Basic queries',
-    schemaId: 'shares',
+    schemaId: 'catalog',
     title: '5. LIKE, IN and BETWEEN',
     concept:
-      "LIKE matches patterns with % as the wildcard. Workbook: \"Find shares with a code starting with 'B'.\" IN tests membership in a list; BETWEEN ... AND is inclusive of the endpoints.",
-    query: "SELECT * FROM SHARES WHERE SHRCODE LIKE 'B%'",
+      "LIKE matches text patterns and % matches any sequence of characters. IN tests membership in a list; BETWEEN ... AND includes both endpoints.",
+    query: "SELECT * FROM PRODUCT WHERE ITEMCODE LIKE 'B%'",
     tryIt:
-      "Try SHRFIRM LIKE '%Gold%', then WHERE SHRPE BETWEEN 10 AND 13, then WHERE SHRCODE IN ('AR', 'SLG').",
+      "Try ITEMNAME LIKE '%Kit%', then RATING BETWEEN 3 AND 4, then ITEMCODE IN ('BAG', 'MUG').",
   },
   {
     id: 'distinct',
     section: 'Basic queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '6. DISTINCT (remove duplicate rows)',
     concept:
-      'DISTINCT removes duplicate result rows after projection. A distinct state can still trace back to every donor row that contributed that state.',
-    query: 'SELECT DISTINCT DSTATE FROM DONOR ORDER BY DSTATE',
+      'DISTINCT removes duplicate result rows after projection. Each unique region can still trace back to every member row that contributed it.',
+    query: 'SELECT DISTINCT REGION FROM MEMBER ORDER BY REGION',
     tryIt:
-      'Compare with SELECT DSTATE FROM DONOR ORDER BY DSTATE, then count unique gift donors with COUNT(DISTINCT DONORNO).',
+      'Compare with SELECT REGION FROM MEMBER ORDER BY REGION, then count participating members with COUNT(DISTINCT MEMBER_ID).',
   },
   {
     id: 'aliases-concat',
     section: 'Basic queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '7. Field aliases + CONCAT',
     concept:
-      "CONCAT joins text values and separators. AS gives the result column a readable field alias. Per the course rule, that alias cannot be reused elsewhere in the same query.",
-    query: "SELECT CONCAT(DLNAME, ', ', DFNAME) AS 'Donor Name' FROM DONOR",
+      'CONCAT joins text values and separators. AS gives the result column a readable field alias, which cannot be reused elsewhere in the same query.',
+    query: "SELECT CONCAT(LAST_NAME, ', ', FIRST_NAME) AS 'Member Name' FROM MEMBER",
     tryIt:
-      "Add the city: CONCAT(DLNAME, ', ', DFNAME, ' — ', DCITY). Keep the separator text inside quotes.",
+      "Add the city with CONCAT(LAST_NAME, ', ', FIRST_NAME, ' — ', CITY). Keep separator text inside quotes.",
   },
   {
     id: 'aggregates',
     section: 'Basic queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '8. Aggregates (scalar)',
     concept:
-      'A scalar aggregate collapses ALL surviving rows into one value: COUNT, SUM, AVG, MIN, MAX. Workbook: "How many donors are there in the donor table?"',
-    query: "SELECT COUNT(*) AS 'Number of Donors' FROM DONOR",
+      'A scalar aggregate collapses all surviving rows into one value. The five core aggregate functions are COUNT, SUM, AVG, MIN and MAX.',
+    query: "SELECT COUNT(*) AS 'Number of Members' FROM MEMBER",
     tryIt:
-      "Total amount donated in 2013: SELECT SUM(AMOUNT) FROM GIFT WHERE YEAR = 2013. Then the average donation BETWEEN 2012 AND 2014.",
+      'Find total pledges in 2024 with SELECT SUM(AMOUNT) FROM PLEDGE WHERE CAMPAIGN_YEAR = 2024.',
   },
   {
     id: 'is-null',
     section: 'Basic queries',
-    schemaId: 'sales',
+    schemaId: 'makerspace',
     title: '9. IS NULL (missing data)',
     concept:
-      'NULL is not zero and not an empty string—it is the absence of a value, and it needs IS NULL to test. Workbook: "List the items that have no color."',
-    query: 'SELECT INAME, ITYPE, ICOLOR FROM ITEM WHERE ICOLOR IS NULL',
-    tryIt:
-      'Try ICOLOR = NULL and compare: ordinary equality never evaluates an unknown NULL as true.',
+      'NULL is neither zero nor an empty string. It represents an absent value and must be tested with IS NULL.',
+    query: 'SELECT MATERIAL_NAME, MATERIAL_TYPE, COLOR FROM MATERIAL WHERE COLOR IS NULL',
+    tryIt: 'Try COLOR = NULL and compare: ordinary equality cannot make an unknown NULL value true.',
   },
   {
     id: 'group-by',
     section: 'Basic queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '10. GROUP BY (vector aggregate)',
     concept:
-      'GROUP BY buckets the surviving rows; each color is one bucket, and the aggregate is computed per group instead of once. Any SELECT column that is not aggregated must appear in the GROUP BY.',
-    query: 'SELECT DSTATE, COUNT(*) FROM DONOR GROUP BY DSTATE',
-    tryIt: 'Group gifts by year instead: SELECT YEAR, SUM(AMOUNT) FROM GIFT GROUP BY YEAR.',
+      'GROUP BY divides surviving rows into buckets and computes an aggregate for each bucket. Every selected nonaggregate column must appear in GROUP BY.',
+    query: 'SELECT REGION, COUNT(*) FROM MEMBER GROUP BY REGION',
+    tryIt:
+      'Group pledges by campaign instead: SELECT CAMPAIGN_YEAR, SUM(AMOUNT) FROM PLEDGE GROUP BY CAMPAIGN_YEAR.',
   },
   {
     id: 'having',
     section: 'Basic queries',
-    schemaId: 'emp',
+    schemaId: 'staff',
     title: '11. HAVING (filtering groups)',
     concept:
-      'HAVING is like a WHERE clause, but it operates on whole groups. WHERE cannot contain aggregates; HAVING can. Workbook (EMP): "List the departments with an average salary greater than $35,000."',
+      'HAVING filters whole groups after aggregation. WHERE cannot contain aggregate functions; HAVING can.',
     query:
-      "SELECT DEPTNAME, AVG(EMPSALARY) AS 'Average Salary'\nFROM EMP\nGROUP BY DEPTNAME\nHAVING AVG(EMPSALARY) > 35000",
+      "SELECT TEAM, AVG(SALARY) AS 'Average Salary'\nFROM STAFF\nGROUP BY TEAM\nHAVING AVG(SALARY) > 45000",
     tryIt:
-      'On the DONOR schema (load it from the Schema menu): states with more than one donor - GROUP BY DSTATE HAVING COUNT(*) > 1.',
+      'On Community campaigns, find regions with more than two members using GROUP BY REGION HAVING COUNT(*) > 2.',
   },
   {
     id: 'inner-join',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '12. Inner join (equijoin)',
     concept:
-      'JOIN ... ON matches rows where the foreign key of the dependent table equals the primary key of the parent table. Watch pulses travel the FK wire as each DONORNO finds its gifts. Donor 104 fades out: no gifts, no match.',
+      'JOIN ... ON matches the dependent table foreign key to its parent primary key. One member has no pledge and disappears because an inner join keeps only matches.',
     query:
-      'SELECT DLNAME, DFNAME, AMOUNT\nFROM DONOR JOIN GIFT ON DONOR.DONORNO = GIFT.DONORNO',
+      'SELECT LAST_NAME, FIRST_NAME, AMOUNT\nFROM MEMBER JOIN PLEDGE ON MEMBER.MEMBER_ID = PLEDGE.MEMBER_ID',
     tryIt:
-      'Use table aliases (no AS, and once assigned you must use them): FROM DONOR D JOIN GIFT G ON D.DONORNO = G.DONORNO.',
+      'Use table aliases without AS: FROM MEMBER M JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID.',
   },
   {
     id: 'comma-join',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '13. Inner join using WHERE',
     concept:
-      'The course also writes an inner join as comma-separated tables plus a WHERE match. Watch the Cartesian product form first; forgetting the matching WHERE condition leaves every possible pair.',
+      'An inner join can also use comma-separated tables plus a WHERE match. The Cartesian product forms first; omitting the matching condition leaves every possible pair.',
     query:
-      'SELECT D.DLNAME, G.AMOUNT\nFROM DONOR D, GIFT G\nWHERE D.DONORNO = G.DONORNO',
-    tryIt:
-      'Temporarily remove WHERE to see why the slides warn about accidental Cartesian products, then restore it.',
+      'SELECT M.LAST_NAME, P.AMOUNT\nFROM MEMBER M, PLEDGE P\nWHERE M.MEMBER_ID = P.MEMBER_ID',
+    tryIt: 'Temporarily remove WHERE to observe the accidental Cartesian product, then restore it.',
   },
   {
     id: 'left-outer-join',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '14. LEFT OUTER JOIN',
     concept:
-      'A LEFT OUTER JOIN keeps every row of the left table even without a match, padding the right side with NULLs (dashed border). Donor 104 (Berdahl) survives this time - with a NULL amount.',
+      'A LEFT OUTER JOIN retains every left-table row. An unmatched member survives with NULL values from PLEDGE, shown with a dashed border.',
     query:
-      'SELECT DLNAME, AMOUNT\nFROM DONOR LEFT OUTER JOIN GIFT ON DONOR.DONORNO = GIFT.DONORNO',
-    tryIt: 'Swap LEFT OUTER JOIN back to JOIN and compare: which donor disappears from the result?',
+      'SELECT LAST_NAME, AMOUNT\nFROM MEMBER LEFT OUTER JOIN PLEDGE ON MEMBER.MEMBER_ID = PLEDGE.MEMBER_ID',
+    tryIt: 'Change LEFT OUTER JOIN to JOIN and identify which member disappears.',
   },
   {
     id: 'join-group',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '15. Join + GROUP BY (full pipeline)',
     concept:
-      'Workbook: "Report the total donations in 2014 by state." The full pipeline runs in order: FROM/JOIN builds rows, WHERE filters them, GROUP BY buckets them, and ORDER BY sorts the result last.',
+      'The complete logical pipeline builds joined rows, filters one campaign, groups them by region, projects totals, and sorts the final result.',
     query:
-      "SELECT DSTATE, SUM(AMOUNT) AS 'Total 2014'\nFROM DONOR D JOIN GIFT G ON D.DONORNO = G.DONORNO\nWHERE G.YEAR = 2014\nGROUP BY DSTATE\nORDER BY SUM(AMOUNT) DESC",
-    tryIt:
-      '"List the total amount given by each person across all years, sorted by donor last name": group by the donor instead of the state.',
+      "SELECT REGION, SUM(AMOUNT) AS 'Total 2024'\nFROM MEMBER M JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID\nWHERE P.CAMPAIGN_YEAR = 2024\nGROUP BY REGION\nORDER BY SUM(AMOUNT) DESC",
+    tryIt: 'Group by each member instead of region to total their pledges across every campaign.',
   },
   {
     id: 'multi-join',
     section: 'Advanced queries',
-    schemaId: 'sales',
+    schemaId: 'makerspace',
     title: '16. Multi-table join',
     concept:
-      'Joins chain: each JOIN ... ON adds one more table to the pipeline. Workbook (SALES): "Find the name of brown items that have been sold by the recreation department."',
+      'Joins chain as each JOIN ... ON adds another relation. This query connects materials to checkouts and then to the area that used them.',
     query:
-      "SELECT I.INAME, S.SALEQTY\nFROM ITEM I JOIN SALE S ON I.INAME = S.INAME\nWHERE I.ICOLOR = 'Brown' AND S.DNAME = 'Recreation'",
+      "SELECT M.MATERIAL_NAME, C.QUANTITY, A.FLOOR_NO\nFROM MATERIAL M JOIN CHECKOUT C ON M.MATERIAL_NAME = C.MATERIAL_NAME\nJOIN AREA A ON C.AREA_NAME = A.AREA_NAME\nWHERE M.COLOR = 'Blue' AND A.AREA_NAME = 'Textiles'",
     tryIt:
-      '"Find the departments that have made at least four sales": GROUP BY S.DNAME HAVING COUNT(*) >= 4.',
+      'Find areas with at least four checkouts by grouping C.AREA_NAME and applying HAVING COUNT(*) >= 4.',
   },
   {
     id: 'self-join',
     section: 'Advanced queries',
-    schemaId: 'emp',
+    schemaId: 'staff',
     title: '17. Self-join (unary relationship)',
     concept:
-      'A self-join uses the same table in two roles. Table aliases distinguish the employee row (E) from its manager row (M); once assigned, those aliases must be used.',
+      'A self-join gives one physical table two roles. Aliases distinguish each staff row from its manager row and must be used after assignment.',
     query:
-      "SELECT E.EMPFNAME, M.EMPFNAME AS 'Manager'\nFROM EMP E JOIN EMP M ON E.BOSS = M.EMPNO",
-    tryIt:
-      "Limit the employees to Marketing with WHERE E.DEPTNAME = 'Marketing'.",
+      "SELECT S.FIRST_NAME, M.FIRST_NAME AS 'Manager'\nFROM STAFF S JOIN STAFF M ON S.MANAGER_ID = M.STAFF_ID",
+    tryIt: "Limit the staff rows to Design with WHERE S.TEAM = 'Design'.",
   },
   {
     id: 'union',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '18. UNION and UNION ALL',
     concept:
-      'UNION stacks compatible SELECT results and removes duplicates. UNION ALL keeps duplicates. Each branch must return the same number of compatible columns.',
-    query: "SELECT DLNAME AS 'Name' FROM DONOR\nUNION\nSELECT DFNAME FROM DONOR",
+      'UNION stacks compatible SELECT results and removes duplicates. UNION ALL retains duplicates. Every branch must return the same number of compatible columns.',
+    query: "SELECT LAST_NAME AS 'Name' FROM MEMBER\nUNION\nSELECT FIRST_NAME FROM MEMBER",
     tryIt:
-      'Change UNION to UNION ALL and compare the row count. Any final ORDER BY must use a column name from the first SELECT.',
+      'Change UNION to UNION ALL and compare the row count. A final ORDER BY must use a column name from the first SELECT.',
   },
   {
     id: 'subquery',
     section: 'Advanced queries',
-    schemaId: 'donor',
+    schemaId: 'community',
     title: '19. Subqueries',
     concept:
-      'An uncorrelated subquery runs once and supplies its result to the outer query. Here the inner SELECT finds the largest 2012 gift before the outer query finds that donor.',
+      'An uncorrelated subquery runs once and supplies its result to the outer query. The inner SELECT finds the largest 2022 pledge before the outer query identifies that member.',
     query:
-      'SELECT DLNAME, DFNAME\nFROM DONOR\nWHERE DONORNO = (SELECT DONORNO FROM GIFT WHERE YEAR = 2012 ORDER BY AMOUNT DESC LIMIT 1)',
+      'SELECT LAST_NAME, FIRST_NAME\nFROM MEMBER\nWHERE MEMBER_ID = (SELECT MEMBER_ID FROM PLEDGE WHERE CAMPAIGN_YEAR = 2022 ORDER BY AMOUNT DESC LIMIT 1)',
     tryIt:
-      'Find every donor who has given: WHERE DONORNO IN (SELECT DISTINCT DONORNO FROM GIFT).',
+      'Find every participating member with WHERE MEMBER_ID IN (SELECT DISTINCT MEMBER_ID FROM PLEDGE).',
   },
 ];

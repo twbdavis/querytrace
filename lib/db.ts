@@ -53,7 +53,7 @@ function validateCustomDdl(ddl: string): void {
 }
 
 /**
- * Slideset 4 uses the common AUTO_INCREMENT spelling. SQLite automatically
+ * The schema builder accepts the common AUTO_INCREMENT spelling. SQLite automatically
  * assigns an omitted INTEGER PRIMARY KEY, so removing that dialect keyword
  * preserves the taught behavior while keeping the student's DDL portable here.
  */
@@ -172,7 +172,7 @@ export function queryAll(db: Exec, sql: string): QueryResult {
 
 /**
  * Read table, column and key metadata straight out of SQLite, so any DDL a
- * user writes (slideset 4 syntax: PRIMARY KEY, CONSTRAINT ... FOREIGN KEY ...
+ * user writes (PRIMARY KEY, CONSTRAINT ... FOREIGN KEY ...
  * REFERENCES parent (column)) drives the canvas without a separate config.
  */
 export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEdgeDef[] } {

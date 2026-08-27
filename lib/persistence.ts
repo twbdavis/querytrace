@@ -6,7 +6,7 @@ const DATABASE_NAME = 'querytrace';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'app-state';
 const STATE_KEY = 'current';
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 
 export interface PersistedAppState {
   version: typeof STATE_VERSION;
@@ -56,8 +56,10 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
       request.onerror = () => reject(request.error);
     });
     if (!value || typeof value !== 'object') return null;
-    const saved = value as Partial<PersistedAppState>;
-    if (saved.version !== STATE_VERSION || typeof saved.lastSchemaId !== 'string') return null;
+    const saved = value as Omit<Partial<PersistedAppState>, 'version'> & { version?: number };
+    if ((saved.version !== 1 && saved.version !== STATE_VERSION) || typeof saved.lastSchemaId !== 'string') {
+      return null;
+    }
     const ranLessons = Object.fromEntries(
       Object.entries(saved.ranLessons ?? {}).filter(
         (entry): entry is [string, boolean] => typeof entry[1] === 'boolean'
@@ -67,12 +69,16 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
       saved.customSchema?.id === 'custom' && typeof saved.customSchema.ddl === 'string'
         ? saved.customSchema
         : undefined;
+    const currentCurriculum = saved.version === STATE_VERSION;
     return {
       version: STATE_VERSION,
-      lastSchemaId: saved.lastSchemaId,
+      lastSchemaId:
+        currentCurriculum || (saved.lastSchemaId === 'custom' && customSchema)
+          ? saved.lastSchemaId
+          : 'university',
       customSchema,
       customDatabase: normalizeBytes(saved.customDatabase),
-      ranLessons,
+      ranLessons: currentCurriculum ? ranLessons : {},
     };
   } catch {
     // Safari private mode and restrictive embedding policies can deny storage.

@@ -127,24 +127,24 @@ test('runs curriculum DISTINCT, UNION, and subquery lessons through the teaching
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await expect(page.getByText('0 / 19 run', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Run lesson: 6. DISTINCT (remove duplicate rows)' }).click();
-  await expect(page.getByRole('tab', { name: /SELECT DISTINCT .*DSTATE.* - 15 rows/ })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /SELECT DISTINCT .*REGION.* - 5 rows/ })).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await page.getByRole('button', { name: 'Run lesson: 18. UNION and UNION ALL' }).click();
-  const unionFinal = page.getByRole('tab', { name: /UNION - 36 final rows/ });
+  const unionFinal = page.getByRole('tab', { name: /UNION - 21 final rows/ });
   await expect(unionFinal).toBeVisible();
   await unionFinal.click();
-  await expect(page.getByText('36 rows', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('21 rows', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await page.getByRole('button', { name: 'Run lesson: 19. Subqueries' }).click();
   const subqueryFinal = page.getByRole('tab', { name: /SELECT .* 1 rows/ }).last();
   await expect(page.getByRole('tab', { name: /SUBQUERY 1 - 1 rows/ })).toBeVisible();
   await subqueryFinal.click();
-  await expect(page.getByRole('cell', { name: 'Beckman', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Dubois', exact: true })).toBeVisible();
 });
 
-test('enforces relational keys and course aggregate rules with actionable feedback', async ({
+test('enforces relational keys and aggregate rules with actionable feedback', async ({
   page,
   browserName,
 }) => {
@@ -182,7 +182,7 @@ test('enforces relational keys and course aggregate rules with actionable feedba
   await expect(page.getByTitle(/LABEL VARCHAR\(20\).*NOT NULL.*default 'New'/)).toBeVisible();
 
   const editor = page.locator('.cm-content');
-  await editor.fill('SELECT DLNAME, COUNT(*) FROM DONOR');
+  await editor.fill('SELECT LAST_NAME, COUNT(*) FROM MEMBER');
   await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
   await expect(
     page.getByText(/scalar aggregate cannot be selected with individual columns/i)
