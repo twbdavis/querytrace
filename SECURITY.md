@@ -10,7 +10,7 @@ chain, the browser execution context, and the build pipeline.
 
 ## Reporting a vulnerability
 
-Report suspected vulnerabilities to **thomas.davis@mcacom.com** (also published
+Report suspected vulnerabilities to **twbdavis@gmail.com** (also published
 at [`/.well-known/security.txt`](https://www.querytrace.net/.well-known/security.txt),
 per RFC 9116). Please include reproduction steps and the affected URL. You can
 expect an acknowledgement within 5 business days. Please do not open a public
@@ -69,3 +69,7 @@ treatment: *accept*):
 - Vulnerabilities requiring a compromised browser or machine
 - Content spoofed via a visitor's own devtools/local storage (affects only
   that visitor's sandboxed session)
+
+## AI disclosure
+
+This security policy was generated with AI assistance from OpenAI Codex (GPT-5).
