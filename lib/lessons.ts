@@ -1,9 +1,9 @@
-/* The examples are original to QueryTrace. The sequence preserves the taught
-   progression from SELECT fundamentals through joins, sets and subqueries. */
+/* QueryTrace lessons use original scenarios while retaining a standard path
+   from SELECT fundamentals through joins, set operations and subqueries. */
 
 export interface Lesson {
   id: string;
-  section: 'Basic queries' | 'Advanced queries';
+  section: 'Foundations' | 'Combining data';
   schemaId: string;
   title: string;
   concept: string;
@@ -14,212 +14,203 @@ export interface Lesson {
 export const LESSONS: Lesson[] = [
   {
     id: 'projection',
-    section: 'Basic queries',
-    schemaId: 'catalog',
-    title: '1. SELECT ... FROM (projection)',
+    section: 'Foundations',
+    schemaId: 'transit',
+    title: '1. Choose result columns',
     concept:
-      'A query does not change its source table; it projects selected columns into a result. Watch the chosen product columns light up while every row stays active.',
-    query: 'SELECT ITEMNAME, ITEMCODE FROM PRODUCT',
-    tryIt: 'Return every column and row with SELECT * FROM PRODUCT.',
+      'SELECT shapes a result without altering the source. Here every ferry route remains, but only its public name and short code appear.',
+    query: 'SELECT ROUTE_NAME, ROUTE_CODE FROM FERRY_ROUTE;',
+    tryIt: 'Use SELECT * to inspect every attribute recorded for each route.',
   },
   {
     id: 'where',
-    section: 'Basic queries',
-    schemaId: 'catalog',
-    title: '2. WHERE (filtering rows)',
+    section: 'Foundations',
+    schemaId: 'marine',
+    title: '2. Filter individual rows with WHERE',
     concept:
-      'WHERE tests each row against a condition. Rows that fail the test visibly fade out before projection occurs.',
-    query: 'SELECT * FROM PRODUCT WHERE UNITPRICE < 20',
-    tryIt: 'Return the name and price of products costing at least 25 with UNITPRICE >= 25.',
+      'WHERE evaluates a condition once per source row. Watch deeper reefs fade while the qualifying shallow-water records continue.',
+    query: 'SELECT REEF_NAME, DEPTH_M FROM REEF WHERE DEPTH_M <= 20;',
+    tryIt: "Return only eastern reefs by testing SECTOR = 'East'.",
   },
   {
     id: 'boolean-logic',
-    section: 'Basic queries',
-    schemaId: 'catalog',
-    title: '3. AND, OR, NOT + parentheses',
+    section: 'Foundations',
+    schemaId: 'transit',
+    title: '3. Combine conditions',
     concept:
-      'Boolean conditions combine with AND, OR and NOT. AND is evaluated before OR; parentheses make a different evaluation order explicit.',
+      'AND, OR and NOT build richer tests. AND binds before OR, while parentheses let you state a different order explicitly.',
     query:
-      "SELECT ITEMCODE, ITEMNAME, UNITPRICE\nFROM PRODUCT\nWHERE (UNITPRICE < 20 OR RATING = 5) AND NOT ITEMCODE = 'LMP'",
-    tryIt: 'Remove the parentheses and compare which products survive the filter.',
+      "SELECT ROUTE_CODE, ROUTE_NAME, FARE\nFROM FERRY_ROUTE\nWHERE (FARE < 9 OR NIGHT_SERVICE = 1) AND NOT TERMINAL_ZONE = 'West';",
+    tryIt: 'Remove the parentheses and compare the routes that remain.',
   },
   {
     id: 'computed',
-    section: 'Basic queries',
-    schemaId: 'catalog',
-    title: '4. Computed columns + ORDER BY',
+    section: 'Foundations',
+    schemaId: 'transit',
+    title: '4. Calculate and sort',
     concept:
-      'Expressions can compute result columns. This lesson calculates inventory value and sorts it high to low. A field alias cannot be reused elsewhere in the same query, so ORDER BY repeats the expression.',
+      'A SELECT expression can derive a value instead of copying a stored field. This estimate multiplies fare by scheduled trips, then ranks routes from highest to lowest.',
     query:
-      "SELECT ITEMNAME, UNITPRICE, STOCKQTY, UNITPRICE * STOCKQTY AS 'Inventory Value'\nFROM PRODUCT\nORDER BY UNITPRICE * STOCKQTY DESC",
-    tryIt: 'Compute a discounted price with UNITPRICE * (1 - DISCOUNTRATE).',
+      "SELECT ROUTE_NAME, FARE, SCHEDULED_TRIPS, FARE * SCHEDULED_TRIPS AS 'Daily Ticket Potential'\nFROM FERRY_ROUTE\nORDER BY FARE * SCHEDULED_TRIPS DESC;",
+    tryIt: 'Estimate trip-minutes with SCHEDULED_TRIPS * CROSSING_MIN and sort from low to high.',
   },
   {
     id: 'like-in-between',
-    section: 'Basic queries',
-    schemaId: 'catalog',
-    title: '5. LIKE, IN and BETWEEN',
+    section: 'Foundations',
+    schemaId: 'festival',
+    title: '5. Match patterns and ranges',
     concept:
-      "LIKE matches text patterns and % matches any sequence of characters. IN tests membership in a list; BETWEEN ... AND includes both endpoints.",
-    query: "SELECT * FROM PRODUCT WHERE ITEMCODE LIKE 'B%'",
+      'LIKE searches text patterns, IN compares against a list, and BETWEEN includes both boundary values.',
+    query: "SELECT FILM_TITLE, GENRE FROM SCREENING WHERE FILM_TITLE LIKE '%the%';",
     tryIt:
-      "Try ITEMNAME LIKE '%Kit%', then RATING BETWEEN 3 AND 4, then ITEMCODE IN ('BAG', 'MUG').",
+      "Try GENRE IN ('Comedy', 'Animation'), then find venues with CAPACITY BETWEEN 90 AND 150.",
   },
   {
     id: 'distinct',
-    section: 'Basic queries',
-    schemaId: 'community',
-    title: '6. DISTINCT (remove duplicate rows)',
+    section: 'Foundations',
+    schemaId: 'festival',
+    title: '6. Keep unique results with DISTINCT',
     concept:
-      'DISTINCT removes duplicate result rows after projection. Each unique region can still trace back to every member row that contributed it.',
-    query: 'SELECT DISTINCT REGION FROM MEMBER ORDER BY REGION',
-    tryIt:
-      'Compare with SELECT REGION FROM MEMBER ORDER BY REGION, then count participating members with COUNT(DISTINCT MEMBER_ID).',
+      'DISTINCT removes repeated projected rows. A pass type appears once in the result even when several attendees share it.',
+    query: 'SELECT DISTINCT PASS_TYPE FROM ATTENDEE ORDER BY PASS_TYPE;',
+    tryIt: 'Remove DISTINCT to see every contributing attendee row, then try SELECT DISTINCT CITY.',
   },
   {
     id: 'aliases-concat',
-    section: 'Basic queries',
-    schemaId: 'community',
-    title: '7. Field aliases + CONCAT',
+    section: 'Foundations',
+    schemaId: 'observatory',
+    title: '7. Label a combined text field',
     concept:
-      'CONCAT joins text values and separators. AS gives the result column a readable field alias, which cannot be reused elsewhere in the same query.',
-    query: "SELECT CONCAT(LAST_NAME, ', ', FIRST_NAME) AS 'Member Name' FROM MEMBER",
-    tryIt:
-      "Add the city with CONCAT(LAST_NAME, ', ', FIRST_NAME, ' — ', CITY). Keep separator text inside quotes.",
+      'CONCAT assembles text values and literal separators. AS gives the derived result column a useful heading.',
+    query: "SELECT CONCAT(GIVEN_NAME, ' ', FAMILY_NAME) AS 'Observer' FROM ASTRONOMER;",
+    tryIt: "Append the home city in parentheses by adding ' (', HOME_CITY, ')' to CONCAT.",
   },
   {
     id: 'aggregates',
-    section: 'Basic queries',
-    schemaId: 'community',
-    title: '8. Aggregates (scalar)',
+    section: 'Foundations',
+    schemaId: 'marine',
+    title: '8. Summarize a set of rows',
     concept:
-      'A scalar aggregate collapses all surviving rows into one value. The five core aggregate functions are COUNT, SUM, AVG, MIN and MAX.',
-    query: "SELECT COUNT(*) AS 'Number of Members' FROM MEMBER",
-    tryIt:
-      'Find total pledges in 2024 with SELECT SUM(AMOUNT) FROM PLEDGE WHERE CAMPAIGN_YEAR = 2024.',
+      'An aggregate turns many input rows into one summary value. Common choices include COUNT, SUM, AVG, MIN and MAX.',
+    query: "SELECT SUM(COUNT_SEEN) AS 'Animals Recorded' FROM SIGHTING;",
+    tryIt: 'Compare the shallowest and deepest reefs with MIN(DEPTH_M) and MAX(DEPTH_M).',
   },
   {
     id: 'is-null',
-    section: 'Basic queries',
-    schemaId: 'makerspace',
-    title: '9. IS NULL (missing data)',
+    section: 'Foundations',
+    schemaId: 'marine',
+    title: '9. Find missing values',
     concept:
-      'NULL is neither zero nor an empty string. It represents an absent value and must be tested with IS NULL.',
-    query: 'SELECT MATERIAL_NAME, MATERIAL_TYPE, COLOR FROM MATERIAL WHERE COLOR IS NULL',
-    tryIt: 'Try COLOR = NULL and compare: ordinary equality cannot make an unknown NULL value true.',
+      'NULL represents information that is absent, not zero or blank text. Use IS NULL because ordinary equality cannot make an unknown value true.',
+    query: 'SELECT SPECIES_CODE, COMMON_NAME FROM SPECIES WHERE TAG_COLOR IS NULL;',
+    tryIt: 'Switch to IS NOT NULL to list species with a recorded field-tag color.',
   },
   {
     id: 'group-by',
-    section: 'Basic queries',
-    schemaId: 'community',
-    title: '10. GROUP BY (vector aggregate)',
+    section: 'Foundations',
+    schemaId: 'festival',
+    title: '10. Aggregate within groups',
     concept:
-      'GROUP BY divides surviving rows into buckets and computes an aggregate for each bucket. Every selected nonaggregate column must appear in GROUP BY.',
-    query: 'SELECT REGION, COUNT(*) FROM MEMBER GROUP BY REGION',
-    tryIt:
-      'Group pledges by campaign instead: SELECT CAMPAIGN_YEAR, SUM(AMOUNT) FROM PLEDGE GROUP BY CAMPAIGN_YEAR.',
+      'GROUP BY divides rows into buckets before calculating. Every selected field that is not aggregated must name the bucket it describes.',
+    query: 'SELECT GENRE, COUNT(*) FROM SCREENING GROUP BY GENRE;',
+    tryIt: 'Group attendees by PASS_TYPE and count how many hold each kind of pass.',
   },
   {
     id: 'having',
-    section: 'Basic queries',
-    schemaId: 'staff',
-    title: '11. HAVING (filtering groups)',
+    section: 'Foundations',
+    schemaId: 'orchard',
+    title: '11. Filter completed groups with HAVING',
     concept:
-      'HAVING filters whole groups after aggregation. WHERE cannot contain aggregate functions; HAVING can.',
+      'WHERE filters source rows; HAVING filters group summaries. That is why aggregate conditions belong after GROUP BY.',
     query:
-      "SELECT TEAM, AVG(SALARY) AS 'Average Salary'\nFROM STAFF\nGROUP BY TEAM\nHAVING AVG(SALARY) > 45000",
-    tryIt:
-      'On Community campaigns, find regions with more than two members using GROUP BY REGION HAVING COUNT(*) > 2.',
+      "SELECT ZONE, AVG(TREE_COUNT) AS 'Average Trees'\nFROM ORCHARD_PLOT\nGROUP BY ZONE\nHAVING AVG(TREE_COUNT) > 110;",
+    tryIt: 'Find zones represented by at least three plots using HAVING COUNT(*) >= 3.',
   },
   {
     id: 'inner-join',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '12. Inner join (equijoin)',
+    section: 'Combining data',
+    schemaId: 'festival',
+    title: '12. Match related rows with JOIN',
     concept:
-      'JOIN ... ON matches the dependent table foreign key to its parent primary key. One member has no pledge and disappears because an inner join keeps only matches.',
+      'JOIN ... ON pairs rows whose key values match. Attendees without a reservation are absent because an inner join retains matched pairs only.',
     query:
-      'SELECT LAST_NAME, FIRST_NAME, AMOUNT\nFROM MEMBER JOIN PLEDGE ON MEMBER.MEMBER_ID = PLEDGE.MEMBER_ID',
-    tryIt:
-      'Use table aliases without AS: FROM MEMBER M JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID.',
+      'SELECT A.FAMILY_NAME, R.SCREENING_ID, R.SEATS\nFROM ATTENDEE A JOIN RESERVATION R ON A.ATTENDEE_ID = R.ATTENDEE_ID;',
+    tryIt: 'Join SCREENING to RESERVATION instead and return each film title with its reserved seats.',
   },
   {
     id: 'comma-join',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '13. Inner join using WHERE',
+    section: 'Combining data',
+    schemaId: 'observatory',
+    title: '13. Match tables through WHERE',
     concept:
-      'An inner join can also use comma-separated tables plus a WHERE match. The Cartesian product forms first; omitting the matching condition leaves every possible pair.',
+      'Comma-separated tables begin as every possible row pairing. A WHERE condition narrows that Cartesian product to the genuinely related records.',
     query:
-      'SELECT M.LAST_NAME, P.AMOUNT\nFROM MEMBER M, PLEDGE P\nWHERE M.MEMBER_ID = P.MEMBER_ID',
-    tryIt: 'Temporarily remove WHERE to observe the accidental Cartesian product, then restore it.',
+      'SELECT T.TELESCOPE_NAME, O.OBSERVED_ON\nFROM TELESCOPE T, OBSERVATION O\nWHERE T.TELESCOPE_ID = O.TELESCOPE_ID;',
+    tryIt: 'Remove WHERE briefly to compare the number of possible pairs with the actual observations.',
   },
   {
     id: 'left-outer-join',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '14. LEFT OUTER JOIN',
+    section: 'Combining data',
+    schemaId: 'festival',
+    title: '14. Preserve unmatched rows',
     concept:
-      'A LEFT OUTER JOIN retains every left-table row. An unmatched member survives with NULL values from PLEDGE, shown with a dashed border.',
+      'LEFT OUTER JOIN keeps every row from its left side. An attendee with no booking remains visible and receives NULL values from RESERVATION.',
     query:
-      'SELECT LAST_NAME, AMOUNT\nFROM MEMBER LEFT OUTER JOIN PLEDGE ON MEMBER.MEMBER_ID = PLEDGE.MEMBER_ID',
-    tryIt: 'Change LEFT OUTER JOIN to JOIN and identify which member disappears.',
+      'SELECT A.GIVEN_NAME, A.FAMILY_NAME, R.SCREENING_ID\nFROM ATTENDEE A LEFT OUTER JOIN RESERVATION R ON A.ATTENDEE_ID = R.ATTENDEE_ID;',
+    tryIt: 'Change LEFT OUTER JOIN to JOIN and identify the attendee who disappears.',
   },
   {
     id: 'join-group',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '15. Join + GROUP BY (full pipeline)',
+    section: 'Combining data',
+    schemaId: 'festival',
+    title: '15. Trace a complete query pipeline',
     concept:
-      'The complete logical pipeline builds joined rows, filters one campaign, groups them by region, projects totals, and sorts the final result.',
+      'This query links three tables, keeps Saturday screenings, totals reserved seats by venue, and orders the finished summaries.',
     query:
-      "SELECT REGION, SUM(AMOUNT) AS 'Total 2024'\nFROM MEMBER M JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID\nWHERE P.CAMPAIGN_YEAR = 2024\nGROUP BY REGION\nORDER BY SUM(AMOUNT) DESC",
-    tryIt: 'Group by each member instead of region to total their pledges across every campaign.',
+      "SELECT V.VENUE_NAME, SUM(R.SEATS) AS 'Saturday Seats'\nFROM VENUE V JOIN SCREENING S ON V.VENUE_ID = S.VENUE_ID\nJOIN RESERVATION R ON S.SCREENING_ID = R.SCREENING_ID\nWHERE S.SCREENING_DAY = 'Saturday'\nGROUP BY V.VENUE_NAME\nORDER BY SUM(R.SEATS) DESC;",
+    tryIt: 'Group by S.GENRE instead to compare Saturday demand by film genre.',
   },
   {
     id: 'multi-join',
-    section: 'Advanced queries',
-    schemaId: 'makerspace',
-    title: '16. Multi-table join',
+    section: 'Combining data',
+    schemaId: 'marine',
+    title: '16. Chain multiple relationships',
     concept:
-      'Joins chain as each JOIN ... ON adds another relation. This query connects materials to checkouts and then to the area that used them.',
+      'Each JOIN adds another relationship. The chain connects a recorded sighting to both the observed species and the reef where it occurred.',
     query:
-      "SELECT M.MATERIAL_NAME, C.QUANTITY, A.FLOOR_NO\nFROM MATERIAL M JOIN CHECKOUT C ON M.MATERIAL_NAME = C.MATERIAL_NAME\nJOIN AREA A ON C.AREA_NAME = A.AREA_NAME\nWHERE M.COLOR = 'Blue' AND A.AREA_NAME = 'Textiles'",
-    tryIt:
-      'Find areas with at least four checkouts by grouping C.AREA_NAME and applying HAVING COUNT(*) >= 4.',
+      "SELECT S.COMMON_NAME, G.COUNT_SEEN, R.REEF_NAME\nFROM SPECIES S JOIN SIGHTING G ON S.SPECIES_CODE = G.SPECIES_CODE\nJOIN REEF R ON G.REEF_ID = R.REEF_ID\nWHERE S.SPECIES_GROUP = 'Fish' AND R.SECTOR = 'North';",
+    tryIt: 'Add DIVER and include D.DIVER_NAME by joining G.DIVER_ID to D.DIVER_ID.',
   },
   {
     id: 'self-join',
-    section: 'Advanced queries',
-    schemaId: 'staff',
-    title: '17. Self-join (unary relationship)',
+    section: 'Combining data',
+    schemaId: 'orchard',
+    title: '17. Give one table two roles',
     concept:
-      'A self-join gives one physical table two roles. Aliases distinguish each staff row from its manager row and must be used after assignment.',
+      'A self-join treats one physical table as two logical roles. Aliases separate an individual growing plot from its parent orchard block.',
     query:
-      "SELECT S.FIRST_NAME, M.FIRST_NAME AS 'Manager'\nFROM STAFF S JOIN STAFF M ON S.MANAGER_ID = M.STAFF_ID",
-    tryIt: "Limit the staff rows to Design with WHERE S.TEAM = 'Design'.",
+      "SELECT P.PLOT_NAME, B.PLOT_NAME AS 'Parent Block'\nFROM ORCHARD_PLOT P JOIN ORCHARD_PLOT B ON P.PARENT_PLOT_ID = B.PLOT_ID;",
+    tryIt: "Add WHERE P.ZONE = 'South' to focus on one part of the orchard.",
   },
   {
     id: 'union',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '18. UNION and UNION ALL',
+    section: 'Combining data',
+    schemaId: 'festival',
+    title: '18. Stack compatible results',
     concept:
-      'UNION stacks compatible SELECT results and removes duplicates. UNION ALL retains duplicates. Every branch must return the same number of compatible columns.',
-    query: "SELECT LAST_NAME AS 'Name' FROM MEMBER\nUNION\nSELECT FIRST_NAME FROM MEMBER",
-    tryIt:
-      'Change UNION to UNION ALL and compare the row count. A final ORDER BY must use a column name from the first SELECT.',
+      'UNION combines same-shaped SELECT results and removes duplicates. UNION ALL keeps repeats, which is useful when their frequency matters.',
+    query: "SELECT CITY AS 'Festival City' FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;",
+    tryIt: 'Change UNION to UNION ALL and compare the result count. Both branches must return the same number of fields.',
   },
   {
     id: 'subquery',
-    section: 'Advanced queries',
-    schemaId: 'community',
-    title: '19. Subqueries',
+    section: 'Combining data',
+    schemaId: 'transit',
+    title: '19. Feed one query into another',
     concept:
-      'An uncorrelated subquery runs once and supplies its result to the outer query. The inner SELECT finds the largest 2022 pledge before the outer query identifies that member.',
+      'An uncorrelated subquery runs once and passes its result outward. The inner query calculates the average fare; the outer query finds routes below it.',
     query:
-      'SELECT LAST_NAME, FIRST_NAME\nFROM MEMBER\nWHERE MEMBER_ID = (SELECT MEMBER_ID FROM PLEDGE WHERE CAMPAIGN_YEAR = 2022 ORDER BY AMOUNT DESC LIMIT 1)',
-    tryIt:
-      'Find every participating member with WHERE MEMBER_ID IN (SELECT DISTINCT MEMBER_ID FROM PLEDGE).',
+      'SELECT ROUTE_CODE, ROUTE_NAME, FARE\nFROM FERRY_ROUTE\nWHERE FARE < (SELECT AVG(FARE) FROM FERRY_ROUTE)\nORDER BY FARE;',
+    tryIt: 'Replace AVG with MAX, then explain why almost every route qualifies.',
   },
 ];

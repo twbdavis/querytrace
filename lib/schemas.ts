@@ -1,6 +1,5 @@
-/* Original teaching datasets designed for QueryTrace. They cover the same
-   relational patterns and SQL operations as the lesson sequence without
-   reproducing any external course examples or answer data. */
+/* Fictional datasets created for QueryTrace. Each domain demonstrates reusable
+   relational patterns without mirroring the entities or records of a workbook. */
 
 export interface ColumnMeta {
   name: string;
@@ -33,269 +32,286 @@ export interface SchemaDef {
   positions?: Record<string, { x: number; y: number }>;
 }
 
-const UNIVERSITY_DDL = `
-CREATE TABLE student (
-  student_id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  major TEXT NOT NULL,
-  gpa REAL NOT NULL,
-  year INTEGER NOT NULL
+const OBSERVATORY_DDL = `
+CREATE TABLE ASTRONOMER (
+  ASTRONOMER_ID INTEGER PRIMARY KEY,
+  GIVEN_NAME VARCHAR(20) NOT NULL,
+  FAMILY_NAME VARCHAR(20) NOT NULL,
+  HOME_CITY VARCHAR(30) NOT NULL
 );
-CREATE TABLE instructor (
-  instructor_id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  department TEXT NOT NULL
+CREATE TABLE TELESCOPE (
+  TELESCOPE_ID CHAR(3) PRIMARY KEY,
+  TELESCOPE_NAME VARCHAR(30) NOT NULL,
+  LOCATION VARCHAR(30) NOT NULL,
+  APERTURE_CM INTEGER NOT NULL
 );
-CREATE TABLE course (
-  course_id INTEGER PRIMARY KEY,
-  title TEXT NOT NULL,
-  department TEXT NOT NULL,
-  credits INTEGER NOT NULL,
-  instructor_id INTEGER NOT NULL,
-  CONSTRAINT course_fk FOREIGN KEY (instructor_id) REFERENCES instructor (instructor_id)
+CREATE TABLE TARGET (
+  TARGET_ID INTEGER PRIMARY KEY,
+  TARGET_NAME VARCHAR(30) NOT NULL,
+  CONSTELLATION VARCHAR(20) NOT NULL,
+  TARGET_TYPE VARCHAR(20) NOT NULL
 );
-CREATE TABLE enrollment (
-  enrollment_id INTEGER PRIMARY KEY,
-  student_id INTEGER NOT NULL,
-  course_id INTEGER NOT NULL,
-  grade TEXT NOT NULL,
-  semester TEXT NOT NULL,
-  CONSTRAINT enroll_student_fk FOREIGN KEY (student_id) REFERENCES student (student_id),
-  CONSTRAINT enroll_course_fk FOREIGN KEY (course_id) REFERENCES course (course_id)
+CREATE TABLE OBSERVATION (
+  OBSERVATION_ID INTEGER PRIMARY KEY,
+  ASTRONOMER_ID INTEGER NOT NULL,
+  TELESCOPE_ID CHAR(3) NOT NULL,
+  TARGET_ID INTEGER NOT NULL,
+  OBSERVED_ON CHAR(10) NOT NULL,
+  EXPOSURE_MIN INTEGER NOT NULL,
+  CONSTRAINT observation_astronomer_fk FOREIGN KEY (ASTRONOMER_ID)
+    REFERENCES ASTRONOMER (ASTRONOMER_ID),
+  CONSTRAINT observation_telescope_fk FOREIGN KEY (TELESCOPE_ID)
+    REFERENCES TELESCOPE (TELESCOPE_ID),
+  CONSTRAINT observation_target_fk FOREIGN KEY (TARGET_ID)
+    REFERENCES TARGET (TARGET_ID)
 );
-INSERT INTO student VALUES
-  (1, 'Ava Chen', 'CS', 3.9, 3), (2, 'Marcus Webb', 'CS', 3.2, 2),
-  (3, 'Priya Patel', 'CS', 3.7, 4), (4, 'Jordan Lee', 'CS', 2.8, 1),
-  (5, 'Sofia Reyes', 'Math', 3.6, 3), (6, 'Ethan Brooks', 'Math', 3.1, 2),
-  (7, 'Lily Zhang', 'Math', 3.8, 4), (8, 'Noah Kim', 'Physics', 2.9, 1),
-  (9, 'Emma Davis', 'Physics', 3.5, 3), (10, 'Omar Hassan', 'Biology', 3.4, 2),
-  (11, 'Grace Miller', 'Biology', 3.95, 4), (12, 'Leo Martin', 'Art', 2.5, 1);
-INSERT INTO instructor VALUES
-  (1, 'Dr. Susan Hale', 'Computer Science'), (2, 'Dr. Raj Mehta', 'Mathematics'),
-  (3, 'Dr. Elena Petrov', 'Physics'), (4, 'Dr. James Okafor', 'Biology'),
-  (5, 'Dr. Marie Dubois', 'Fine Arts');
-INSERT INTO course VALUES
-  (1, 'Intro to Programming', 'Computer Science', 4, 1),
-  (2, 'Data Structures', 'Computer Science', 4, 1),
-  (3, 'Calculus I', 'Mathematics', 4, 2), (4, 'Linear Algebra', 'Mathematics', 3, 2),
-  (5, 'Mechanics', 'Physics', 4, 3), (6, 'Genetics', 'Biology', 3, 4),
-  (7, 'Quantum Physics', 'Physics', 3, 3), (8, 'Watercolor Studio', 'Fine Arts', 2, 5);
-INSERT INTO enrollment VALUES
-  (1, 1, 1, 'A', 'Fall 2025'), (2, 1, 2, 'A-', 'Fall 2025'),
-  (3, 1, 3, 'B+', 'Spring 2026'), (4, 2, 1, 'B', 'Fall 2025'),
-  (5, 2, 2, 'C+', 'Spring 2026'), (6, 3, 2, 'A', 'Fall 2025'),
-  (7, 3, 4, 'B+', 'Spring 2026'), (8, 4, 1, 'C', 'Fall 2025'),
-  (9, 5, 3, 'A', 'Fall 2025'), (10, 5, 4, 'A-', 'Spring 2026'),
-  (11, 6, 3, 'B', 'Fall 2025'), (12, 6, 1, 'B-', 'Spring 2026'),
-  (13, 7, 4, 'A', 'Fall 2025'), (14, 7, 3, 'A-', 'Spring 2026'),
-  (15, 8, 5, 'B', 'Fall 2025'), (16, 9, 5, 'A', 'Fall 2025'),
-  (17, 9, 6, 'B+', 'Spring 2026'), (18, 10, 6, 'A', 'Fall 2025'),
-  (19, 10, 5, 'C+', 'Spring 2026'), (20, 4, 6, 'D', 'Spring 2026');
+INSERT INTO ASTRONOMER VALUES
+  (1, 'Mina', 'Solberg', 'Flagstaff'), (2, 'Caleb', 'Nwosu', 'Tucson'),
+  (3, 'Yara', 'Ito', 'Albuquerque'), (4, 'Jonas', 'Vale', 'Flagstaff'),
+  (5, 'Esme', 'Rios', 'Santa Fe'), (6, 'Dev', 'Banerjee', 'Tucson');
+INSERT INTO TELESCOPE VALUES
+  ('ARC', 'Archer Reflector', 'Juniper Mesa', 180),
+  ('DUN', 'Dunewatch Array', 'Red Basin', 95),
+  ('LUX', 'Lux Survey Scope', 'North Ridge', 240),
+  ('OWL', 'Owl Creek Radio Dish', 'Owl Creek', 320);
+INSERT INTO TARGET VALUES
+  (101, 'Blue Lantern Nebula', 'Cygnus', 'Nebula'),
+  (102, 'Kepler-186', 'Cygnus', 'Star'),
+  (103, 'Whirlpool Galaxy', 'Canes Venatici', 'Galaxy'),
+  (104, 'Vesta', 'Virgo', 'Asteroid'),
+  (105, 'Pleiades', 'Taurus', 'Star Cluster'),
+  (106, 'Ring Nebula', 'Lyra', 'Nebula'),
+  (107, 'Andromeda Galaxy', 'Andromeda', 'Galaxy');
+INSERT INTO OBSERVATION VALUES
+  (5001, 1, 'ARC', 101, '2026-03-12', 42),
+  (5002, 2, 'DUN', 104, '2026-03-14', 18),
+  (5003, 3, 'LUX', 103, '2026-03-18', 65),
+  (5004, 4, 'OWL', 102, '2026-03-21', 30),
+  (5005, 5, 'ARC', 106, '2026-04-02', 50),
+  (5006, 6, 'LUX', 107, '2026-04-05', 80),
+  (5007, 1, 'DUN', 105, '2026-04-11', 24),
+  (5008, 3, 'OWL', 101, '2026-04-18', 36),
+  (5009, 5, 'LUX', 105, '2026-05-03', 28),
+  (5010, 2, 'ARC', 103, '2026-05-09', 55);
 `;
 
-const CATALOG_DDL = `
-CREATE TABLE PRODUCT (
-  ITEMCODE CHAR(3) PRIMARY KEY,
-  ITEMNAME VARCHAR(30) NOT NULL,
-  UNITPRICE DECIMAL(8,2),
-  STOCKQTY INTEGER,
-  DISCOUNTRATE DECIMAL(5,2),
-  RATING INTEGER
+const TRANSIT_DDL = `
+CREATE TABLE FERRY_ROUTE (
+  ROUTE_CODE CHAR(3) PRIMARY KEY,
+  ROUTE_NAME VARCHAR(30) NOT NULL,
+  TERMINAL_ZONE VARCHAR(20) NOT NULL,
+  FARE DECIMAL(6,2) NOT NULL,
+  SCHEDULED_TRIPS INTEGER NOT NULL,
+  CROSSING_MIN INTEGER NOT NULL,
+  NIGHT_SERVICE INTEGER NOT NULL
 );
-INSERT INTO PRODUCT VALUES
-  ('BAG', 'Canvas Tote', 18.50, 48, 0.10, 4),
-  ('BOT', 'Glass Bottle', 12.00, 120, 0.05, 3),
-  ('BRU', 'Bamboo Brush', 9.75, 75, 0.00, 4),
-  ('CND', 'Cedar Candle', 24.00, 36, 0.15, 5),
-  ('DSK', 'Desk Organizer', 32.50, 28, 0.10, 4),
-  ('JRN', 'Linen Journal', 16.25, 64, 0.05, 5),
-  ('KIT', 'Repair Kit', 45.00, 18, 0.20, 5),
-  ('LMP', 'Reading Lamp', 54.00, 22, 0.10, 5),
-  ('MUG', 'Stoneware Mug', 14.50, 90, 0.05, 4),
-  ('PLN', 'Weekly Planner', 21.00, 55, 0.00, 3);
+INSERT INTO FERRY_ROUTE VALUES
+  ('B01', 'Bay Loop', 'Central', 8.50, 14, 32, 0),
+  ('C07', 'Crescent Point', 'East', 12.00, 9, 48, 0),
+  ('H22', 'Harbor Link', 'Central', 6.75, 18, 24, 1),
+  ('I04', 'Island Express', 'Offshore', 15.50, 8, 58, 0),
+  ('L11', 'Lighthouse Run', 'North', 11.25, 10, 44, 1),
+  ('M01', 'Marsh Shuttle', 'South', 5.50, 12, 19, 0),
+  ('N08', 'North Sound', 'North', 9.75, 16, 37, 1),
+  ('P15', 'Peninsula Ferry', 'West', 13.25, 7, 52, 0),
+  ('R03', 'River Market', 'Central', 4.25, 20, 16, 1),
+  ('S19', 'Sunset Harbor', 'West', 10.50, 11, 41, 1);
 `;
 
-const COMMUNITY_DDL = `
-CREATE TABLE MEMBER (
-  MEMBER_ID INTEGER PRIMARY KEY,
-  LAST_NAME VARCHAR(20),
-  FIRST_NAME VARCHAR(20),
-  PHONE CHAR(7),
-  REGION CHAR(2),
-  CITY VARCHAR(20)
+const FESTIVAL_DDL = `
+CREATE TABLE ATTENDEE (
+  ATTENDEE_ID INTEGER PRIMARY KEY,
+  FAMILY_NAME VARCHAR(20) NOT NULL,
+  GIVEN_NAME VARCHAR(20) NOT NULL,
+  PASS_TYPE VARCHAR(15) NOT NULL,
+  CITY VARCHAR(25) NOT NULL,
+  FAVORITE_GENRE VARCHAR(20) NOT NULL
 );
-CREATE TABLE CAMPAIGN (
-  CAMPAIGN_YEAR INTEGER PRIMARY KEY,
-  TARGET INTEGER
+CREATE TABLE VENUE (
+  VENUE_ID INTEGER PRIMARY KEY,
+  VENUE_NAME VARCHAR(30) NOT NULL,
+  CITY VARCHAR(25) NOT NULL,
+  CAPACITY INTEGER NOT NULL
 );
-CREATE TABLE PLEDGE (
-  AMOUNT DECIMAL(8,2),
-  CAMPAIGN_YEAR INTEGER NOT NULL,
-  MEMBER_ID INTEGER NOT NULL,
-  PRIMARY KEY (CAMPAIGN_YEAR, MEMBER_ID),
-  CONSTRAINT pledge_campaign_fk FOREIGN KEY (CAMPAIGN_YEAR)
-    REFERENCES CAMPAIGN (CAMPAIGN_YEAR) ON DELETE CASCADE,
-  CONSTRAINT pledge_member_fk FOREIGN KEY (MEMBER_ID)
-    REFERENCES MEMBER (MEMBER_ID) ON DELETE CASCADE
+CREATE TABLE SCREENING (
+  SCREENING_ID INTEGER PRIMARY KEY,
+  FILM_TITLE VARCHAR(40) NOT NULL,
+  VENUE_ID INTEGER NOT NULL,
+  SCREENING_DAY VARCHAR(10) NOT NULL,
+  GENRE VARCHAR(20) NOT NULL,
+  CONSTRAINT screening_venue_fk FOREIGN KEY (VENUE_ID) REFERENCES VENUE (VENUE_ID)
 );
-INSERT INTO MEMBER VALUES
-  (201, 'Navarro', 'Lena', '5552101', 'NW', 'Cedar Bay'),
-  (202, 'Kim', 'Owen', '5552102', 'NW', 'Harborview'),
-  (203, 'Okafor', 'Amara', '5552103', 'SE', 'Pine Ridge'),
-  (204, 'Bennett', 'Theo', '5552104', 'SW', 'Mesa Vista'),
-  (205, 'Rossi', 'Maya', '5552105', 'NE', 'Brookfield'),
-  (206, 'Singh', 'Ravi', '5552106', 'MW', 'Lakehurst'),
-  (207, 'Alvarez', 'Lena', '5552107', 'SW', 'Redstone'),
-  (208, 'Chen', 'Eli', '5552108', 'NE', 'Fairview'),
-  (209, 'Morgan', 'Maya', '5552109', 'SE', 'Ashford'),
-  (210, 'Dubois', 'Noa', '5552110', 'MW', 'Glenhaven'),
-  (211, 'Patel', 'Imani', '5552111', 'NW', 'Cedar Bay'),
-  (212, 'Brooks', 'Eli', '5552112', 'NE', 'Westport');
-INSERT INTO CAMPAIGN VALUES
-  (2022, 1800), (2023, 2000), (2024, 2400), (2025, 2600);
-INSERT INTO PLEDGE VALUES
-  (120, 2022, 201), (275, 2022, 203), (450, 2022, 205),
-  (180, 2022, 206), (325, 2022, 208), (600, 2022, 210),
-  (200, 2023, 201), (150, 2023, 202), (500, 2023, 203),
-  (225, 2023, 207), (375, 2023, 209), (425, 2023, 211),
-  (240, 2024, 202), (700, 2024, 203), (310, 2024, 205),
-  (260, 2024, 206), (480, 2024, 208), (520, 2024, 210), (190, 2024, 212),
-  (300, 2025, 201), (650, 2025, 203), (420, 2025, 205), (390, 2025, 209);
+CREATE TABLE RESERVATION (
+  ATTENDEE_ID INTEGER NOT NULL,
+  SCREENING_ID INTEGER NOT NULL,
+  SEATS INTEGER NOT NULL,
+  STATUS VARCHAR(12) NOT NULL,
+  PRIMARY KEY (ATTENDEE_ID, SCREENING_ID),
+  CONSTRAINT reservation_attendee_fk FOREIGN KEY (ATTENDEE_ID)
+    REFERENCES ATTENDEE (ATTENDEE_ID) ON DELETE CASCADE,
+  CONSTRAINT reservation_screening_fk FOREIGN KEY (SCREENING_ID)
+    REFERENCES SCREENING (SCREENING_ID) ON DELETE CASCADE
+);
+INSERT INTO ATTENDEE VALUES
+  (301, 'Adebayo', 'Nia', 'Weekend', 'Juniper Bay', 'Documentary'),
+  (302, 'Berg', 'Oskar', 'Day', 'Marrow Glen', 'Comedy'),
+  (303, 'Costa', 'Ines', 'All Access', 'Juniper Bay', 'Drama'),
+  (304, 'Dlamini', 'Thabo', 'Student', 'Pine Harbor', 'Animation'),
+  (305, 'El-Amin', 'Sara', 'Weekend', 'Stonebridge', 'Documentary'),
+  (306, 'Fischer', 'Luca', 'Day', 'Marrow Glen', 'Thriller'),
+  (307, 'Gupta', 'Mira', 'All Access', 'Lake Arden', 'Drama'),
+  (308, 'Haddad', 'Rami', 'Student', 'Pine Harbor', 'Comedy'),
+  (309, 'Ibarra', 'Sol', 'Weekend', 'Juniper Bay', 'Animation'),
+  (310, 'Jensen', 'Freya', 'Day', 'Stonebridge', 'Documentary'),
+  (311, 'Kwon', 'Jae', 'All Access', 'Lake Arden', 'Thriller'),
+  (312, 'Lopes', 'Tomas', 'Student', 'Maple Cross', 'Drama');
+INSERT INTO VENUE VALUES
+  (41, 'Beacon Theater', 'Juniper Bay', 180),
+  (42, 'Foundry Hall', 'Stonebridge', 120),
+  (43, 'Orchard Cinema', 'Pine Harbor', 95),
+  (44, 'Riverside Screen', 'Lake Arden', 150),
+  (45, 'Maple Microcinema', 'Maple Cross', 60);
+INSERT INTO SCREENING VALUES
+  (701, 'Paper Moons', 41, 'Friday', 'Drama'),
+  (702, 'The Last Pollinator', 42, 'Friday', 'Documentary'),
+  (703, 'Signal from the Attic', 43, 'Saturday', 'Thriller'),
+  (704, 'Kite City', 44, 'Saturday', 'Animation'),
+  (705, 'Second Breakfast', 45, 'Sunday', 'Comedy'),
+  (706, 'Tide Atlas', 41, 'Saturday', 'Documentary');
+INSERT INTO RESERVATION VALUES
+  (301, 701, 2, 'Confirmed'), (301, 706, 1, 'Confirmed'),
+  (302, 702, 1, 'Confirmed'), (302, 705, 2, 'Waitlist'),
+  (303, 701, 1, 'Confirmed'), (303, 703, 2, 'Confirmed'), (303, 706, 1, 'Confirmed'),
+  (304, 704, 1, 'Confirmed'), (304, 705, 1, 'Confirmed'),
+  (305, 702, 2, 'Confirmed'), (305, 706, 2, 'Confirmed'),
+  (306, 703, 1, 'Confirmed'), (306, 705, 1, 'Confirmed'),
+  (307, 701, 2, 'Confirmed'), (307, 704, 1, 'Confirmed'), (307, 706, 2, 'Confirmed'),
+  (308, 703, 1, 'Waitlist'), (309, 704, 2, 'Confirmed'),
+  (309, 705, 1, 'Confirmed'), (310, 702, 1, 'Confirmed'),
+  (310, 706, 1, 'Confirmed'), (311, 703, 2, 'Confirmed'), (311, 704, 1, 'Confirmed');
 `;
 
-const STAFF_DDL = `
-CREATE TABLE STAFF (
-  STAFF_ID INTEGER PRIMARY KEY,
-  FIRST_NAME VARCHAR(20),
-  SALARY INTEGER,
-  TEAM VARCHAR(20),
-  MANAGER_ID INTEGER,
-  CONSTRAINT staff_manager_fk FOREIGN KEY (MANAGER_ID) REFERENCES STAFF (STAFF_ID)
+const ORCHARD_DDL = `
+CREATE TABLE ORCHARD_PLOT (
+  PLOT_ID CHAR(2) PRIMARY KEY,
+  PLOT_NAME VARCHAR(30) NOT NULL,
+  ZONE VARCHAR(12) NOT NULL,
+  TREE_COUNT INTEGER NOT NULL,
+  PARENT_PLOT_ID CHAR(2) NOT NULL,
+  CONSTRAINT plot_parent_fk FOREIGN KEY (PARENT_PLOT_ID) REFERENCES ORCHARD_PLOT (PLOT_ID)
 );
-INSERT INTO STAFF VALUES
-  (1, 'Rowan', 82000, 'Leadership', 1), (2, 'Keira', 52000, 'Design', 1),
-  (3, 'Milo', 34000, 'Design', 2), (4, 'Talia', 38000, 'Design', 2),
-  (5, 'Jonah', 61000, 'Engineering', 1), (6, 'Priya', 47000, 'Engineering', 5),
-  (7, 'Felix', 73000, 'Engineering', 5), (8, 'Zuri', 49000, 'Operations', 1),
-  (9, 'Mateo', 36000, 'Operations', 8), (10, 'Hana', 44000, 'Support', 8),
-  (11, 'Iris', 32000, 'Support', 10);
+INSERT INTO ORCHARD_PLOT VALUES
+  ('A0', 'North Orchard', 'North', 240, 'A0'),
+  ('A1', 'Apricot Lane', 'North', 62, 'A0'),
+  ('A2', 'Pear Terrace', 'North', 78, 'A0'),
+  ('B0', 'River Orchard', 'South', 210, 'B0'),
+  ('B1', 'Plum Bend', 'South', 55, 'B0'),
+  ('B2', 'Cherry Bank', 'South', 88, 'B0'),
+  ('C0', 'Hill Orchard', 'East', 170, 'C0'),
+  ('C1', 'Fig Rise', 'East', 41, 'C0'),
+  ('C2', 'Apple Crest', 'East', 96, 'C0'),
+  ('D0', 'Propagation Yard', 'West', 45, 'D0');
 `;
 
-const MAKERSPACE_DDL = `
-CREATE TABLE AREA (
-  AREA_NAME VARCHAR(20) PRIMARY KEY,
-  FLOOR_NO INTEGER,
-  EXTENSION CHAR(8)
+const MARINE_DDL = `
+CREATE TABLE REEF (
+  REEF_ID CHAR(3) PRIMARY KEY,
+  REEF_NAME VARCHAR(30) NOT NULL,
+  DEPTH_M INTEGER NOT NULL,
+  SECTOR VARCHAR(12) NOT NULL
 );
-CREATE TABLE WORKER (
-  WORKER_ID INTEGER PRIMARY KEY,
-  WORKER_NAME VARCHAR(20),
-  WAGE INTEGER,
-  AREA_NAME VARCHAR(20),
-  SUPERVISOR_ID INTEGER,
-  CONSTRAINT worker_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME),
-  CONSTRAINT worker_supervisor_fk FOREIGN KEY (SUPERVISOR_ID) REFERENCES WORKER (WORKER_ID)
+CREATE TABLE DIVER (
+  DIVER_ID INTEGER PRIMARY KEY,
+  DIVER_NAME VARCHAR(25) NOT NULL,
+  CERT_LEVEL VARCHAR(15) NOT NULL
 );
-CREATE TABLE MATERIAL (
-  MATERIAL_NAME VARCHAR(30) PRIMARY KEY,
-  MATERIAL_TYPE CHAR(1),
-  COLOR VARCHAR(10)
+CREATE TABLE SPECIES (
+  SPECIES_CODE CHAR(4) PRIMARY KEY,
+  COMMON_NAME VARCHAR(30) NOT NULL,
+  SPECIES_GROUP VARCHAR(15) NOT NULL,
+  TAG_COLOR VARCHAR(12)
 );
-CREATE TABLE CHECKOUT (
-  CHECKOUT_ID INTEGER PRIMARY KEY,
-  QUANTITY INTEGER,
-  MATERIAL_NAME VARCHAR(30),
-  AREA_NAME VARCHAR(20),
-  CONSTRAINT checkout_material_fk FOREIGN KEY (MATERIAL_NAME) REFERENCES MATERIAL (MATERIAL_NAME),
-  CONSTRAINT checkout_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME)
+CREATE TABLE SIGHTING (
+  SIGHTING_ID INTEGER PRIMARY KEY,
+  COUNT_SEEN INTEGER NOT NULL,
+  SPECIES_CODE CHAR(4) NOT NULL,
+  REEF_ID CHAR(3) NOT NULL,
+  DIVER_ID INTEGER NOT NULL,
+  CONSTRAINT sighting_species_fk FOREIGN KEY (SPECIES_CODE) REFERENCES SPECIES (SPECIES_CODE),
+  CONSTRAINT sighting_reef_fk FOREIGN KEY (REEF_ID) REFERENCES REEF (REEF_ID),
+  CONSTRAINT sighting_diver_fk FOREIGN KEY (DIVER_ID) REFERENCES DIVER (DIVER_ID)
 );
-CREATE TABLE VENDOR (
-  VENDOR_ID INTEGER PRIMARY KEY,
-  VENDOR_NAME VARCHAR(20)
-);
-CREATE TABLE RESTOCK (
-  RESTOCK_ID INTEGER PRIMARY KEY,
-  QUANTITY INTEGER,
-  MATERIAL_NAME VARCHAR(30),
-  AREA_NAME VARCHAR(20),
-  VENDOR_ID INTEGER,
-  CONSTRAINT restock_material_fk FOREIGN KEY (MATERIAL_NAME) REFERENCES MATERIAL (MATERIAL_NAME),
-  CONSTRAINT restock_area_fk FOREIGN KEY (AREA_NAME) REFERENCES AREA (AREA_NAME),
-  CONSTRAINT restock_vendor_fk FOREIGN KEY (VENDOR_ID) REFERENCES VENDOR (VENDOR_ID)
-);
-INSERT INTO AREA VALUES
-  ('Administration', 4, '555-3100'), ('Textiles', 2, '555-3110'),
-  ('Woodshop', 1, '555-3120'), ('Ceramics', 1, '555-3130'),
-  ('Electronics', 3, '555-3140'), ('Print Lab', 2, '555-3150');
-INSERT INTO WORKER VALUES
-  (1, 'Sage', 78000, 'Administration', 1), (2, 'Niko', 51000, 'Textiles', 1),
-  (3, 'Ari', 46000, 'Woodshop', 1), (4, 'Leila', 44000, 'Ceramics', 2),
-  (5, 'Quinn', 56000, 'Electronics', 1), (6, 'Dara', 43000, 'Print Lab', 5);
-INSERT INTO MATERIAL VALUES
-  ('Cotton Thread', 'T', 'Blue'), ('Denim Roll', 'T', 'Blue'),
-  ('Canvas Sheet', 'T', 'Natural'), ('Maple Board', 'W', 'Tan'),
-  ('Clay Block', 'C', 'Gray'), ('Sensor Pack', 'E', 'Blue'),
-  ('Solder Wire', 'E', 'Silver'), ('Ink Set', 'P', NULL),
-  ('Screen Mesh', 'P', 'White'), ('Glaze Jar', 'C', 'Blue');
-INSERT INTO CHECKOUT VALUES
-  (3001, 3, 'Cotton Thread', 'Textiles'), (3002, 2, 'Denim Roll', 'Textiles'),
-  (3003, 5, 'Canvas Sheet', 'Textiles'), (3004, 4, 'Maple Board', 'Woodshop'),
-  (3005, 6, 'Clay Block', 'Ceramics'), (3006, 2, 'Sensor Pack', 'Electronics'),
-  (3007, 1, 'Solder Wire', 'Electronics'), (3008, 3, 'Ink Set', 'Print Lab'),
-  (3009, 2, 'Screen Mesh', 'Print Lab'), (3010, 4, 'Glaze Jar', 'Ceramics'),
-  (3011, 1, 'Denim Roll', 'Textiles'), (3012, 2, 'Cotton Thread', 'Textiles');
-INSERT INTO VENDOR VALUES
-  (401, 'Northline Supply'), (402, 'Craft Harbor'), (403, 'Circuit Foundry');
-INSERT INTO RESTOCK VALUES
-  (51, 20, 'Cotton Thread', 'Textiles', 401), (52, 12, 'Denim Roll', 'Textiles', 402),
-  (53, 16, 'Canvas Sheet', 'Textiles', 401), (54, 10, 'Maple Board', 'Woodshop', 402),
-  (55, 24, 'Clay Block', 'Ceramics', 401), (56, 15, 'Sensor Pack', 'Electronics', 403),
-  (57, 18, 'Solder Wire', 'Electronics', 403), (58, 10, 'Ink Set', 'Print Lab', 402),
-  (59, 14, 'Screen Mesh', 'Print Lab', 401), (60, 12, 'Glaze Jar', 'Ceramics', 402);
+INSERT INTO REEF VALUES
+  ('BLU', 'Bluebell Shelf', 18, 'North'), ('COR', 'Cormorant Ledge', 27, 'West'),
+  ('GLS', 'Glass Kelp Garden', 12, 'North'), ('MNR', 'Moonrise Reef', 34, 'East'),
+  ('SAN', 'Sandbar Nursery', 9, 'South'), ('TWN', 'Twin Arch', 22, 'East');
+INSERT INTO DIVER VALUES
+  (21, 'Ayla Moss', 'Research'), (22, 'Ben Okoro', 'Advanced'),
+  (23, 'Chiyo Lane', 'Research'), (24, 'Diego Park', 'Rescue'),
+  (25, 'Eleni Shah', 'Advanced'), (26, 'Finn Zhao', 'Research');
+INSERT INTO SPECIES VALUES
+  ('ANEM', 'Sunburst Anemone', 'Invertebrate', 'Orange'),
+  ('BTRF', 'Reef Butterflyfish', 'Fish', 'Yellow'),
+  ('EEL1', 'Ribbon Eel', 'Fish', NULL),
+  ('KELP', 'Giant Kelp', 'Plant', 'Green'),
+  ('MANT', 'Manta Ray', 'Fish', 'Blue'),
+  ('OCTO', 'Day Octopus', 'Invertebrate', NULL),
+  ('PAR1', 'Bumphead Parrotfish', 'Fish', 'Teal'),
+  ('STAR', 'Crown Star', 'Invertebrate', 'Purple'),
+  ('TURT', 'Green Sea Turtle', 'Reptile', 'Silver'),
+  ('WRAS', 'Cleaner Wrasse', 'Fish', 'Blue');
+INSERT INTO SIGHTING VALUES
+  (9001, 6, 'BTRF', 'BLU', 21), (9002, 1, 'EEL1', 'COR', 22),
+  (9003, 14, 'KELP', 'GLS', 23), (9004, 2, 'MANT', 'MNR', 24),
+  (9005, 3, 'OCTO', 'TWN', 25), (9006, 8, 'PAR1', 'BLU', 26),
+  (9007, 5, 'STAR', 'SAN', 21), (9008, 2, 'TURT', 'TWN', 22),
+  (9009, 11, 'WRAS', 'GLS', 23), (9010, 4, 'ANEM', 'COR', 24),
+  (9011, 7, 'BTRF', 'GLS', 25), (9012, 1, 'MANT', 'BLU', 26),
+  (9013, 9, 'PAR1', 'MNR', 21), (9014, 3, 'TURT', 'SAN', 22);
 `;
 
 export const PRELOADED_SCHEMAS: SchemaDef[] = [
   {
-    id: 'university',
-    name: 'University sandbox',
-    description: 'Student, course, instructor and enrollment tables for open-ended relational query practice.',
-    ddl: UNIVERSITY_DDL,
+    id: 'observatory',
+    name: 'Night observatory',
+    description: 'Astronomers, telescopes, sky targets and observation logs for open-ended relational practice.',
+    ddl: OBSERVATORY_DDL,
     starterQuery:
-      'SELECT s.name, c.title\nFROM student s\nJOIN enrollment e ON s.student_id = e.student_id\nJOIN course c ON e.course_id = c.course_id',
+      'SELECT A.GIVEN_NAME, T.TARGET_NAME, O.EXPOSURE_MIN\nFROM ASTRONOMER A\nJOIN OBSERVATION O ON A.ASTRONOMER_ID = O.ASTRONOMER_ID\nJOIN TARGET T ON O.TARGET_ID = T.TARGET_ID;',
     positions: {
-      student: { x: 0, y: 60 },
-      enrollment: { x: 560, y: 320 },
-      course: { x: 1200, y: 60 },
-      instructor: { x: 1860, y: 340 },
+      ASTRONOMER: { x: 0, y: 40 },
+      OBSERVATION: { x: 620, y: 300 },
+      TARGET: { x: 1240, y: 20 },
+      TELESCOPE: { x: 1240, y: 620 },
     },
   },
   {
-    id: 'catalog',
-    name: 'Product catalog',
-    description: 'Ten fictional shop products for projection, filtering, computed columns, pattern matching and sorting.',
-    ddl: CATALOG_DDL,
-    starterQuery: 'SELECT ITEMNAME, ITEMCODE FROM PRODUCT',
+    id: 'transit',
+    name: 'Harbor ferry routes',
+    description: 'Ten fictional ferry routes for selecting, filtering, calculating, matching patterns and sorting.',
+    ddl: TRANSIT_DDL,
+    starterQuery: 'SELECT ROUTE_NAME, ROUTE_CODE FROM FERRY_ROUTE;',
   },
   {
-    id: 'community',
-    name: 'Community campaigns',
-    description: 'Members, campaign targets and pledges. PLEDGE has a composite key and two foreign keys; one member has no pledge for outer-join practice.',
-    ddl: COMMUNITY_DDL,
-    starterQuery: 'SELECT LAST_NAME, FIRST_NAME, REGION FROM MEMBER',
+    id: 'festival',
+    name: 'Independent film festival',
+    description: 'Attendees reserve screenings at several venues; one attendee has not booked anything yet.',
+    ddl: FESTIVAL_DDL,
+    starterQuery: 'SELECT FILM_TITLE, SCREENING_DAY, GENRE FROM SCREENING;',
   },
   {
-    id: 'makerspace',
-    name: 'Makerspace inventory',
-    description: 'Areas, workers, materials, checkouts, restocks and vendors for NULL checks and chained multi-table joins.',
-    ddl: MAKERSPACE_DDL,
-    starterQuery: "SELECT MATERIAL_NAME, COLOR FROM MATERIAL WHERE COLOR = 'Blue' AND MATERIAL_TYPE = 'T'",
+    id: 'marine',
+    name: 'Coastal research survey',
+    description: 'Divers record species sightings across reefs, including species whose field-tag color is unknown.',
+    ddl: MARINE_DDL,
+    starterQuery: "SELECT COMMON_NAME, TAG_COLOR FROM SPECIES WHERE SPECIES_GROUP = 'Fish';",
   },
   {
-    id: 'staff',
-    name: 'Staff hierarchy',
-    description: 'A fictional staff table where MANAGER_ID references STAFF_ID in the same relation. Used for GROUP BY, HAVING and self-joins.',
-    ddl: STAFF_DDL,
-    starterQuery: 'SELECT TEAM, AVG(SALARY) FROM STAFF GROUP BY TEAM',
+    id: 'orchard',
+    name: 'Orchard plot map',
+    description: 'Growing plots belong to larger parent blocks, creating a self-referencing hierarchy.',
+    ddl: ORCHARD_DDL,
+    starterQuery: 'SELECT ZONE, AVG(TREE_COUNT) FROM ORCHARD_PLOT GROUP BY ZONE;',
   },
 ];
 

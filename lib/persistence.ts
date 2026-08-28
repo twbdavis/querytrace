@@ -6,7 +6,7 @@ const DATABASE_NAME = 'querytrace';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'app-state';
 const STATE_KEY = 'current';
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 
 export interface PersistedAppState {
   version: typeof STATE_VERSION;
@@ -57,7 +57,7 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
     });
     if (!value || typeof value !== 'object') return null;
     const saved = value as Omit<Partial<PersistedAppState>, 'version'> & { version?: number };
-    if ((saved.version !== 1 && saved.version !== STATE_VERSION) || typeof saved.lastSchemaId !== 'string') {
+    if (![1, 2, STATE_VERSION].includes(saved.version ?? -1) || typeof saved.lastSchemaId !== 'string') {
       return null;
     }
     const ranLessons = Object.fromEntries(
@@ -75,7 +75,7 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
       lastSchemaId:
         currentCurriculum || (saved.lastSchemaId === 'custom' && customSchema)
           ? saved.lastSchemaId
-          : 'university',
+          : 'observatory',
       customSchema,
       customDatabase: normalizeBytes(saved.customDatabase),
       ranLessons: currentCurriculum ? ranLessons : {},

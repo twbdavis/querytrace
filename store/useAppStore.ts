@@ -153,7 +153,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         schema,
         fkEdges,
         tableData,
-        sql: def.starterQuery || `SELECT * FROM ${schema[0].name}`,
+        sql: def.starterQuery || `SELECT * FROM ${schema[0].name};`,
         trace: null,
         tracedSql: null,
         currentStep: 0,

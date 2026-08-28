@@ -11,7 +11,7 @@ interface LessonsModalProps {
   onClose: () => void;
 }
 
-const SECTIONS: Lesson['section'][] = ['Basic queries', 'Advanced queries'];
+const SECTIONS: Lesson['section'][] = ['Foundations', 'Combining data'];
 
 export function LessonsModal({ open, onClose }: LessonsModalProps) {
   const setSql = useAppStore((s) => s.setSql);

@@ -42,11 +42,11 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
   expect(wasm.headers()['cache-control']).toContain('max-age=31536000');
   expect(wasm.headers()['cache-control']).toContain('immutable');
 
-  await editor.fill('SELECT name FROM student WHERE gpa >= 3.7');
+  await editor.fill("SELECT GIVEN_NAME FROM ASTRONOMER WHERE HOME_CITY = 'Tucson'");
   await editor.click();
   await page.keyboard.press('Control+Enter');
   await expect(page.locator('.queryExecHighlight')).toBeVisible();
-  await expect(page.getByText('4 rows', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('2 rows', { exact: true }).first()).toBeVisible();
 
   if ((page.viewportSize()?.width ?? 0) < 640) {
     // The mobile sheet is deliberately not tabbed: the active query clause
@@ -57,7 +57,7 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
 
   // Editing invalidates the old teaching trace immediately; otherwise the
   // visible SQL could disagree with rows still advancing from a prior query.
-  await editor.fill('SELECT name FROM student');
+  await editor.fill('SELECT GIVEN_NAME FROM ASTRONOMER');
   await expect(page.getByRole('tablist', { name: 'Execution stages' })).toBeHidden();
   await expect(page.getByText(/Rows will fill in here stage by stage/)).toBeVisible();
 
@@ -80,28 +80,28 @@ test('restores custom SQLite data and lesson progress from IndexedDB', async ({ 
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await page
-    .getByRole('button', { name: 'Run lesson: 1. SELECT ... FROM (projection)' })
+    .getByRole('button', { name: 'Run lesson: 1. Choose result columns' })
     .click();
   await expect(page.getByText('10 rows', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`
-    CREATE TABLE SAVED_CLASS (
-      STUDENT_ID INTEGER PRIMARY KEY,
-      STUDENT_NAME VARCHAR(40) NOT NULL
+    CREATE TABLE SAVED_GARDEN (
+      BED_ID INTEGER PRIMARY KEY,
+      HERB_NAME VARCHAR(40) NOT NULL
     );
-    INSERT INTO SAVED_CLASS VALUES (1, 'Ada'), (2, 'Grace');
+    INSERT INTO SAVED_GARDEN VALUES (1, 'Sage'), (2, 'Thyme');
   `);
   await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
-  await expect(page.getByTestId('rf__node-SAVED_CLASS')).toBeVisible();
+  await expect(page.getByTestId('rf__node-SAVED_GARDEN')).toBeVisible();
 
   await page.reload();
-  await expect(page.getByTestId('rf__node-SAVED_CLASS')).toBeVisible();
+  await expect(page.getByTestId('rf__node-SAVED_GARDEN')).toBeVisible();
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await expect(page.getByText('1 / 19 run', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Close lessons' }).click();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
-  await expect(page.getByLabel('Schema definition SQL')).toContainText('CREATE TABLE SAVED_CLASS');
+  await expect(page.getByLabel('Schema definition SQL')).toContainText('CREATE TABLE SAVED_GARDEN');
 });
 
 test('rejects executable custom-schema operations outside the safe subset', async ({
@@ -126,22 +126,103 @@ test('runs curriculum DISTINCT, UNION, and subquery lessons through the teaching
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
   await expect(page.getByText('0 / 19 run', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Run lesson: 6. DISTINCT (remove duplicate rows)' }).click();
-  await expect(page.getByRole('tab', { name: /SELECT DISTINCT .*REGION.* - 5 rows/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Run lesson: 6. Keep unique results with DISTINCT' }).click();
+  await expect(page.getByRole('tab', { name: /SELECT DISTINCT .*PASS_TYPE.* - 4 rows/ })).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
-  await page.getByRole('button', { name: 'Run lesson: 18. UNION and UNION ALL' }).click();
-  const unionFinal = page.getByRole('tab', { name: /UNION - 21 final rows/ });
+  await page.getByRole('button', { name: 'Run lesson: 18. Stack compatible results' }).click();
+  const unionFinal = page.getByRole('tab', { name: /UNION - final 6 rows/ });
   await expect(unionFinal).toBeVisible();
   await unionFinal.click();
-  await expect(page.getByText('21 rows', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('6 rows', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
-  await page.getByRole('button', { name: 'Run lesson: 19. Subqueries' }).click();
-  const subqueryFinal = page.getByRole('tab', { name: /SELECT .* 1 rows/ }).last();
-  await expect(page.getByRole('tab', { name: /SUBQUERY 1 - 1 rows/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Run lesson: 19. Feed one query into another' }).click();
+  const subqueryFinal = page.getByRole('tab', { name: /SELECT .* 4 rows/ }).last();
+  await expect(page.getByRole('tab', { name: /SUBQUERY 1 - 1 row/ })).toBeVisible();
   await subqueryFinal.click();
-  await expect(page.getByRole('cell', { name: 'Dubois', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'River Market', exact: true })).toBeVisible();
+});
+
+test('handles custom-schema edge cases and semicolon-terminated queries', async ({
+  page,
+  browserName,
+}) => {
+  test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic edge validation.');
+  await page.goto('/');
+  await expect(page.getByLabel('SQL query editor')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  await page.getByLabel('Schema definition SQL').fill(`
+    -- Semicolons in comments are harmless; this one is not a statement: ;
+    CREATE TABLE GARDEN_SECTOR (
+      SECTOR_ID INTEGER PRIMARY KEY,
+      LABEL VARCHAR(30) NOT NULL
+    );
+    CREATE TABLE SAMPLE (
+      SECTOR_ID INTEGER,
+      SAMPLE_NO INTEGER,
+      NOTE VARCHAR(30),
+      READING REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (SECTOR_ID, SAMPLE_NO),
+      CONSTRAINT sample_sector_fk FOREIGN KEY (SECTOR_ID)
+        REFERENCES GARDEN_SECTOR (SECTOR_ID) ON DELETE CASCADE
+    );
+    INSERT INTO GARDEN_SECTOR VALUES (1, 'North; Annex'), (2, 'South Bed');
+    INSERT INTO SAMPLE VALUES
+      (1, 1, 'first', 4.5),
+      (1, 2, NULL, 0),
+      (2, 1, 'control', 7.25);
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  await expect(page.getByRole('dialog', { name: 'Schema' })).toBeHidden();
+  await expect(page.getByTestId('rf__node-GARDEN_SECTOR')).toBeVisible();
+  await expect(page.getByTestId('rf__node-SAMPLE')).toBeVisible();
+
+  const editor = page.locator('.cm-content');
+  await expect(editor).toContainText('SELECT * FROM GARDEN_SECTOR;');
+  await editor.fill(`SELECT G.LABEL, COUNT(S.SAMPLE_NO) AS 'Samples'
+    FROM GARDEN_SECTOR G
+    LEFT OUTER JOIN SAMPLE S ON G.SECTOR_ID = S.SECTOR_ID
+    GROUP BY G.LABEL
+    ORDER BY COUNT(S.SAMPLE_NO) DESC;`);
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByText('2 rows', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'North; Annex', exact: true })).toBeVisible();
+
+  await editor.fill('SELECT SAMPLE_NO, NOTE FROM SAMPLE WHERE NOTE IS NULL;');
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByText('1 row', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: '2', exact: true })).toBeVisible();
+
+  await editor.fill('SELECT * FROM SAMPLE; SELECT * FROM GARDEN_SECTOR;');
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByText(/run one statement at a time/i)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  await page.getByLabel('Schema definition SQL').fill(`
+    CREATE TABLE PARENT_EDGE (ID INTEGER PRIMARY KEY);
+    CREATE TABLE CHILD_EDGE (
+      ID INTEGER PRIMARY KEY,
+      PARENT_ID INTEGER,
+      CONSTRAINT child_edge_fk FOREIGN KEY (PARENT_ID) REFERENCES PARENT_EDGE (ID)
+    );
+    INSERT INTO CHILD_EDGE VALUES (1, 999);
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  const schemaDialog = page.getByRole('dialog', { name: 'Schema' });
+  await expect(schemaDialog.getByRole('alert')).toContainText(/foreign key constraint failed/i);
+
+  await page.getByLabel('Schema definition SQL').fill(`
+    CREATE TABLE DUPLICATE_EDGE (
+      PART_A INTEGER,
+      PART_B INTEGER,
+      PRIMARY KEY (PART_A, PART_B)
+    );
+    INSERT INTO DUPLICATE_EDGE VALUES (1, 2), (1, 2);
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  await expect(schemaDialog.getByRole('alert')).toContainText(/unique constraint failed/i);
 });
 
 test('enforces relational keys and aggregate rules with actionable feedback', async ({
@@ -182,7 +263,7 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
   await expect(page.getByTitle(/LABEL VARCHAR\(20\).*NOT NULL.*default 'New'/)).toBeVisible();
 
   const editor = page.locator('.cm-content');
-  await editor.fill('SELECT LAST_NAME, COUNT(*) FROM MEMBER');
+  await editor.fill('SELECT LABEL, COUNT(*) FROM AUTO_TEST');
   await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
   await expect(
     page.getByText(/scalar aggregate cannot be selected with individual columns/i)

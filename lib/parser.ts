@@ -176,8 +176,8 @@ function validateCourseSemantics(ast: SelectAst): string | null {
     }
   }
 
-  // The slides explicitly teach that a field alias cannot be reused elsewhere
-  // in the same query. SQLite is more permissive, so enforce the course rule.
+  // QueryTrace treats a result alias as an output label, not as an input to
+  // another clause. SQLite is more permissive, so normalize that distinction.
   const aliases = new Set(
     columns
       .map((column) => column.as?.toLowerCase())

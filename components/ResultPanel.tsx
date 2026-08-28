@@ -35,7 +35,7 @@ export function ResultPanel({ onCollapse }: ResultPanelProps) {
         <span className="flex items-center gap-1.5">
           {result && (
             <span className="font-data text-[10px] tabular-nums text-ink-mute">
-              {result.rows.length} rows
+              {result.rows.length} {result.rows.length === 1 ? 'row' : 'rows'}
             </span>
           )}
           {onCollapse && (

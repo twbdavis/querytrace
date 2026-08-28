@@ -49,6 +49,9 @@ export interface TraceStep {
 
 export class TraceError extends Error {}
 
+function rowCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'row' : 'rows'}`;
+}
 
 const SQLIFY_OPT = { database: 'sqlite' } as const;
 const sqlifyParser = new Parser();
@@ -416,7 +419,7 @@ function buildSubqueryPrelude(ast: SelectAst, db: SqlExec, schema: TableMeta[]):
     }
     return {
       stage: 'subquery' as const,
-      label: `${correlated ? 'CORRELATED ' : ''}SUBQUERY ${index + 1}${partialResult ? ` - ${partialResult.rows.length} rows` : ''}`,
+      label: `${correlated ? 'CORRELATED ' : ''}SUBQUERY ${index + 1}${partialResult ? ` - ${rowCountLabel(partialResult.rows.length)}` : ''}`,
       narration: correlated
         ? 'This correlated subquery is evaluated once for each candidate row from the outer query because it refers to an outer-table value.'
         : 'SQLite evaluates this inner SELECT first. Its result is then supplied to the surrounding query as a value, list, or derived table.',
@@ -459,7 +462,7 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
       const partialResult = limitPreview(directExec(db, branchSql));
       steps.push({
         stage: 'union',
-        label: `UNION BRANCH ${branchIndex} - ${partialResult.rows.length} rows`,
+        label: `UNION BRANCH ${branchIndex} - ${rowCountLabel(partialResult.rows.length)}`,
         narration: `This SELECT produces branch ${branchIndex}. UNION combines compatible branch columns; UNION removes duplicates while UNION ALL keeps them.`,
         ...base,
         partialResult,
@@ -473,7 +476,7 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
   const result = directExec(db, sql);
   steps.push({
     stage: ast._next ? 'union' : 'select',
-    label: `${ast._next ? String(ast.set_op ?? 'UNION').toUpperCase() : 'SELECT'} - ${result.rows.length} final rows`,
+    label: `${ast._next ? String(ast.set_op ?? 'UNION').toUpperCase() : 'SELECT'} - final ${rowCountLabel(result.rows.length)}`,
     narration: ast._next
       ? 'The branch rows are combined now. Corresponding columns must be compatible, and the final ORDER BY—if present—uses names from the first SELECT.'
       : 'The outer query consumes the subquery result and produces the final rows. The displayed result is executed directly by SQLite.',
@@ -529,7 +532,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
   steps.push({
     stage: 'from',
-    label: `FROM ${refs[0].table} - ${basePks.size} rows`,
+    label: `FROM ${refs[0].table} - ${rowCountLabel(basePks.size)}`,
     narration: `Execution starts with the ${refs[0].table} table. All ${basePks.size} of its rows are candidates until a later clause removes them.`,
     activeTables: [refs[0].table],
     activeColumns: [],
@@ -596,7 +599,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
     steps.push({
       stage: 'where',
-      label: `WHERE ${ctx.whereSql} - ${kept} rows pass`,
+      label: `WHERE ${ctx.whereSql} - ${rowCountLabel(kept)} ${kept === 1 ? 'passes' : 'pass'}`,
       narration: `The condition ${ctx.whereSql} is tested against every row. ${kept} ${kept === 1 ? 'row passes' : 'rows pass'}; ${cut} ${cut === 1 ? 'row fades' : 'rows fade'} out because the condition is false for them.`,
       activeTables: allTableNames,
       activeColumns: resolveColumnRefs(ctx, ast.where),
@@ -805,7 +808,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
   steps.push({
     stage: 'select',
-    label: `SELECT ${ast.distinct ? 'DISTINCT ' : ''}${selectItems.map((s) => s.sql).join(', ')} - ${proj.displayRows.length} rows`,
+    label: `SELECT ${ast.distinct ? 'DISTINCT ' : ''}${selectItems.map((s) => s.sql).join(', ')} - ${rowCountLabel(proj.displayRows.length)}`,
     narration: ctx.groupExprSqls
       ? `Each surviving group collapses into a single result row, and only the requested expressions are kept. Aggregates like COUNT and AVG are computed per group.`
       : scalarAggregate
@@ -848,7 +851,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
     steps.push({
       stage: 'orderLimit',
-      label: `${ob ? `ORDER BY${ob.replace(/^ ORDER BY/, '')}` : ''}${ob && lim ? ' ' : ''}${lim ? lim.trim() : ''} - ${finalRes.displayRows.length} final rows`,
+      label: `${ob ? `ORDER BY${ob.replace(/^ ORDER BY/, '')}` : ''}${ob && lim ? ' ' : ''}${lim ? lim.trim() : ''} - final ${rowCountLabel(finalRes.displayRows.length)}`,
       narration: `Finally, ${pieces.join(', and ')}. Sorting and limiting happen last, after filtering, grouping and projection are all done.`,
       activeTables: allTableNames,
       activeColumns: ast.orderby ? resolveColumnRefs(ctx, ast.orderby) : [],

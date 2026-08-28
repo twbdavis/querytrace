@@ -1,5 +1,5 @@
-/* End-to-end parser and trace-engine tests against every original teaching
-   schema and lesson. Run with: npm run test:trace */
+/* End-to-end parser and trace-engine tests against every bundled schema and
+   lesson. Run with: npm run test:trace */
 import initSqlJs, { type Database } from 'sql.js';
 import { introspectSchema } from '../lib/db';
 import { LESSONS } from '../lib/lessons';
@@ -51,19 +51,66 @@ async function main() {
   }
 
   {
-    const community = introspectSchema(databases.get('community')!);
-    const pledge = community.schema.find((table) => table.name === 'PLEDGE');
-    assert(community.fkEdges.length === 2, 'community schema should have two FK edges');
+    const festival = introspectSchema(databases.get('festival')!);
+    const reservation = festival.schema.find((table) => table.name === 'RESERVATION');
+    assert(festival.fkEdges.length === 3, 'festival schema should have three FK edges');
     assert(
-      pledge?.columns.filter((column) => column.pk).map((column) => column.name).join(',') ===
-        'CAMPAIGN_YEAR,MEMBER_ID',
-      'PLEDGE should expose both composite primary-key columns'
+      reservation?.columns.filter((column) => column.pk).map((column) => column.name).join(',') ===
+        'ATTENDEE_ID,SCREENING_ID',
+      'RESERVATION should expose both composite primary-key columns'
     );
-    const catalog = introspectSchema(databases.get('catalog')!);
+    const transit = introspectSchema(databases.get('transit')!);
     assert(
-      catalog.schema[0].columns.find((column) => column.name === 'ITEMCODE')?.pk === true,
-      'PRODUCT text primary key should be detected'
+      transit.schema[0].columns.find((column) => column.name === 'ROUTE_CODE')?.pk === true,
+      'FERRY_ROUTE text primary key should be detected'
     );
+  }
+
+  console.log('\n=== bundled schema edge checks');
+  const expectedShape: Record<string, Record<string, number>> = {
+    observatory: { ASTRONOMER: 6, TELESCOPE: 4, TARGET: 7, OBSERVATION: 10 },
+    transit: { FERRY_ROUTE: 10 },
+    festival: { ATTENDEE: 12, VENUE: 5, SCREENING: 6, RESERVATION: 23 },
+    marine: { REEF: 6, DIVER: 6, SPECIES: 10, SIGHTING: 14 },
+    orchard: { ORCHARD_PLOT: 10 },
+  };
+  for (const definition of PRELOADED_SCHEMAS) {
+    const database = databases.get(definition.id)!;
+    assert(definition.starterQuery.trimEnd().endsWith(';'), `${definition.id} starter query ends with a semicolon`);
+    for (const [table, expectedRows] of Object.entries(expectedShape[definition.id])) {
+      const actualRows = Number(database.exec(`SELECT COUNT(*) FROM "${table}";`)[0].values[0][0]);
+      assert(actualRows === expectedRows, `${definition.id}.${table} contains ${expectedRows} rows`);
+    }
+    const parsed = parseQuery(definition.starterQuery);
+    assert(parsed.ok, `${definition.id} starter query parses with its trailing semicolon`);
+    if (parsed.ok) {
+      const { schema } = introspectSchema(database);
+      const final = buildTrace(parsed.ast, database, schema).at(-1);
+      assert((final?.partialResult?.rows.length ?? 0) > 0, `${definition.id} starter query returns rows`);
+    }
+  }
+  assert(
+    LESSONS.every((lesson) => lesson.query.trimEnd().endsWith(';')),
+    'every lesson query ends with a semicolon'
+  );
+
+  {
+    const festival = databases.get('festival')!;
+    let duplicateRejected = false;
+    try {
+      festival.run("INSERT INTO RESERVATION VALUES (301, 701, 1, 'Confirmed');");
+    } catch {
+      duplicateRejected = true;
+    }
+    assert(duplicateRejected, 'festival composite key rejects a duplicate reservation');
+
+    let orphanRejected = false;
+    try {
+      festival.run("INSERT INTO RESERVATION VALUES (999, 701, 1, 'Confirmed');");
+    } catch {
+      orphanRejected = true;
+    }
+    assert(orphanRejected, 'festival foreign key rejects an unknown attendee');
   }
 
   {
@@ -144,179 +191,192 @@ async function main() {
   };
 
   {
+    const endpoints = run('marine', 'SELECT REEF_ID FROM REEF WHERE DEPTH_M BETWEEN 9 AND 18;');
+    assert(endpoints.at(-1)?.partialResult?.rows.length === 3, 'BETWEEN retains both depth endpoints');
+    const threeValued = run('marine', "SELECT SPECIES_CODE FROM SPECIES WHERE NOT TAG_COLOR = 'Blue';");
+    assert(threeValued.at(-1)?.partialResult?.rows.length === 6, 'ordinary comparisons do not include NULL values');
+    const quotedSemicolon = run('festival', "SELECT FILM_TITLE FROM SCREENING WHERE FILM_TITLE = 'A;B';");
+    assert(quotedSemicolon.at(-1)?.partialResult?.rows.length === 0, 'a semicolon inside text is not a statement boundary');
+    const withComment = run('transit', "SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE ROUTE_CODE = 'B01'; -- one route");
+    assert(withComment.at(-1)?.partialResult?.rows.length === 1, 'a trailing comment after a semicolon is accepted');
+    const multiple = parseQuery('SELECT ROUTE_CODE FROM FERRY_ROUTE; SELECT ROUTE_NAME FROM FERRY_ROUTE;');
+    assert(!multiple.ok && /one statement at a time/i.test(multiple.error), 'multiple query statements are rejected');
+    console.log('  semicolon + boundary + NULL edge cases: ok');
+  }
+  {
     const steps = run(
-      'catalog',
-      "SELECT ITEMNAME, UNITPRICE * STOCKQTY AS 'Inventory Value' FROM PRODUCT ORDER BY UNITPRICE * STOCKQTY DESC"
+      'transit',
+      "SELECT ROUTE_NAME, FARE * SCHEDULED_TRIPS AS 'Daily Potential' FROM FERRY_ROUTE ORDER BY FARE * SCHEDULED_TRIPS DESC"
     );
-    assert(steps.at(-1)?.partialResult?.rows[0]?.[0] === 'Glass Bottle', 'Glass Bottle has the largest inventory value');
+    assert(steps.at(-1)?.partialResult?.rows[0]?.[0] === 'North Sound', 'North Sound has the largest daily ticket potential');
     console.log('  quoted alias + computed ORDER BY: ok');
   }
   {
     const steps = run(
-      'community',
-      'SELECT LAST_NAME, AMOUNT FROM MEMBER LEFT OUTER JOIN PLEDGE ON MEMBER.MEMBER_ID = PLEDGE.MEMBER_ID'
+      'festival',
+      'SELECT FAMILY_NAME, SCREENING_ID FROM ATTENDEE LEFT OUTER JOIN RESERVATION ON ATTENDEE.ATTENDEE_ID = RESERVATION.ATTENDEE_ID'
     );
     const join = steps.find((step) => step.stage === 'join');
-    assert(!!join?.nullExtendedRows?.MEMBER?.has(204), 'member 204 should be NULL-extended');
+    assert(!!join?.nullExtendedRows?.ATTENDEE?.has(312), 'attendee 312 should be NULL-extended');
     console.log('  LEFT OUTER JOIN null-extension: ok', fmtStep(join!));
   }
   {
     const steps = run(
-      'community',
-      "SELECT COUNT(DISTINCT MEMBER_ID) AS 'Members in 2022' FROM PLEDGE WHERE CAMPAIGN_YEAR = 2022"
+      'festival',
+      "SELECT COUNT(DISTINCT ATTENDEE_ID) AS 'Audience' FROM RESERVATION WHERE SCREENING_ID = 703"
     );
-    assert(Number(steps.at(-1)?.partialResult?.rows[0]?.[0]) === 6, 'six members pledged in 2022');
+    assert(Number(steps.at(-1)?.partialResult?.rows[0]?.[0]) === 4, 'four attendees reserved screening 703');
     console.log('  COUNT(DISTINCT): ok');
   }
   {
-    const steps = run('community', "SELECT COUNT(*) AS 'Number of Members' FROM MEMBER");
-    assert(steps.at(-1)?.resultRowSources?.[0]?.MEMBER.length === 12, 'scalar COUNT provenance includes all members');
+    const steps = run('marine', "SELECT COUNT(*) AS 'Sightings' FROM SIGHTING");
+    assert(steps.at(-1)?.resultRowSources?.[0]?.SIGHTING.length === 14, 'scalar COUNT provenance includes all sightings');
     console.log('  scalar aggregate provenance: ok');
   }
   {
-    const steps = run('community', 'SELECT DISTINCT REGION FROM MEMBER ORDER BY REGION');
+    const steps = run('festival', 'SELECT DISTINCT PASS_TYPE FROM ATTENDEE ORDER BY PASS_TYPE');
     const final = steps.at(-1)!;
-    assert(final.partialResult?.rows.length === 5, 'MEMBER has five distinct regions');
-    const northwest = final.partialResult?.rows.findIndex((row) => row[0] === 'NW') ?? -1;
-    assert(final.resultRowSources?.[northwest]?.MEMBER.length === 3, 'NW traces to three members');
+    assert(final.partialResult?.rows.length === 4, 'ATTENDEE has four distinct pass types');
+    const weekend = final.partialResult?.rows.findIndex((row) => row[0] === 'Weekend') ?? -1;
+    assert(final.resultRowSources?.[weekend]?.ATTENDEE.length === 3, 'Weekend traces to three attendees');
     console.log('  SELECT DISTINCT + merged provenance: ok');
   }
   {
     const steps = run(
-      'community',
-      "SELECT CONCAT(LAST_NAME, ', ', FIRST_NAME) AS 'Member Name' FROM MEMBER WHERE MEMBER_ID = 201"
+      'observatory',
+      "SELECT CONCAT(GIVEN_NAME, ' ', FAMILY_NAME) AS 'Observer' FROM ASTRONOMER WHERE ASTRONOMER_ID = 1"
     );
-    assert(steps.at(-1)?.partialResult?.rows[0]?.[0] === 'Navarro, Lena', 'CONCAT joins text and separator');
+    assert(steps.at(-1)?.partialResult?.rows[0]?.[0] === 'Mina Solberg', 'CONCAT joins text and separator');
     console.log('  CONCAT + field alias: ok');
   }
   {
     const steps = run(
-      'staff',
-      'SELECT TEAM, AVG(SALARY) FROM STAFF GROUP BY TEAM HAVING AVG(SALARY) > 45000'
+      'orchard',
+      'SELECT ZONE, AVG(TREE_COUNT) FROM ORCHARD_PLOT GROUP BY ZONE HAVING AVG(TREE_COUNT) > 110'
     );
-    const teams = steps.at(-1)?.partialResult?.rows.map((row) => row[0]).sort();
-    assert(JSON.stringify(teams) === JSON.stringify(['Engineering', 'Leadership']), `HAVING keeps the expected teams (got ${JSON.stringify(teams)})`);
+    const zones = steps.at(-1)?.partialResult?.rows.map((row) => row[0]).sort();
+    assert(JSON.stringify(zones) === JSON.stringify(['North', 'South']), `HAVING keeps the expected zones (got ${JSON.stringify(zones)})`);
     console.log('  GROUP BY + HAVING: ok');
   }
   {
     const steps = run(
-      'makerspace',
-      "SELECT MATERIAL_NAME FROM MATERIAL WHERE COLOR = 'Blue' AND MATERIAL_TYPE = 'T'"
+      'marine',
+      "SELECT COMMON_NAME FROM SPECIES WHERE TAG_COLOR = 'Blue' AND SPECIES_GROUP = 'Fish'"
     );
-    assert(steps.at(-1)?.partialResult?.rows.length === 2, 'two blue textile materials');
-    const missing = run('makerspace', 'SELECT MATERIAL_NAME FROM MATERIAL WHERE COLOR IS NULL');
-    assert(missing.at(-1)?.partialResult?.rows[0]?.[0] === 'Ink Set', 'Ink Set has no color');
+    assert(steps.at(-1)?.partialResult?.rows.length === 2, 'two fish species have blue tags');
+    const missing = run('marine', 'SELECT COMMON_NAME FROM SPECIES WHERE TAG_COLOR IS NULL');
+    assert(missing.at(-1)?.partialResult?.rows[0]?.[0] === 'Ribbon Eel', 'Ribbon Eel has no tag color');
     console.log('  multi-condition + IS NULL: ok');
   }
   {
-    const steps = run('catalog', 'select itemname from product where rating > 3');
+    const steps = run('transit', 'select route_name from ferry_route where fare > 10');
     assert((steps.at(-1)?.partialResult?.rows.length ?? 0) > 0, 'lowercase references work');
     console.log('  case-insensitive references: ok');
   }
   {
     const steps = run(
-      'community',
-      'SELECT M.LAST_NAME, P.AMOUNT FROM MEMBER M, PLEDGE P WHERE M.MEMBER_ID = P.MEMBER_ID'
+      'observatory',
+      'SELECT T.TELESCOPE_NAME, O.OBSERVED_ON FROM TELESCOPE T, OBSERVATION O WHERE T.TELESCOPE_ID = O.TELESCOPE_ID'
     );
-    assert(steps[1]?.stage === 'join' && steps[1].tuples?.length === 276, 'comma join forms 12 × 23 combinations');
-    assert(steps.find((step) => step.stage === 'where')?.tuples?.length === 23, 'WHERE reduces product to 23 matches');
+    assert(steps[1]?.stage === 'join' && steps[1].tuples?.length === 40, 'comma join forms 4 × 10 combinations');
+    assert(steps.find((step) => step.stage === 'where')?.tuples?.length === 10, 'WHERE reduces the product to 10 matches');
     console.log('  comma-style join pipeline: ok');
   }
   {
     const steps = run(
-      'staff',
-      "SELECT S.FIRST_NAME, M.FIRST_NAME AS 'Manager' FROM STAFF S JOIN STAFF M ON S.MANAGER_ID = M.STAFF_ID"
+      'orchard',
+      "SELECT P.PLOT_NAME, B.PLOT_NAME AS 'Parent' FROM ORCHARD_PLOT P JOIN ORCHARD_PLOT B ON P.PARENT_PLOT_ID = B.PLOT_ID"
     );
-    assert(steps.at(-1)?.partialResult?.rows.length === 11, 'self join returns 11 staff-manager pairs');
-    assert(steps.at(-1)?.resultRowSources?.[2]?.STAFF.length === 2, 'self-join merges both alias sources');
+    assert(steps.at(-1)?.partialResult?.rows.length === 10, 'self join returns 10 plot-parent pairs');
+    assert(steps.at(-1)?.resultRowSources?.[2]?.ORCHARD_PLOT.length === 2, 'self-join merges both alias sources');
     console.log('  self join aliases + provenance: ok');
   }
   {
-    const union = run('community', 'SELECT LAST_NAME AS NAME FROM MEMBER UNION SELECT FIRST_NAME FROM MEMBER');
-    const unionAll = run('community', 'SELECT LAST_NAME AS NAME FROM MEMBER UNION ALL SELECT FIRST_NAME FROM MEMBER');
-    assert(union.at(-1)?.partialResult?.rows.length === 21, 'UNION removes three duplicate first names');
-    assert(unionAll.at(-1)?.partialResult?.rows.length === 24, 'UNION ALL retains all branch rows');
+    const union = run('festival', 'SELECT CITY AS PLACE FROM ATTENDEE UNION SELECT CITY FROM VENUE');
+    const unionAll = run('festival', 'SELECT CITY AS PLACE FROM ATTENDEE UNION ALL SELECT CITY FROM VENUE');
+    assert(union.at(-1)?.partialResult?.rows.length === 6, 'UNION removes duplicate cities');
+    assert(unionAll.at(-1)?.partialResult?.rows.length === 17, 'UNION ALL retains all branch rows');
     console.log('  UNION / UNION ALL: ok');
   }
   {
     const steps = run(
-      'community',
-      'SELECT LAST_NAME FROM MEMBER WHERE MEMBER_ID IN (SELECT DISTINCT MEMBER_ID FROM PLEDGE)'
+      'festival',
+      'SELECT FAMILY_NAME FROM ATTENDEE WHERE ATTENDEE_ID IN (SELECT DISTINCT ATTENDEE_ID FROM RESERVATION)'
     );
     assert(steps[0]?.stage === 'subquery', 'subquery exposes its inner-result stage');
-    assert(steps.at(-1)?.partialResult?.rows.length === 11, '11 members have pledged');
+    assert(steps.at(-1)?.partialResult?.rows.length === 11, '11 attendees have reservations');
     console.log('  uncorrelated subquery: ok');
   }
   {
     const steps = run(
-      'staff',
-      'SELECT S.FIRST_NAME FROM STAFF S WHERE S.SALARY > (SELECT AVG(I.SALARY) FROM STAFF I WHERE I.TEAM = S.TEAM)'
+      'orchard',
+      'SELECT P.PLOT_NAME FROM ORCHARD_PLOT P WHERE P.TREE_COUNT > (SELECT AVG(I.TREE_COUNT) FROM ORCHARD_PLOT I WHERE I.ZONE = P.ZONE)'
     );
     assert(steps[0]?.label.startsWith('CORRELATED SUBQUERY'), 'correlated subquery is identified');
-    assert(steps.at(-1)?.partialResult?.rows.length === 5, 'five staff exceed their team average');
+    assert(steps.at(-1)?.partialResult?.rows.length === 3, 'three plots exceed their zone average');
     console.log('  correlated subquery: ok');
   }
   {
     const normal = run(
-      'catalog',
-      'SELECT ITEMCODE FROM PRODUCT WHERE UNITPRICE < 20 OR RATING = 5 AND STOCKQTY < 30'
+      'transit',
+      'SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE FARE < 9 OR NIGHT_SERVICE = 1 AND CROSSING_MIN < 30'
     );
     const grouped = run(
-      'catalog',
-      'SELECT ITEMCODE FROM PRODUCT WHERE (UNITPRICE < 20 OR RATING = 5) AND STOCKQTY < 30'
+      'transit',
+      'SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE (FARE < 9 OR NIGHT_SERVICE = 1) AND CROSSING_MIN < 30'
     );
-    assert(normal.at(-1)?.partialResult?.rows.length === 7, 'AND executes before OR');
-    assert(grouped.at(-1)?.partialResult?.rows.length === 2, 'parentheses override precedence');
+    assert(normal.at(-1)?.partialResult?.rows.length === 4, 'AND executes before OR');
+    assert(grouped.at(-1)?.partialResult?.rows.length === 3, 'parentheses override precedence');
     console.log('  AND / OR precedence + parentheses: ok');
   }
   {
-    const between = run('catalog', 'SELECT ITEMCODE FROM PRODUCT WHERE RATING BETWEEN 3 AND 4');
-    assert(between.at(-1)?.partialResult?.rows.length === 6, 'BETWEEN includes both endpoints');
-    const excluded = run('catalog', "SELECT ITEMCODE FROM PRODUCT WHERE NOT ITEMCODE IN ('BAG', 'MUG')");
+    const between = run('transit', 'SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE CROSSING_MIN BETWEEN 20 AND 40');
+    assert(between.at(-1)?.partialResult?.rows.length === 3, 'BETWEEN includes both endpoints');
+    const excluded = run('transit', "SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE NOT ROUTE_CODE IN ('B01', 'M01')");
     assert(excluded.at(-1)?.partialResult?.rows.length === 8, 'NOT IN excludes named rows');
     console.log('  BETWEEN inclusivity + NOT IN: ok');
   }
   {
-    const total = run('community', 'SELECT SUM(AMOUNT) FROM PLEDGE WHERE CAMPAIGN_YEAR = 2024');
-    assert(Number(total.at(-1)?.partialResult?.rows[0]?.[0]) === 2700, '2024 pledges sum to 2700');
-    const goals = run(
-      'community',
-      'SELECT C.CAMPAIGN_YEAR, C.TARGET, SUM(P.AMOUNT) FROM CAMPAIGN C JOIN PLEDGE P ON C.CAMPAIGN_YEAR = P.CAMPAIGN_YEAR GROUP BY C.CAMPAIGN_YEAR, C.TARGET HAVING SUM(P.AMOUNT) > C.TARGET ORDER BY C.CAMPAIGN_YEAR'
+    const total = run('marine', 'SELECT SUM(COUNT_SEEN) FROM SIGHTING WHERE REEF_ID = \'BLU\'');
+    assert(Number(total.at(-1)?.partialResult?.rows[0]?.[0]) === 15, 'Bluebell Shelf sightings total 15 animals');
+    const popular = run(
+      'festival',
+      "SELECT V.VENUE_NAME, SUM(R.SEATS) FROM VENUE V JOIN SCREENING S ON V.VENUE_ID = S.VENUE_ID JOIN RESERVATION R ON S.SCREENING_ID = R.SCREENING_ID WHERE S.SCREENING_DAY = 'Saturday' GROUP BY V.VENUE_NAME HAVING SUM(R.SEATS) > 5 ORDER BY V.VENUE_NAME"
     );
-    assert(JSON.stringify(goals.at(-1)?.partialResult?.rows.map((row) => row[0])) === JSON.stringify([2022, 2024]), 'only 2022 and 2024 exceed target');
+    assert(JSON.stringify(popular.at(-1)?.partialResult?.rows.map((row) => row[0])) === JSON.stringify(['Beacon Theater', 'Orchard Cinema']), 'two Saturday venues exceed five reserved seats');
     console.log('  aggregate + join/group/HAVING: ok');
   }
   {
     const steps = run(
-      'catalog',
-      'SELECT P.ITEMCODE FROM PRODUCT P, (SELECT AVG(UNITPRICE) AS AvgPrice FROM PRODUCT) X WHERE P.UNITPRICE < X.AvgPrice ORDER BY P.ITEMCODE'
+      'transit',
+      'SELECT R.ROUTE_CODE FROM FERRY_ROUTE R, (SELECT AVG(FARE) AS AvgFare FROM FERRY_ROUTE) X WHERE R.FARE < X.AvgFare ORDER BY R.ROUTE_CODE'
     );
-    assert((steps.at(-1)?.partialResult?.rows.length ?? 0) > 0, 'derived-table query returns products');
+    assert((steps.at(-1)?.partialResult?.rows.length ?? 0) > 0, 'derived-table query returns routes');
     assert(steps.some((step) => step.stage === 'subquery'), 'derived table exposes inner stage');
     console.log('  derived table with required alias: ok');
   }
   {
     const steps = run(
-      'community',
-      `SELECT M.LAST_NAME
-       FROM MEMBER M
+      'festival',
+      `SELECT A.FAMILY_NAME
+       FROM ATTENDEE A
        WHERE NOT EXISTS (
-         SELECT C.CAMPAIGN_YEAR FROM CAMPAIGN C
-         WHERE NOT EXISTS (
-           SELECT P.CAMPAIGN_YEAR FROM PLEDGE P
-           WHERE P.MEMBER_ID = M.MEMBER_ID AND P.CAMPAIGN_YEAR = C.CAMPAIGN_YEAR
+         SELECT S.SCREENING_ID FROM SCREENING S
+         WHERE S.VENUE_ID = 44 AND NOT EXISTS (
+           SELECT R.SCREENING_ID FROM RESERVATION R
+           WHERE R.ATTENDEE_ID = A.ATTENDEE_ID AND R.SCREENING_ID = S.SCREENING_ID
          )
        )`
     );
-    assert(JSON.stringify(steps.at(-1)?.partialResult?.rows.map((row) => row[0])) === JSON.stringify(['Okafor']), 'one member pledged in every campaign');
+    assert(JSON.stringify(steps.at(-1)?.partialResult?.rows.map((row) => row[0])) === JSON.stringify(['Dlamini', 'Gupta', 'Ibarra', 'Kwon']), 'four attendees booked every screening at venue 44');
     console.log('  nested correlated NOT EXISTS: ok');
   }
   {
-    const empty = run('catalog', 'SELECT ITEMCODE FROM PRODUCT WHERE UNITPRICE < 0');
+    const empty = run('transit', 'SELECT ROUTE_CODE FROM FERRY_ROUTE WHERE FARE < 0');
     assert(empty.at(-1)?.partialResult?.rows.length === 0, 'zero-row results complete normally');
     let mismatchRejected = false;
     try {
-      run('community', 'SELECT LAST_NAME FROM MEMBER UNION SELECT FIRST_NAME, REGION FROM MEMBER');
+      run('festival', 'SELECT CITY FROM ATTENDEE UNION SELECT VENUE_NAME, CAPACITY FROM VENUE');
     } catch (error) {
       mismatchRejected = /same number of result columns/i.test(error instanceof Error ? error.message : String(error));
     }
@@ -328,33 +388,33 @@ async function main() {
   {
     const { computeClauseRanges } = await import('../lib/clauseRanges');
     const query =
-      "SELECT REGION, SUM(AMOUNT) AS 'Total 2024'\nFROM MEMBER M JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID\nWHERE P.CAMPAIGN_YEAR = 2024\nGROUP BY REGION\nORDER BY SUM(AMOUNT) DESC";
+      "SELECT V.VENUE_NAME, SUM(R.SEATS) AS 'Saturday Seats'\nFROM VENUE V JOIN SCREENING S ON V.VENUE_ID = S.VENUE_ID\nJOIN RESERVATION R ON S.SCREENING_ID = R.SCREENING_ID\nWHERE S.SCREENING_DAY = 'Saturday'\nGROUP BY V.VENUE_NAME\nORDER BY SUM(R.SEATS) DESC";
     const ranges = computeClauseRanges(query);
     const slice = (range?: { start: number; end: number }) =>
       range ? query.slice(range.start, range.end) : '';
-    assert(slice(ranges.select).startsWith('SELECT REGION'), 'select range');
-    assert(slice(ranges.from) === 'FROM MEMBER M', 'from range');
-    assert(slice(ranges.joins[0]) === 'JOIN PLEDGE P ON M.MEMBER_ID = P.MEMBER_ID', 'join range');
-    assert(slice(ranges.where) === 'WHERE P.CAMPAIGN_YEAR = 2024', 'where range');
-    assert(slice(ranges.groupBy) === 'GROUP BY REGION', 'group range');
-    assert(slice(ranges.orderLimit) === 'ORDER BY SUM(AMOUNT) DESC', 'order range');
-    const quoted = "SELECT ITEMNAME AS 'FROM WHERE' FROM PRODUCT WHERE ITEMNAME LIKE '%JOIN%'";
+    assert(slice(ranges.select).startsWith('SELECT V.VENUE_NAME'), 'select range');
+    assert(slice(ranges.from) === 'FROM VENUE V', 'from range');
+    assert(slice(ranges.joins[0]) === 'JOIN SCREENING S ON V.VENUE_ID = S.VENUE_ID', 'first join range');
+    assert(slice(ranges.where) === "WHERE S.SCREENING_DAY = 'Saturday'", 'where range');
+    assert(slice(ranges.groupBy) === 'GROUP BY V.VENUE_NAME', 'group range');
+    assert(slice(ranges.orderLimit) === 'ORDER BY SUM(R.SEATS) DESC', 'order range');
+    const quoted = "SELECT FILM_TITLE AS 'FROM WHERE' FROM SCREENING WHERE FILM_TITLE LIKE '%JOIN%'";
     const quotedRanges = computeClauseRanges(quoted);
-    assert(quoted.slice(quotedRanges.from!.start, quotedRanges.from!.end) === 'FROM PRODUCT', 'string literals are skipped');
+    assert(quoted.slice(quotedRanges.from!.start, quotedRanges.from!.end) === 'FROM SCREENING', 'string literals are skipped');
     assert(quotedRanges.joins.length === 0, 'JOIN inside a string is not a clause');
     console.log('  clause ranges: ok');
   }
 
   console.log('\n=== rejection checks');
   const rejected = [
-    'DELETE FROM MEMBER',
-    'SELECT LAST_NAME, COUNT(*) FROM MEMBER',
-    'SELECT REGION, COUNT(*) FROM MEMBER GROUP BY CITY',
-    'SELECT * FROM PLEDGE WHERE SUM(AMOUNT) > 100',
-    "SELECT UNITPRICE * STOCKQTY AS 'Inventory Value' FROM PRODUCT ORDER BY 'Inventory Value'",
-    "SELECT REGION, COUNT(*) FROM MEMBER GROUP BY REGION HAVING CITY = 'Cedar Bay'",
-    'SELECT MEMBER.LAST_NAME FROM MEMBER M',
-    'SELECT COUNT(*) FROM MEMBER HAVING COUNT(*) > 1',
+    'DELETE FROM ATTENDEE',
+    'SELECT FAMILY_NAME, COUNT(*) FROM ATTENDEE',
+    'SELECT PASS_TYPE, COUNT(*) FROM ATTENDEE GROUP BY CITY',
+    'SELECT * FROM SIGHTING WHERE SUM(COUNT_SEEN) > 10',
+    "SELECT FARE * SCHEDULED_TRIPS AS 'Potential' FROM FERRY_ROUTE ORDER BY 'Potential'",
+    "SELECT PASS_TYPE, COUNT(*) FROM ATTENDEE GROUP BY PASS_TYPE HAVING CITY = 'Juniper Bay'",
+    'SELECT ATTENDEE.FAMILY_NAME FROM ATTENDEE A',
+    'SELECT COUNT(*) FROM ATTENDEE HAVING COUNT(*) > 1',
   ];
   for (const query of rejected) {
     const parsed = parseQuery(query);
