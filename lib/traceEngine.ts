@@ -478,7 +478,7 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
     stage: ast._next ? 'union' : 'select',
     label: `${ast._next ? String(ast.set_op ?? 'UNION').toUpperCase() : 'SELECT'} - final ${rowCountLabel(result.rows.length)}`,
     narration: ast._next
-      ? 'The branch rows are combined now. Corresponding columns must be compatible, and the final ORDER BY—if present—uses names from the first SELECT.'
+      ? 'The branch rows are combined now. Corresponding columns must be compatible, and the final ORDER BY, if present, uses names from the first SELECT.'
       : 'The outer query consumes the subquery result and produces the final rows. The displayed result is executed directly by SQLite.',
     ...base,
     partialResult: result,

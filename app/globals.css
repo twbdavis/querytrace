@@ -2,9 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Blueprint theme tokens — mirrors styles/theme.ts (the TS source of truth). */
+/* Blueprint theme tokens - mirrors styles/theme.ts (the TS source of truth). */
 :root {
-  /* Surfaces — canvas pushed darker so nodes float above it */
+  /* Surfaces - canvas pushed darker so nodes float above it */
   --bg-app: #090d18; /* page chrome background */
   --bg-canvas: #0c1122; /* React Flow canvas */
   --bg-node: #171e38; /* table node body */
@@ -16,7 +16,7 @@
   --border-default: #333f6b;
   --border-strong: #4a5890;
 
-  /* Text — near-white primary, faint indigo cast only */
+  /* Text - near-white primary, faint indigo cast only */
   --text-primary: #eef2ff;
   --text-secondary: #a5b1d8;
   --text-muted: #626e9d;

@@ -1,4 +1,4 @@
-# QueryTrace — Visual SQL Learning DBMS
+# QueryTrace - Visual SQL Learning DBMS
 
 Teaches SQL by animating how a query's answer is derived across live, interactable tables.
 The teaching DBMS runs client-side: SQLite compiled to WASM (sql.js), isolated in a Web Worker.
@@ -10,10 +10,10 @@ All bundled scenarios, records, names, prompts, and expected results are fiction
 examples created for QueryTrace. They teach general SQL concepts without reproducing
 third-party classroom exercises or answer sets.
 
-- **FROM / JOIN** — matched key pairs light up in both tables and pulses travel along the FK edge; outer-join rows kept without a match get a dashed border
-- **WHERE** — eliminated rows fade with a strikethrough
-- **GROUP BY / HAVING** — rows are color-coded by group; eliminated groups fade as units
-- **SELECT / ORDER / LIMIT** — projected columns highlight and the result panel fills row by row
+- **FROM / JOIN** - matched key pairs light up in both tables and pulses travel along the FK edge; outer-join rows kept without a match get a dashed border
+- **WHERE** - eliminated rows fade with a strikethrough
+- **GROUP BY / HAVING** - rows are color-coded by group; eliminated groups fade as units
+- **SELECT / ORDER / LIMIT** - projected columns highlight and the result panel fills row by row
 
 Click any lit row to highlight everywhere it contributes (join partners + result rows).
 Playback: play / pause / step / reset, labeled stage scrubber, 0.5×/1×/2× speed, and a
@@ -38,7 +38,7 @@ npm run check      # type-check, trace tests, and production build
 
 ## Deploy
 
-The whole app remains statically deployable—no server database is required for
+The whole app remains statically deployable; no server database is required for
 student SQL. SQLite and the trace compiler run off the UI thread in a dedicated
 Web Worker. Built-in course schemas are tiny and rebuild locally; custom schemas
 are exported as SQLite images and restored from IndexedDB. Lesson progress is
@@ -47,7 +47,7 @@ session. Deploying is just hosting the build:
 
 1. Push the repo to GitHub (`node_modules`, `.next`, and generated WASM files are
    gitignored; the `postinstall` script generates a content-hashed WASM asset).
-2. Import the repo on Vercel. Zero config — it detects Next.js, runs
+2. Import the repo on Vercel. Zero config - it detects Next.js, runs
    `npm install` (which copies the sql.js WASM into `/public`) and `next build`.
 
 All application code, the CodeMirror editor, and SQLite WASM are self-hosted.

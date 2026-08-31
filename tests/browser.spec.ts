@@ -259,7 +259,7 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
   await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
   await expect(page.getByRole('dialog', { name: 'Schema' })).toBeHidden();
   await expect(page.getByTestId('rf__node-AUTO_TEST')).toBeVisible();
-  await expect(page.getByTitle(/ID INTEGER — primary key:.*never be NULL/)).toBeVisible();
+  await expect(page.getByTitle(/ID INTEGER - primary key:.*never be NULL/)).toBeVisible();
   await expect(page.getByTitle(/LABEL VARCHAR\(20\).*NOT NULL.*default 'New'/)).toBeVisible();
 
   const editor = page.locator('.cm-content');

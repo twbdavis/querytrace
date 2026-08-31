@@ -1,0 +1,1 @@
+QueryTrace - watch SQL queries execute step by step. Two database tables joined by a pulsing edge: matched rows are highlighted, a filtered row is struck through, and a result row glows mint.

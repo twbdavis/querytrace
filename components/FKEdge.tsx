@@ -12,7 +12,7 @@ import { useMediaQuery } from '@/lib/useMediaQuery';
  * wires do not sit on top of each other.
  *
  * Idle edges read as drafting lines (dashed chalk); active edges snap to a
- * solid periwinkle with traveling pulses — no glow, just dash-to-solid.
+ * solid periwinkle with traveling pulses - no glow, just dash-to-solid.
  */
 function railPath(
   sx: number,

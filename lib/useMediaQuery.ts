@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-/** Reactive matchMedia — drives the per-screen-size layout switch. */
+/** Reactive matchMedia - drives the per-screen-size layout switch. */
 export function useMediaQuery(query: string): boolean {
   // Keep the server render and the client's first render identical. Reading
   // matchMedia in the initializer makes desktop clients hydrate mobile HTML

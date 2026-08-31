@@ -27,7 +27,7 @@ Only the deployment at `querytrace.net` built from `main` is supported.
 | Isolation | COOP + COEP + CORP (`crossOriginIsolated` execution); `frame-ancestors 'none'` + `X-Frame-Options: DENY` (no clickjacking); SQL executes in a dedicated Web Worker off the UI thread |
 | Browser features | Permissions-Policy denies sensors, media capture, geolocation, payment, USB/serial/HID/Bluetooth, and WebAuthn use by embedded content |
 | Metadata leakage | `Referrer-Policy: strict-origin-when-cross-origin`; `X-Content-Type-Options: nosniff`; `poweredByHeader` disabled |
-| Supply chain | All assets self-hosted (fonts, CodeMirror, SQLite WASM) — zero third-party runtime requests; `npm ci` from a committed lockfile; GitHub Actions pinned to commit SHAs; Dependabot for npm and Actions; `npm audit` gate in CI |
+| Supply chain | All assets self-hosted (fonts, CodeMirror, SQLite WASM) - zero third-party runtime requests; `npm ci` from a committed lockfile; GitHub Actions pinned to commit SHAs; Dependabot for npm and Actions; `npm audit` gate in CI |
 | SQL surface | User SQL runs only against the in-browser throwaway SQLite instance; schema builder accepts only `CREATE TABLE` / `INSERT ... VALUES`; nothing a visitor types ever reaches a server |
 
 ## Framework alignment
@@ -43,23 +43,23 @@ client-side static site):
 | Pinned CI actions, least-privilege workflow token | PR.PS-06 (secure SDLC), GV.SC-07 | A.8.28, A.8.30 (outsourced development), A.8.32 (change management) |
 | CI: typecheck, trace tests, 3-engine browser suite on every push/PR | PR.PS-06, DE.CM | A.8.29 (security testing in development), A.8.31 (environment separation) |
 | security.txt + this policy | GV.PO, RS.CO-02 (coordinated disclosure) | A.5.25/A.5.26 (incident assessment & response), A.8.8 |
-| No PII collected or stored server-side | GV.PO, PR.DS | A.5.34 (privacy/PII), A.8.10 (information deletion — n/a by design) |
+| No PII collected or stored server-side | GV.PO, PR.DS | A.5.34 (privacy/PII), A.8.10 (information deletion - n/a by design) |
 
 ## Accepted residual risks
 
 These are known, documented, and accepted with rationale (ISO 27001 risk
 treatment: *accept*):
 
-1. **CSP `script-src 'unsafe-inline'`** — Next.js emits inline bootstrap
+1. **CSP `script-src 'unsafe-inline'`** - Next.js emits inline bootstrap
    scripts for prerendered pages; nonce-based CSP would force dynamic
    rendering and defeat static/CDN delivery. Compensating controls: no
    HTML-injection sinks exist in the code, `connect-src 'self'` prevents
    exfiltration, and there is no sensitive data in the origin to steal.
    Revisit if Next.js ships stable hash-based CSP for static output.
-2. **CSP `style-src 'unsafe-inline'`** — required by React inline styles and
+2. **CSP `style-src 'unsafe-inline'`** - required by React inline styles and
    the visualization libraries. Style injection without script execution has
    negligible impact on a site with no secrets or sessions.
-3. **`Access-Control-Allow-Origin: *` added by Vercel to static responses** —
+3. **`Access-Control-Allow-Origin: *` added by Vercel to static responses** -
    all content is public and requests are never credentialed, so cross-origin
    readability discloses nothing. CORP `same-origin` still blocks embedding.
 

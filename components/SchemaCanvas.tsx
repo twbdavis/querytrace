@@ -55,7 +55,7 @@ function StateLegend() {
             <div key={item.name} className="flex items-center gap-2">
               <span className={`h-2.5 w-5 shrink-0 rounded-sm ${item.swatch}`} />
               <span className="text-ink-dim">
-                <span className="text-ink">{item.name}</span> — {item.desc}
+                <span className="text-ink">{item.name}</span> - {item.desc}
               </span>
             </div>
           ))}
@@ -70,9 +70,9 @@ function StateLegend() {
           </div>
           <div className="flex items-center gap-2 pt-0.5">
             <span className="shrink-0 rounded-full border border-accent-active px-1 py-px font-data text-[8px] font-bold text-accent-active">PK</span>
-            <span className="text-ink-dim">primary key (underlined) — unique identifier</span>
+            <span className="text-ink-dim">primary key (underlined) - unique identifier</span>
             <span className="shrink-0 rounded-full border border-ink-mute px-1 py-px font-data text-[8px] font-bold text-ink-mute">FK</span>
-            <span className="text-ink-dim">foreign key — must match a parent PK value</span>
+            <span className="text-ink-dim">foreign key - must match a parent PK value</span>
           </div>
         </div>
       )}

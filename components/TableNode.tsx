@@ -113,10 +113,10 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
               }`}
               title={
                 c.pk
-                  ? `${c.name}${c.type ? ` ${c.type}` : ''} — primary key: uniquely identifies each row in ${table} and can never be NULL${c.defaultValue !== null && c.defaultValue !== undefined ? ` — default ${c.defaultValue}` : ''}`
+                  ? `${c.name}${c.type ? ` ${c.type}` : ''} - primary key: uniquely identifies each row in ${table} and can never be NULL${c.defaultValue !== null && c.defaultValue !== undefined ? ` - default ${c.defaultValue}` : ''}`
                   : c.fk
-                    ? `${c.name}${c.type ? ` ${c.type}` : ''} — foreign key: each value points at ${c.fk.table}.${c.fk.column} — ON UPDATE ${c.fk.onUpdate ?? 'NO ACTION'}, ON DELETE ${c.fk.onDelete ?? 'NO ACTION'}`
-                    : `${c.name}${c.type ? ` ${c.type}` : ''}${c.notNull ? ' — NOT NULL' : ' — NULL allowed'}${c.defaultValue !== null && c.defaultValue !== undefined ? ` — default ${c.defaultValue}` : ''}`
+                    ? `${c.name}${c.type ? ` ${c.type}` : ''} - foreign key: each value points at ${c.fk.table}.${c.fk.column} - ON UPDATE ${c.fk.onUpdate ?? 'NO ACTION'}, ON DELETE ${c.fk.onDelete ?? 'NO ACTION'}`
+                    : `${c.name}${c.type ? ` ${c.type}` : ''}${c.notNull ? ' - NOT NULL' : ' - NULL allowed'}${c.defaultValue !== null && c.defaultValue !== undefined ? ` - default ${c.defaultValue}` : ''}`
               }
             >
               {/* Key arrows anchor at the attribute cells: tail at the parent's

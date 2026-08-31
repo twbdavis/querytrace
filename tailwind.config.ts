@@ -20,7 +20,7 @@ const config: Config = {
         canvas: rgb(surfaces.canvas),
         node: { DEFAULT: rgb(surfaces.node), header: rgb(surfaces.nodeHeader) },
         panel: rgb(surfaces.panel),
-        // Already an alpha overlay — no slash-opacity support needed for zebra.
+        // Already an alpha overlay - no slash-opacity support needed for zebra.
         'row-alt': surfaces.rowAlt,
         line: { DEFAULT: rgb(lines.default), strong: rgb(lines.strong) },
         ink: { DEFAULT: rgb(text.primary), dim: rgb(text.secondary), mute: rgb(text.muted) },
