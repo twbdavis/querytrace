@@ -18,9 +18,9 @@
   },
   "dependencies": {
     "@codemirror/lang-sql": "^6.10.0",
-    "@xyflow/react": "^12.3.0",
+    "@xyflow/react": "^12.11.5",
     "codemirror": "^6.0.2",
-    "next": "^16.3.2",
+    "next": "^16.3.3",
     "node-sql-parser": "^5.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/sql.js": "^1.4.9",
