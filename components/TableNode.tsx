@@ -94,7 +94,17 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
         }`}
       >
         <span className="font-ui text-[13px] font-medium tracking-wide text-ink">{table}</span>
-        <span className="font-data text-[10px] text-ink-dim">{rows.length} rows</span>
+        <span className="flex items-center gap-1.5 font-data text-[10px] text-ink-dim">
+          {pkIndices.size === 0 && (
+            <span
+              className="rounded-full border border-dashed border-ink-mute px-1.5 py-px font-data text-[8px] font-bold leading-none tracking-wider text-ink-mute"
+              title={`${table} declares no PRIMARY KEY. Rows are still traced individually by their hidden SQLite row number, but nothing stops duplicate rows.`}
+            >
+              NO PK
+            </span>
+          )}
+          {rows.length} rows
+        </span>
       </div>
 
       {/* Column headers + data rows share one grid so columns auto-size to

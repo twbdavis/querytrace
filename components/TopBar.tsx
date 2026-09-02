@@ -2,11 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { BookIcon, DatabaseIcon, HelpIcon } from './Icons';
+import { BookIcon, DatabaseIcon, HelpIcon, RunIcon } from './Icons';
 
 interface TopBarProps {
   onOpenSchema: () => void;
   onOpenLessons: () => void;
+  /** Show a RUN button here while the query panel (and its own RUN) is collapsed. */
+  showRun?: boolean;
 }
 
 const SHORTCUTS: Array<[string, string]> = [
@@ -22,8 +24,9 @@ const TIPS = [
   'On larger screens, collapse the query and result panels to give the schema more room.',
 ];
 
-export function TopBar({ onOpenSchema, onOpenLessons }: TopBarProps) {
+export function TopBar({ onOpenSchema, onOpenLessons, showRun = false }: TopBarProps) {
   const dbReady = useAppStore((state) => state.dbReady);
+  const runQuery = useAppStore((state) => state.runQuery);
   const [helpOpen, setHelpOpen] = useState(false);
   const helpRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +58,18 @@ export function TopBar({ onOpenSchema, onOpenLessons }: TopBarProps) {
       </div>
 
       <div className="flex shrink-0 items-center gap-2 max-sm:gap-1.5">
+        {showRun && (
+          <button
+            disabled={!dbReady}
+            onClick={() => void runQuery()}
+            className="panel-enter inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent-active bg-accent-active/10 px-2.5 py-1 font-ui text-[10px] font-bold tracking-wider text-accent-active transition-colors hover:bg-accent-active/20 disabled:cursor-wait disabled:opacity-40"
+            aria-label="Run query"
+            title="Run query (Ctrl/Cmd + Enter)"
+          >
+            <RunIcon size={11} />
+            RUN
+          </button>
+        )}
         <button disabled={!dbReady} onClick={onOpenSchema} className={chromeBtn} aria-label="Open schema settings" title="Schema">
           <DatabaseIcon size={11} />
           <span className="hidden sm:inline">SCHEMA</span>

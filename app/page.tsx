@@ -138,7 +138,12 @@ export default function Home() {
   return (
     <>
       <main className="flex h-[100dvh] flex-col overflow-hidden sm:h-screen">
-        <TopBar onOpenSchema={() => setSchemaOpen(true)} onOpenLessons={() => setLessonsOpen(true)} />
+        <TopBar
+          onOpenSchema={() => setSchemaOpen(true)}
+          onOpenLessons={() => setLessonsOpen(true)}
+          // The query panel carries its own RUN; offer one up here while it is collapsed.
+          showRun={isWide && !queryOpen}
+        />
 
         <div className="relative min-h-0 flex-1">
           {!dbReady && (

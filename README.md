@@ -74,8 +74,21 @@ so scrubbing backwards restores earlier states exactly.
 **Curriculum coverage:** SELECT/DISTINCT with comparisons, AND/OR/NOT,
 parentheses, LIKE, IN, BETWEEN, IS NULL, computed columns, CONCAT, field/table
 aliases, COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, mixed-direction ORDER BY,
-LIMIT, explicit inner/left/right joins, comma-style joins, multi-table joins,
-self-joins, UNION/UNION ALL, and uncorrelated/correlated/derived-table subqueries.
+LIMIT, explicit inner/left/right/full outer joins, CROSS JOIN, comma-style joins,
+multi-table joins, self-joins, UNION/UNION ALL, and uncorrelated/correlated/derived-table
+subqueries. Column and table references are checked against the loaded schema before
+execution, so a misspelled name is reported instead of silently becoming a text literal.
+
+**Custom schemas:** the schema builder accepts `CREATE TABLE` and `INSERT INTO ... VALUES`
+scripts as exported by MySQL Workbench / phpMyAdmin, pgAdmin, or SQL Server Management
+Studio. Table options such as `ENGINE=InnoDB`, `DEFAULT CHARSET`, `AUTO_INCREMENT=n` and
+`COMMENT`, column attributes such as `UNSIGNED`, `ENUM(...)`, `SERIAL`, `IDENTITY(1,1)`
+and `ON UPDATE CURRENT_TIMESTAMP`, inline `KEY`/`INDEX` lines, `dbo.` prefixes and
+`GO` separators are translated to SQLite automatically; `USE`, `SET`, `CREATE DATABASE`
+and `DROP TABLE IF EXISTS` are ignored. Statements run one at a time, so an error names
+the statement that failed (`CREATE TABLE equipment: duplicate column name: status`).
+Tables without a declared PRIMARY KEY (import/staging tables) load and are traced by
+SQLite rowid; the canvas marks them `NO PK`.
 The detailed row-provenance pipeline is used wherever the query can be safely
 decomposed; compound and derived-table queries expose their inner/branch results
 and exact SQLite final result.

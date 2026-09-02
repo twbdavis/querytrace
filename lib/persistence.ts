@@ -13,6 +13,8 @@ export interface PersistedAppState {
   lastSchemaId: string;
   customSchema?: SchemaDef;
   customDatabase?: Uint8Array;
+  /** Unbuilt schema SQL the user was still editing, so a failed attempt is never lost. */
+  customDdlDraft?: string;
   ranLessons: Record<string, boolean>;
 }
 
@@ -78,6 +80,7 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
           : 'observatory',
       customSchema,
       customDatabase: normalizeBytes(saved.customDatabase),
+      customDdlDraft: typeof saved.customDdlDraft === 'string' ? saved.customDdlDraft : undefined,
       ranLessons: currentCurriculum ? ranLessons : {},
     };
   } catch {

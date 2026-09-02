@@ -42,6 +42,9 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
   expect(wasm.headers()['cache-control']).toContain('max-age=31536000');
   expect(wasm.headers()['cache-control']).toContain('immutable');
 
+  // RUN enables once SQLite is up; typing before that is fine for a person but
+  // Playwright's select-all + insert can straddle the editor's schema reconfigure.
+  await expect(page.getByRole('button', { name: 'RUN', exact: true }).first()).toBeEnabled();
   await editor.fill("SELECT GIVEN_NAME FROM ASTRONOMER WHERE HOME_CITY = 'Tucson'");
   await editor.click();
   await page.keyboard.press('Control+Enter');
@@ -234,11 +237,14 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open schema settings' }).click();
+  // Staging tables without a declared key load (traced by rowid) and are flagged.
   await page.getByLabel('Schema definition SQL').fill(
     'CREATE TABLE NO_KEY (VALUE VARCHAR(20)); INSERT INTO NO_KEY VALUES (\'duplicateable\');'
   );
   await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
-  await expect(page.getByRole('alert').filter({ hasText: 'Table "NO_KEY"' })).toBeVisible();
+  await expect(page.getByTestId('rf__node-NO_KEY')).toBeVisible();
+  await expect(page.getByTestId('rf__node-NO_KEY').getByText('NO PK')).toBeVisible();
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`
     CREATE TABLE BAD_COMPOSITE (
       PART_A INTEGER,
@@ -268,4 +274,183 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
   await expect(
     page.getByText(/scalar aggregate cannot be selected with individual columns/i)
   ).toBeVisible();
+});
+
+test('offers a header RUN button only while the query panel is collapsed', async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 0) < 1024, 'The query panel only collapses in the wide layout.');
+  await page.goto('/');
+  const runButtons = page.getByRole('button', { name: 'RUN', exact: true });
+  await expect(runButtons.first()).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Run query', exact: true })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Collapse query panel' }).click();
+  const headerRun = page.getByRole('button', { name: 'Run query', exact: true });
+  await expect(headerRun).toBeVisible();
+  const restoreQuery = page.getByRole('button', { name: 'QUERY', exact: true });
+  await expect(restoreQuery).toBeVisible();
+  await headerRun.click();
+  await expect(page.getByRole('tablist', { name: 'Execution stages' })).toBeVisible();
+  await expect(page.getByText(/10 rows/).first()).toBeVisible();
+
+  await restoreQuery.click();
+  await expect(headerRun).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toBeVisible();
+});
+
+test('schema builder works in every layout: MySQL paste, kept draft, keyless table, RIGHT JOIN', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  const isPhone = (page.viewportSize()?.width ?? 0) < 640;
+  const editor = isPhone
+    ? page.locator('textarea[aria-label="SQL query editor"]')
+    : page.locator('.cm-content');
+  await expect(editor).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open schema settings' })).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Schema' });
+  const ddl = page.getByLabel('Schema definition SQL');
+  await ddl.fill(`
+    CREATE TABLE import_customers (customer_id TEXT, company_name TEXT) ENGINE=MyISAM;
+    CREATE TABLE customers (
+      customer_id VARCHAR(50) PRIMARY KEY,
+      company_name VARCHAR(100) NOT NULL,
+      CUSTOMER_ID INT
+    ) ENGINE=InnoDB;
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('CREATE TABLE customers: duplicate column name');
+
+  // Close with the header button (phones have no Escape key) and reopen: the SQL is still there.
+  await page.getByRole('button', { name: 'Close schema settings' }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  await expect(ddl).toHaveValue(/ENGINE=MyISAM/);
+
+  await ddl.fill(`
+    CREATE TABLE import_customers (customer_id TEXT, company_name TEXT) ENGINE=MyISAM;
+    CREATE TABLE customers (
+      customer_id VARCHAR(50) PRIMARY KEY,
+      company_name VARCHAR(100) NOT NULL
+    ) ENGINE=InnoDB;
+    CREATE TABLE equipment (
+      equipment_id VARCHAR(50) PRIMARY KEY,
+      customer_id VARCHAR(50),
+      capacity_kw INT,
+      FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB;
+    INSERT INTO import_customers VALUES ('C1', 'Acme');
+    INSERT INTO customers VALUES ('C1', 'Acme'), ('C2', 'Bolt');
+    INSERT INTO equipment VALUES ('E1', 'C1', 50);
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId('rf__node-import_customers')).toBeVisible();
+  await expect(page.getByTestId('rf__node-import_customers').getByText('NO PK')).toBeVisible();
+  await expect(editor).toHaveText(/SELECT \* FROM import_customers;/);
+
+  await editor.fill(
+    'SELECT c.company_name, e.capacity_kw FROM equipment e RIGHT JOIN customers c ON e.customer_id = c.customer_id;'
+  );
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByRole('tab', { name: /RIGHT JOIN customers/ })).toBeVisible();
+  await expect(page.getByText('2 rows', { exact: true }).first()).toBeVisible();
+  if (isPhone) {
+    // The phone sheet keeps the query and its rows visible together.
+    await expect(editor).toBeVisible();
+    await expect(page.getByText('intermediate rows', { exact: true })).toBeVisible();
+  }
+
+  await editor.fill('SELECT compny_name FROM customers;');
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByText(/Unknown column "compny_name"/)).toBeVisible();
+});
+
+test('builds a pasted MySQL export and keeps the draft when the dialog closes', async ({
+  page,
+  browserName,
+}) => {
+  test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic input validation.');
+  test.setTimeout(45_000);
+  await page.goto('/');
+  await expect(page.getByLabel('SQL query editor')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  const ddl = page.getByLabel('Schema definition SQL');
+  // A statement SQLite cannot run: the message must name the statement and
+  // the SQL must stay in the box afterwards.
+  await ddl.fill(`
+    CREATE TABLE customers (
+      customer_id VARCHAR(50) PRIMARY KEY,
+      company_name VARCHAR(100) NOT NULL
+    ) ENGINE=InnoDB;
+    CREATE TABLE import_equipment (
+      equipment_id TEXT,
+      customer_id TEXT,
+      CUSTOMER_ID TEXT
+    ) ENGINE=MyISAM;
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Schema' });
+  await expect(dialog.getByRole('alert')).toContainText('CREATE TABLE import_equipment: duplicate column name');
+  await expect(ddl).toHaveValue(/ENGINE=MyISAM/);
+
+  // Closing and reopening (Escape here) must bring the unbuilt SQL back.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await page.getByRole('button', { name: 'Open schema settings' }).click();
+  await expect(ddl).toHaveValue(/import_equipment/);
+
+  // Dragging a selection out of the SQL box and releasing on the backdrop
+  // must not close the dialog.
+  const box = (await ddl.boundingBox())!;
+  await page.mouse.move(box.x + 40, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 40, 4, { steps: 8 });
+  await page.mouse.up();
+  await expect(dialog).toBeVisible();
+
+  // The professor's schema shape: MySQL table options plus keyless staging tables.
+  await ddl.fill(`
+    CREATE TABLE import_customers (
+      customer_id TEXT,
+      company_name TEXT
+    ) ENGINE=MyISAM;
+    CREATE TABLE customers (
+      customer_id VARCHAR(50) PRIMARY KEY,
+      company_name VARCHAR(100) NOT NULL,
+      created_date DATE
+    ) ENGINE=InnoDB;
+    CREATE TABLE equipment (
+      equipment_id VARCHAR(50) PRIMARY KEY,
+      customer_id VARCHAR(50),
+      capacity_kw INT,
+      FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+        ON DELETE SET NULL
+        ON UPDATE CASCADE
+    ) ENGINE=InnoDB;
+    INSERT INTO import_customers VALUES ('C1', 'Acme');
+    INSERT INTO customers VALUES ('C1', 'Acme', '2024-01-01'), ('C2', 'Bolt', '2024-02-01');
+    INSERT INTO equipment VALUES ('E1', 'C1', 50), ('E2', 'C2', 75), ('E3', NULL, 20);
+  `);
+  await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId('rf__node-import_customers')).toBeVisible();
+  await expect(page.getByTestId('rf__node-equipment')).toBeVisible();
+  await expect(page.getByTestId('rf__node-import_customers').getByText('NO PK')).toBeVisible();
+
+  const editor = page.locator('.cm-content');
+  await editor.fill(
+    'SELECT c.company_name, e.capacity_kw FROM equipment e RIGHT JOIN customers c ON e.customer_id = c.customer_id;'
+  );
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByRole('tab', { name: /RIGHT JOIN customers/ })).toBeVisible();
+  await expect(page.getByText('2 rows', { exact: true }).first()).toBeVisible();
+
+  // A misspelled column is an error, not a column full of literal text.
+  await editor.fill('SELECT compny_name FROM customers;');
+  await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
+  await expect(page.getByText(/Unknown column "compny_name"/)).toBeVisible();
 });

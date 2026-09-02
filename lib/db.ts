@@ -1,6 +1,9 @@
 import type { Database, SqlJsStatic } from 'sql.js';
 import type { FkEdgeDef, TableMeta } from './schemas';
+import { maskSql, quoteIdent, splitSqlStatements, type SqlStatement } from './sqlText';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
+
+export { quoteIdent, splitSqlStatements } from './sqlText';
 
 let sqlJs: Promise<SqlJsStatic> | null = null;
 
@@ -23,42 +26,157 @@ function getSqlJs(): Promise<SqlJsStatic> {
   return sqlJs;
 }
 
-function validateCustomDdl(ddl: string): void {
+/** Statements other tools emit around a schema that mean nothing to a fresh in-memory database. */
+const IGNORED_STATEMENT =
+  /^(?:USE\b|SET\b|CREATE\s+(?:DATABASE|SCHEMA)\b|DROP\s+(?:TABLE|DATABASE|SCHEMA)\s+IF\s+EXISTS\b|START\s+TRANSACTION\b|BEGIN\b|COMMIT\b|LOCK\s+TABLES\b|UNLOCK\s+TABLES\b|GO$)/i;
+
+/** Table options MySQL appends after the closing parenthesis of CREATE TABLE. */
+const TABLE_OPTION =
+  '(?:ENGINE|(?:DEFAULT\\s+)?(?:CHARSET|CHARACTER\\s+SET|COLLATE)|AUTO_INCREMENT|COMMENT|ROW_FORMAT|CHECKSUM' +
+  '|MAX_ROWS|MIN_ROWS|PACK_KEYS|DELAY_KEY_WRITE|STATS_PERSISTENT|STATS_AUTO_RECALC|KEY_BLOCK_SIZE|TABLESPACE' +
+  '|COMPRESSION|ENCRYPTION|CONNECTION|DATA\\s+DIRECTORY|INDEX\\s+DIRECTORY|INSERT_METHOD|PASSWORD|TYPE)';
+const TABLE_OPTIONS_TAIL = new RegExp(
+  `\\)\\s*(?:${TABLE_OPTION}\\s*=?\\s*(?:'(?:''|[^'])*'|"(?:""|[^"])*"|[\\w.]+)\\s*,?\\s*)+$`,
+  'i'
+);
+
+/**
+ * Translate the dialect-specific parts of common DDL exports (MySQL Workbench,
+ * phpMyAdmin, pgAdmin, SQL Server) into SQLite so a schema copied from a
+ * course project builds without hand edits. Only syntax SQLite has no
+ * equivalent for is touched; the relational content stays exactly as written.
+ */
+/** Apply a regex replacement to SQL text while leaving literals and comments untouched. */
+function replaceOutsideLiteralsIn(text: string, pattern: RegExp, replacement: string): string {
+  const masked = maskSql(text);
+  let result = '';
+  let last = 0;
+  for (const match of masked.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    result += text.slice(last, index) + replacement;
+    last = index + match[0].length;
+  }
+  return result + text.slice(last);
+}
+
+function normalizeStatement(statement: SqlStatement): string {
+  let { text } = statement;
+  const isCreateTable = /^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b/i.test(statement.masked);
+
+  // Match against masked text (so literals are never touched), edit the original.
+  const replaceOutsideLiterals = (pattern: RegExp, replacement: string) => {
+    text = replaceOutsideLiteralsIn(text, pattern, replacement);
+  };
+
+  // A SQL Server schema prefix ("dbo.customers", "[dbo].[customers]") would
+  // name an attached database in SQLite. The quoted forms are matched on the
+  // original text because the mask blanks quoted names.
+  replaceOutsideLiterals(/\bdbo\.(?=[\w"`[])/gi, '');
+  text = text.replace(/(?:\[dbo\]|"dbo"|`dbo`)\.(?=[\w"`[])/gi, '');
+
+  if (isCreateTable) {
+    // SQLite assigns an omitted key itself only for a column typed exactly
+    // INTEGER, so an auto-numbered "INT(11) NOT NULL AUTO_INCREMENT" or
+    // "INT IDENTITY(1,1)" column is retyped and the identity keyword dropped.
+    replaceOutsideLiterals(
+      /\b(?:TINYINT|SMALLINT|MEDIUMINT|BIGINT|INTEGER|INT)\b(?:\s*\(\s*\d+\s*\))?(\s+UNSIGNED)?(?=[^,()]*?\bAUTO_INCREMENT\b)/gi,
+      'INTEGER'
+    );
+    replaceOutsideLiterals(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
+    replaceOutsideLiterals(
+      /\b(?:TINYINT|SMALLINT|BIGINT|INTEGER|INT)\b\s+IDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi,
+      'INTEGER'
+    );
+    replaceOutsideLiterals(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
+    replaceOutsideLiterals(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
+    // MySQL column attributes with no SQLite counterpart.
+    replaceOutsideLiterals(/\bON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/gi, '');
+    replaceOutsideLiterals(/\bCHARACTER\s+SET\s+\w+/gi, '');
+    replaceOutsideLiterals(/\bCHARSET\s+\w+/gi, '');
+    replaceOutsideLiterals(/\bCOLLATE\s+\w+/gi, '');
+    replaceOutsideLiterals(/\bCOMMENT\s+(?:'(?:''|[^'])*'|"(?:""|[^"])*")/gi, '');
+    replaceOutsideLiterals(/\bZEROFILL\b/gi, '');
+    // "INT(11) UNSIGNED": SQLite allows a size only at the end of a type name.
+    replaceOutsideLiterals(/\bUNSIGNED\b/gi, '');
+    replaceOutsideLiterals(/\b(?:ENUM|SET)\s*\((?:\s*'(?:''|[^'])*'\s*,?)+\s*\)/gi, 'TEXT');
+    // Inline secondary indexes: SQLite only accepts them as separate CREATE
+    // INDEX statements, and the canvas does not draw them anyway.
+    replaceOutsideLiterals(
+      /,\s*(?:UNIQUE\s+(?:KEY|INDEX)|(?:FULLTEXT|SPATIAL)\s+(?:KEY|INDEX)?|KEY|INDEX)\s+(?:`[^`]*`|"[^"]*"|\w+)\s*(?:USING\s+\w+\s*)?\([^)]*\)/gi,
+      ''
+    );
+    replaceOutsideLiterals(/\bUNIQUE\s+(?:KEY|INDEX)\s*\(/gi, 'UNIQUE (');
+    replaceOutsideLiterals(/\bFOREIGN\s+KEY\s+(?:`[^`]*`|"[^"]*"|\w+)\s*\(/gi, 'FOREIGN KEY (');
+    // ENGINE=InnoDB and friends after the column list.
+    const tail = maskSql(text).match(TABLE_OPTIONS_TAIL);
+    if (tail && tail.index !== undefined) text = `${text.slice(0, tail.index)})`;
+  } else if (/^INSERT\s+IGNORE\b/i.test(statement.masked)) {
+    text = text.replace(/^INSERT\s+IGNORE\b/i, 'INSERT OR IGNORE');
+  }
+  return text;
+}
+
+export interface PreparedStatement {
+  /** SQLite-ready text of the statement. */
+  sql: string;
+  /** What the statement does and to which table, for error messages. */
+  summary: string;
+}
+
+// Quoted names are blank inside the mask, so match the delimiters themselves.
+const TABLE_NAME_PATTERN = '((?:"[^"]*"|`[^`]*`|\\[[^\\]]*\\]|[^\\s(]+))';
+const CREATE_TABLE_HEAD = new RegExp(
+  `^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${TABLE_NAME_PATTERN}`,
+  'i'
+);
+const INSERT_HEAD = new RegExp(`^INSERT\\s+(?:OR\\s+IGNORE\\s+)?INTO\\s+${TABLE_NAME_PATTERN}`, 'i');
+
+/** Normalize, validate and split a custom-schema script into executable statements. */
+export function prepareCustomDdl(ddl: string): PreparedStatement[] {
   if (ddl.length > MAX_CUSTOM_DDL_CHARS) {
     throw new Error(`Custom schema SQL is limited to ${MAX_CUSTOM_DDL_CHARS.toLocaleString()} characters.`);
   }
-
-  // Mask comments and string values before checking statement types. Custom
-  // schemas intentionally support only the two operations exposed by the UI.
-  const executable = ddl
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/--[^\r\n]*/g, ' ')
-    .replace(/'(?:''|[^'])*'/g, "''");
-  const statements = executable.split(';').map((statement) => statement.trim()).filter(Boolean);
+  // SQL Server scripts separate batches with a bare GO line instead of a semicolon.
+  const script = replaceOutsideLiteralsIn(ddl, /^[ \t]*GO[ \t]*(?=\r?\n|$)/gim, ';');
+  const statements = splitSqlStatements(script).filter(
+    (statement) => !IGNORED_STATEMENT.test(statement.masked)
+  );
   if (statements.length > MAX_CUSTOM_STATEMENTS) {
     throw new Error(`Custom schemas are limited to ${MAX_CUSTOM_STATEMENTS} SQL statements.`);
   }
-  const unsupported = statements.find((statement) => {
-    if (/^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\b/i.test(statement)) {
-      return /\bAS\s+SELECT\b/i.test(statement);
-    }
-    if (/^INSERT\s+INTO\b/i.test(statement)) {
-      return !/\bVALUES\b/i.test(statement) || /\b(?:SELECT|WITH|PRAGMA|ATTACH)\b/i.test(statement);
-    }
-    return true;
-  });
-  if (unsupported) {
-    throw new Error('Custom schemas may contain only CREATE TABLE and INSERT INTO statements.');
-  }
-}
 
-/**
- * The schema builder accepts the common AUTO_INCREMENT spelling. SQLite automatically
- * assigns an omitted INTEGER PRIMARY KEY, so removing that dialect keyword
- * preserves the taught behavior while keeping the student's DDL portable here.
- */
-function normalizeCourseDdl(ddl: string): string {
-  return ddl.replace(/\bAUTO_INCREMENT\b/gi, '');
+  // Custom schemas intentionally support only the two operations exposed by the UI.
+  return statements.map((statement) => {
+    const normalized = normalizeStatement(statement);
+    // Drop comments that precede the statement so its first keyword is at index 0.
+    const sql = normalized.slice(maskSql(normalized).match(/^\s*/)![0].length);
+    const masked = maskSql(sql);
+    // The captured name sits at the end of the match; read it from the
+    // original text since the mask blanks quoted names.
+    const nameOf = (match: RegExpMatchArray) =>
+      sql.slice(match[0].length - match[1].length, match[0].length);
+    const create = masked.match(CREATE_TABLE_HEAD);
+    const insert = masked.match(INSERT_HEAD);
+    if (create) {
+      if (/\bAS\s+SELECT\b/i.test(masked)) {
+        throw new Error(
+          `CREATE TABLE ... AS SELECT is not supported here. Declare the columns of ${nameOf(create)} explicitly.`
+        );
+      }
+      return { sql, summary: `CREATE TABLE ${nameOf(create)}` };
+    }
+    if (insert) {
+      if (!/\bVALUES\b/i.test(masked) || /\b(?:SELECT|WITH|PRAGMA|ATTACH)\b/i.test(masked)) {
+        throw new Error(`INSERT INTO ${nameOf(insert)} must list its rows with VALUES (...).`);
+      }
+      return { sql, summary: `INSERT INTO ${nameOf(insert)}` };
+    }
+    const compact = sql.replace(/\s+/g, ' ').trim();
+    const preview = compact.length > 60 ? `${compact.slice(0, 60)}…` : compact;
+    throw new Error(
+      `Custom schemas may contain only CREATE TABLE and INSERT INTO statements. Remove or rewrite: ${preview}`
+    );
+  });
 }
 
 function enforceCustomSchemaLimits(db: Database, schema: TableMeta[]): void {
@@ -69,20 +187,19 @@ function enforceCustomSchemaLimits(db: Database, schema: TableMeta[]): void {
   let totalColumns = 0;
   let totalRows = 0;
   for (const table of schema) {
-    if (!table.columns.some((column) => column.pk)) {
-      throw new Error(
-        `Table "${table.name}" needs a PRIMARY KEY so every relation has a unique row identifier.`
-      );
-    }
+    // Tables without a declared key (import/staging tables, for example) are
+    // still traceable: SQLite's rowid identifies their rows on the canvas.
     const primaryKeyColumns = table.columns.filter((column) => column.pk);
-    const nullPrimaryKeyRows = Number(
-      queryAll(
-        db,
-        `SELECT COUNT(*) FROM ${quoteIdent(table.name)} WHERE ${primaryKeyColumns
-          .map((column) => `${quoteIdent(column.name)} IS NULL`)
-          .join(' OR ')}`
-      ).rows[0]?.[0] ?? 0
-    );
+    const nullPrimaryKeyRows = primaryKeyColumns.length
+      ? Number(
+          queryAll(
+            db,
+            `SELECT COUNT(*) FROM ${quoteIdent(table.name)} WHERE ${primaryKeyColumns
+              .map((column) => `${quoteIdent(column.name)} IS NULL`)
+              .join(' OR ')}`
+          ).rows[0]?.[0] ?? 0
+        )
+      : 0;
     if (nullPrimaryKeyRows > 0) {
       throw new Error(
         `Primary-key columns in table "${table.name}" cannot contain NULL values (entity integrity).`
@@ -108,13 +225,25 @@ function enforceCustomSchemaLimits(db: Database, schema: TableMeta[]): void {
 
 /** Build a fresh, resource-bounded in-memory database from schema SQL. */
 export async function createDatabase(ddl: string, validateAsCustom = false): Promise<Database> {
-  if (validateAsCustom) validateCustomDdl(ddl);
+  const statements = validateAsCustom ? prepareCustomDdl(ddl) : null;
   const SQL = await getSqlJs();
   const db = new SQL.Database();
   try {
     // Keep accidental or hostile custom schemas from exhausting browser memory.
     db.run('PRAGMA max_page_count = 16384; PRAGMA foreign_keys = ON;');
-    db.run(validateAsCustom ? normalizeCourseDdl(ddl) : ddl);
+    if (statements) {
+      // One statement at a time, so an error names the statement that caused it.
+      for (const statement of statements) {
+        try {
+          db.run(statement.sql);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`${statement.summary}: ${message}`);
+        }
+      }
+    } else {
+      db.run(ddl);
+    }
     if (validateAsCustom) {
       const { schema } = introspectSchema(db);
       enforceCustomSchemaLimits(db, schema);
@@ -262,8 +391,4 @@ export function getTableData(db: Exec, table: string): TableData {
     rows: res.rows.map((r) => r.slice(1)),
     rids: res.rows.map((r) => Number(r[0])),
   };
-}
-
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
 }

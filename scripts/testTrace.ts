@@ -383,6 +383,201 @@ async function main() {
     assert(mismatchRejected, 'UNION branches require equal column counts');
     console.log('  empty result + incompatible UNION rejection: ok');
   }
+  {
+    const right = run(
+      'festival',
+      'SELECT R.SCREENING_ID, A.FAMILY_NAME FROM RESERVATION R RIGHT JOIN ATTENDEE A ON R.ATTENDEE_ID = A.ATTENDEE_ID'
+    );
+    const rightJoin = right.find((step) => step.stage === 'join');
+    assert(!!rightJoin?.label.startsWith('RIGHT JOIN ATTENDEE'), `RIGHT JOIN is parsed and labeled (got "${rightJoin?.label}")`);
+    assert(right.at(-1)?.partialResult?.rows.length === 24, 'RIGHT JOIN keeps the attendee without reservations');
+    assert(!!rightJoin?.nullExtendedRows?.ATTENDEE?.has(312), 'RIGHT JOIN marks attendee 312 as NULL-extended');
+    const full = run(
+      'festival',
+      'SELECT A.FAMILY_NAME, R.SCREENING_ID FROM ATTENDEE A FULL OUTER JOIN RESERVATION R ON A.ATTENDEE_ID = R.ATTENDEE_ID'
+    );
+    assert(!!full.find((step) => step.stage === 'join')?.label.startsWith('FULL OUTER JOIN'), 'FULL OUTER JOIN is preserved');
+    const cross = run('observatory', 'SELECT T.TELESCOPE_NAME FROM TELESCOPE T CROSS JOIN TARGET X');
+    assert(cross.find((step) => step.stage === 'join')?.tuples?.length === 28, 'CROSS JOIN forms 4 × 7 combinations');
+    const inner = run('festival', 'SELECT * FROM SCREENING S INNER JOIN VENUE V ON S.VENUE_ID = V.VENUE_ID');
+    assert(!!inner.find((step) => step.stage === 'join')?.label.startsWith('INNER JOIN VENUE'), 'INNER JOIN keeps its spelling');
+    const { assignQueryRanges } = await import('../lib/clauseRanges');
+    const rightSql = 'SELECT S.FILM_TITLE FROM SCREENING S RIGHT OUTER JOIN VENUE V ON S.VENUE_ID = V.VENUE_ID';
+    const ranged = run('festival', rightSql);
+    assignQueryRanges(ranged, rightSql);
+    const joinRange = ranged.find((step) => step.stage === 'join')?.queryRange;
+    assert(
+      !!joinRange && rightSql.slice(joinRange.start, joinRange.end).startsWith('RIGHT OUTER JOIN VENUE'),
+      'RIGHT OUTER JOIN clause range starts at the modifier'
+    );
+    console.log('  RIGHT / FULL / CROSS joins: ok');
+  }
+  {
+    const { provenanceFor } = await import('../lib/provenance');
+    const steps = run(
+      'observatory',
+      'SELECT a.GIVEN_NAME, o.OBSERVED_ON FROM astronomer a JOIN observation o ON a.ASTRONOMER_ID = o.ASTRONOMER_ID'
+    );
+    const join = steps.find((step) => step.stage === 'join')!;
+    assert(join.tupleTables?.a === 'ASTRONOMER' && join.tupleTables?.o === 'OBSERVATION', 'steps carry an alias -> table map');
+    const firstPair = join.tuples![0];
+    const fromAstronomer = provenanceFor(join, 'ASTRONOMER', firstPair.a!);
+    assert((fromAstronomer.rows.OBSERVATION?.size ?? 0) > 0, 'clicking an aliased parent row lights its join partners');
+    const fromObservation = provenanceFor(join, 'OBSERVATION', firstPair.o!);
+    assert(fromObservation.rows.ASTRONOMER?.size === 1, 'clicking an aliased child row lights its parent');
+    const selfJoin = run(
+      'orchard',
+      'SELECT P.PLOT_NAME, B.PLOT_NAME FROM ORCHARD_PLOT P JOIN ORCHARD_PLOT B ON P.PARENT_PLOT_ID = B.PLOT_ID'
+    );
+    const selfStep = selfJoin.find((step) => step.stage === 'join')!;
+    const rootPlot = provenanceFor(selfStep, 'ORCHARD_PLOT', 1);
+    assert((rootPlot.rows.ORCHARD_PLOT?.size ?? 0) > 1, 'self-join provenance spans both aliases of the same table');
+    console.log('  alias-aware provenance: ok');
+  }
+  {
+    const database = new SQL.Database();
+    database.run('PRAGMA foreign_keys = ON');
+    database.run(`
+      CREATE TABLE "Order" ("Order Id" INTEGER PRIMARY KEY, "Group" TEXT);
+      CREATE TABLE line_item (id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES "Order"("Order Id"), qty INTEGER);
+      CREATE TABLE staging_rows (label TEXT, amount INTEGER);
+      INSERT INTO "Order" VALUES (1, 'a'), (2, 'b');
+      INSERT INTO line_item VALUES (10, 1, 5), (11, 2, 6);
+      INSERT INTO staging_rows VALUES ('x', 1), ('x', 1);
+    `);
+    const { schema } = introspectSchema(database);
+    const trace = (sql: string) => {
+      const parsed = parseQuery(sql);
+      if (!parsed.ok) throw new Error(parsed.error);
+      return buildTrace(parsed.ast, database, schema);
+    };
+    const reserved = trace('SELECT o."Group", l.qty FROM "Order" o JOIN line_item l ON o."Order Id" = l.order_id');
+    assert(reserved.at(-1)?.partialResult?.rows.length === 2, 'reserved-word table and column names are quoted in generated SQL');
+    const star = trace('SELECT * FROM "Order"');
+    assert(JSON.stringify(star.at(-1)?.partialResult?.columns) === JSON.stringify(['Order Id', 'Group']), 'SELECT * keeps spaced column names');
+    const keyless = trace('SELECT label, COUNT(*) FROM staging_rows GROUP BY label');
+    assert(keyless.at(-1)?.partialResult?.rows[0]?.[1] === 2, 'tables without a primary key are traced by rowid');
+    console.log('  quoted identifiers + keyless tables: ok');
+  }
+  {
+    const expectError = (schemaId: string, sql: string, pattern: RegExp, label: string) => {
+      let message = '';
+      try {
+        run(schemaId, sql);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      assert(pattern.test(message), `${label} (got "${message}")`);
+    };
+    expectError('observatory', 'SELECT GIVEN_NAM FROM ASTRONOMER', /Unknown column "GIVEN_NAM"\. ASTRONOMER has: ASTRONOMER_ID/, 'misspelled column is reported instead of returning a string literal');
+    expectError('observatory', 'SELECT A.NOPE FROM ASTRONOMER A', /Unknown column "NOPE" in ASTRONOMER/, 'qualified misspelling names the table');
+    expectError('observatory', 'SELECT Z.GIVEN_NAME FROM ASTRONOMER A', /"Z" is not a table or alias/, 'unknown alias is reported');
+    expectError('observatory', 'SELECT GIVEN_NAME FROM ASTRONOMERS', /Unknown table "ASTRONOMERS"/, 'unknown table is reported');
+    const correlated = run(
+      'orchard',
+      'SELECT P.PLOT_NAME FROM ORCHARD_PLOT P WHERE P.TREE_COUNT > (SELECT AVG(I.TREE_COUNT) FROM ORCHARD_PLOT I WHERE I.ZONE = P.ZONE)'
+    );
+    assert(correlated.at(-1)?.partialResult?.rows.length === 3, 'outer-scope references inside subqueries still validate');
+    const literal = run('marine', 'SELECT COMMON_NAME FROM SPECIES WHERE TAG_COLOR = "Blue"');
+    assert((literal.at(-1)?.partialResult?.rows.length ?? 0) > 0, 'double-quoted text is still accepted as a literal');
+    console.log('  unknown column / table diagnostics: ok');
+  }
+
+  console.log('\n=== custom schema DDL normalization');
+  {
+    const { prepareCustomDdl } = await import('../lib/db');
+    const build = (ddl: string): Database => {
+      const database = new SQL.Database();
+      database.run('PRAGMA foreign_keys = ON');
+      for (const statement of prepareCustomDdl(ddl)) {
+        try {
+          database.run(statement.sql);
+        } catch (error) {
+          throw new Error(`${statement.summary}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return database;
+    };
+    const mysqlExport = `
+      -- phpMyAdmin style export
+      SET FOREIGN_KEY_CHECKS=0;
+      CREATE DATABASE IF NOT EXISTS course;
+      USE course;
+      DROP TABLE IF EXISTS \`customers\`;
+      CREATE TABLE \`customers\` (
+        \`customer_id\` INT(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'surrogate key',
+        \`company_name\` VARCHAR(100) NOT NULL,
+        \`tier\` ENUM('gold','silver') DEFAULT 'silver',
+        \`notes\` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (\`customer_id\`),
+        UNIQUE KEY \`uq_company\` (\`company_name\`),
+        KEY \`idx_tier\` (\`tier\`)
+      ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Engine=Fake; still a comment';
+      CREATE TABLE equipment (
+        equipment_id INT PRIMARY KEY,
+        customer_id INT UNSIGNED,
+        model VARCHAR(50),
+        CONSTRAINT fk_equipment_customer FOREIGN KEY fk_idx (customer_id) REFERENCES customers (customer_id) ON DELETE SET NULL
+      ) ENGINE=MyISAM;
+      CREATE TABLE import_equipment (equipment_id TEXT, model TEXT) ENGINE=MyISAM;
+      INSERT INTO customers (company_name, tier) VALUES ('Acme; ENGINE=Fake', 'gold'), ('Bolt', 'silver');
+      INSERT IGNORE INTO customers (customer_id, company_name) VALUES (1, 'Duplicate');
+      INSERT INTO equipment VALUES (1, 1, 'GenX'), (2, 2, 'GenY');
+      INSERT INTO import_equipment VALUES ('E1', 'GenX');
+      COMMIT;
+    `;
+    const mysql = build(mysqlExport);
+    const model = introspectSchema(mysql);
+    assert(model.schema.map((table) => table.name).join(',') === 'customers,equipment,import_equipment', `MySQL export builds all tables (got ${model.schema.map((table) => table.name).join(',')})`);
+    assert(model.fkEdges.length === 1 && model.fkEdges[0].source === 'customers', 'MySQL FOREIGN KEY with an index name still becomes an edge');
+    assert(Number(mysql.exec('SELECT COUNT(*) FROM customers')[0].values[0][0]) === 2, 'INSERT IGNORE is honored and semicolons in text are kept');
+    assert(mysql.exec("SELECT company_name FROM customers WHERE customer_id = 1")[0].values[0][0] === 'Acme; ENGINE=Fake', 'string literals are not rewritten');
+    assert(model.schema[0].columns.find((column) => column.name === 'tier')?.type === 'TEXT', 'ENUM becomes TEXT');
+    assert(!model.schema[2].columns.some((column) => column.pk), 'a keyless staging table is accepted');
+
+    const postgresAndSqlServer = build(`
+      CREATE TABLE dbo.departments (
+        department_id SERIAL PRIMARY KEY,
+        name VARCHAR(50) NOT NULL
+      );
+      GO
+      CREATE TABLE [dbo].[staff] (
+        staff_id INT IDENTITY(1,1) PRIMARY KEY,
+        department_id INT REFERENCES dbo.departments (department_id),
+        [full name] NVARCHAR(80)
+      );
+      INSERT INTO dbo.departments (name) VALUES ('Physics');
+      INSERT INTO dbo.staff (department_id, [full name]) VALUES (1, 'Ada');
+    `);
+    const pgModel = introspectSchema(postgresAndSqlServer);
+    assert(pgModel.schema.length === 2 && pgModel.fkEdges.length === 1, 'SERIAL, IDENTITY, GO and dbo. prefixes are translated');
+    assert(pgModel.schema[1].columns.some((column) => column.name === 'full name'), 'bracketed identifiers survive');
+
+    const expectDdlError = (ddl: string, pattern: RegExp, label: string) => {
+      let message = '';
+      try {
+        build(ddl);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      assert(pattern.test(message), `${label} (got "${message}")`);
+    };
+    expectDdlError(
+      'CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT, ID TEXT);',
+      /^CREATE TABLE b: duplicate column name: ID/,
+      'errors name the statement that failed'
+    );
+    expectDdlError(
+      "CREATE TABLE a (id INT PRIMARY KEY); INSERT INTO a VALUES (1), (1);",
+      /^INSERT INTO a: UNIQUE constraint failed/,
+      'insert errors name their table'
+    );
+    expectDdlError("ATTACH DATABASE 'x' AS y;", /only CREATE TABLE and INSERT INTO statements\. Remove or rewrite: ATTACH DATABASE/, 'unsupported statements are quoted back');
+    expectDdlError('CREATE TABLE t AS SELECT 1 AS x;', /AS SELECT is not supported/, 'CREATE TABLE AS SELECT is rejected');
+    expectDdlError('CREATE TABLE t (x INT PRIMARY KEY); INSERT INTO t SELECT 1;', /must list its rows with VALUES/, 'INSERT ... SELECT is rejected');
+    console.log('  dialect normalization + statement-level errors: ok');
+  }
 
   console.log('\n=== clause ranges');
   {

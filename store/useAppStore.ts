@@ -9,6 +9,7 @@ import {
   savePersistedAppState,
 } from '@/lib/persistence';
 import { provenanceFor } from '@/lib/provenance';
+import { quoteIdentIfNeeded } from '@/lib/sqlText';
 import type { TraceStep } from '@/lib/traceEngine';
 import { PRELOADED_SCHEMAS, schemaById, type FkEdgeDef, type SchemaDef, type TableMeta } from '@/lib/schemas';
 import { loadSchemaInWorker, runQueryInWorker } from '@/lib/sqlWorkerClient';
@@ -38,6 +39,8 @@ interface AppState {
   schemaDef: SchemaDef;
   savedCustomSchema: SchemaDef | null;
   savedCustomDatabase: Uint8Array | null;
+  /** Schema SQL being edited in the builder; survives closing the dialog and reloads. */
+  customDdlDraft: string | null;
   schema: TableMeta[];
   fkEdges: FkEdgeDef[];
   tableData: Record<string, TableData>;
@@ -82,6 +85,10 @@ interface AppState {
   setHoveredResultRow: (i: number | null) => void;
   markLessonRun: (id: string) => Promise<void>;
   setEditorFocused: (focused: boolean) => void;
+  /** Keep the builder's unsaved SQL in memory (every keystroke). */
+  setCustomDdlDraft: (ddl: string | null) => void;
+  /** Write the current draft to storage (dialog close, build attempt). */
+  persistCustomDdlDraft: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -91,6 +98,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   schemaDef: PRELOADED_SCHEMAS[0],
   savedCustomSchema: null,
   savedCustomDatabase: null,
+  customDdlDraft: null,
   schema: [],
   fkEdges: [],
   tableData: {},
@@ -119,6 +127,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ranLessons: persisted.ranLessons,
         savedCustomSchema: persisted.customSchema ?? null,
         savedCustomDatabase: persisted.customDatabase ?? null,
+        customDdlDraft: persisted.customDdlDraft ?? null,
       });
     }
     const startupSchema =
@@ -146,6 +155,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         return { ok: false, cancelled: true };
       }
 
+      // Someone who starts typing while SQLite is still starting keeps their
+      // text: only a change of schema replaces the editor with the starter query.
+      const previous = get();
+      const keepTypedSql =
+        !previous.dbReady && def.id === previous.schemaDef.id && previous.sql !== previous.schemaDef.starterQuery;
       set({
         dbReady: true,
         dbError: null,
@@ -153,7 +167,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         schema,
         fkEdges,
         tableData,
-        sql: def.starterQuery || `SELECT * FROM ${schema[0].name};`,
+        sql: keepTypedSql
+          ? previous.sql
+          : def.starterQuery || `SELECT * FROM ${quoteIdentIfNeeded(schema[0].name)};`,
         trace: null,
         tracedSql: null,
         currentStep: 0,
@@ -164,7 +180,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         hoveredRow: null,
         hoveredResultRow: null,
         ...(def.id === 'custom'
-          ? { savedCustomSchema: def, savedCustomDatabase: databaseBytes ?? null }
+          ? // A successful build is the new saved schema; the draft has served its purpose.
+            { savedCustomSchema: def, savedCustomDatabase: databaseBytes ?? null, customDdlDraft: null }
           : {}),
       });
       const state = get();
@@ -172,6 +189,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastSchemaId: def.id,
         customSchema: state.savedCustomSchema ?? undefined,
         customDatabase: state.savedCustomDatabase ?? undefined,
+        customDdlDraft: state.customDdlDraft ?? undefined,
         ranLessons: state.ranLessons,
       });
       if (def.id === 'custom') requestDurableStorage();
@@ -275,16 +293,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHoveredResultRow: (i) => set({ hoveredResultRow: i }),
   markLessonRun: (id) => {
     set((state) => ({ ranLessons: { ...state.ranLessons, [id]: true } }));
-    const state = get();
-    return savePersistedAppState({
-      lastSchemaId: state.schemaDef.id,
-      customSchema: state.savedCustomSchema ?? undefined,
-      customDatabase: state.savedCustomDatabase ?? undefined,
-      ranLessons: state.ranLessons,
-    });
+    return persistCurrentState();
   },
   setEditorFocused: (focused) => set({ editorFocused: focused }),
+  setCustomDdlDraft: (ddl) => set({ customDdlDraft: ddl }),
+  persistCustomDdlDraft: () => persistCurrentState(),
 }));
+
+/** Snapshot everything durable (schema choice, custom DB, draft, progress) into IndexedDB. */
+function persistCurrentState(): Promise<void> {
+  const state = useAppStore.getState();
+  if (!state.dbReady) return Promise.resolve();
+  return savePersistedAppState({
+    lastSchemaId: state.schemaDef.id,
+    customSchema: state.savedCustomSchema ?? undefined,
+    customDatabase: state.savedCustomDatabase ?? undefined,
+    customDdlDraft: state.customDdlDraft ?? undefined,
+    ranLessons: state.ranLessons,
+  });
+}
 
 /** Current step, derived. */
 export function useCurrentStep(): TraceStep | null {

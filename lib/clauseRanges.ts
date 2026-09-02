@@ -78,13 +78,13 @@ export function computeClauseRanges(sql: string): ClauseRanges {
   const orderTok = tokens.find((t, i) => t.text === 'ORDER' && tokens[i + 1]?.text === 'BY');
   const limitStart = at('LIMIT');
 
-  // Each JOIN keyword, extended left over INNER/LEFT/RIGHT/OUTER modifiers.
+  // Each JOIN keyword, extended left over INNER/LEFT/RIGHT/FULL/CROSS/OUTER modifiers.
   const joinStarts: number[] = [];
   tokens.forEach((t, i) => {
     if (t.text !== 'JOIN') return;
     let s = i;
     if (tokens[s - 1]?.text === 'OUTER') s--;
-    if (['INNER', 'LEFT', 'RIGHT'].includes(tokens[s - 1]?.text ?? '')) s--;
+    if (['INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'].includes(tokens[s - 1]?.text ?? '')) s--;
     joinStarts.push(tokens[s].start);
   });
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { LESSONS, type Lesson } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
 import { useAppStore } from '@/store/useAppStore';
@@ -21,6 +21,7 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
   const ranLessons = useAppStore((s) => s.ranLessons);
   const markLessonRun = useAppStore((s) => s.markLessonRun);
   const done = Object.values(ranLessons).filter(Boolean).length;
+  const pressedBackdrop = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -48,14 +49,22 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
       {open && (
         <div
           className="modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
-          onClick={onClose}
+          // Close only for a press that starts and ends on the backdrop, so a
+          // drag that begins inside the dialog (selecting text) never closes it.
+          onMouseDown={(e) => {
+            pressedBackdrop.current = e.target === e.currentTarget;
+          }}
+          onClick={(e) => {
+            const startedOnBackdrop = pressedBackdrop.current;
+            pressedBackdrop.current = false;
+            if (startedOnBackdrop && e.target === e.currentTarget) onClose();
+          }}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-label="Lessons"
             className="modal-dialog-enter flex max-h-[85vh] w-full max-w-4xl flex-col rounded-md border border-line-strong bg-panel max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none max-sm:border-0"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-line px-4 py-3 max-sm:min-h-14 max-sm:px-3 max-sm:pt-[calc(0.75rem+env(safe-area-inset-top))]">
               <span className="inline-flex items-center gap-2 font-ui text-[12px] font-bold uppercase tracking-[0.2em] text-ink">

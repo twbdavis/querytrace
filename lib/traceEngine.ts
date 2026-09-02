@@ -3,6 +3,7 @@ import { Parser } from 'node-sql-parser/build/sqlite';
 import type { AstExpr, FromItem, SelectAst } from './parser';
 import { groupByExprs, hasNestedSelect, queryTableNames } from './parser';
 import type { TableMeta } from './schemas';
+import { quoteIdent } from './sqlText';
 import { GROUP_PALETTE } from '../styles/theme';
 
 /** Minimal executor interface so the engine is pure and unit-testable. */
@@ -39,8 +40,10 @@ export interface TraceStep {
   partialResult?: { columns: string[]; rows: unknown[][] };
   /** Rows kept by an outer join despite having no match (dashed border). */
   nullExtendedRows?: Record<string, Set<number>>;
-  /** Current pipeline rows as table -> rowid maps, for click provenance. */
+  /** Current pipeline rows as alias -> rowid maps, for click provenance. */
   tuples?: Array<Record<string, number | null>>;
+  /** Alias (as written in FROM) -> canonical table name for every key in `tuples`. */
+  tupleTables?: Record<string, string>;
   /** For select/orderLimit steps: result row index -> contributing rowids per table. */
   resultRowSources?: Array<Record<string, number[]>>;
   /** Character range of the clause in the original query text (for editor highlight). */
@@ -143,9 +146,16 @@ function resolveTable(schema: TableMeta[], table: string): TableMeta {
   return meta;
 }
 
+/** Table reference as SQLite must see it: canonical name, quoted, plus the query's alias. */
 function fmtRef(ctx: EngineCtx, i: number): string {
-  const f = ctx.from[i];
-  return f.as ? `${f.table!} ${f.as}` : f.table!;
+  const ref = ctx.refs[i];
+  const table = quoteIdent(ref.table);
+  return ref.alias.toLowerCase() === ref.table.toLowerCase() ? table : `${table} AS ${quoteIdent(ref.alias)}`;
+}
+
+/** `alias.column`, quoted so reserved words and spaces survive. */
+function qualified(alias: string, column: string): string {
+  return `${quoteIdent(alias)}.${quoteIdent(column)}`;
 }
 
 /** FROM clause including joins 1..k. */
@@ -157,7 +167,8 @@ function fromClause(ctx: EngineCtx, k: number): string {
       s += `, ${fmtRef(ctx, i)}`;
     } else {
       const join = f.join.toUpperCase();
-      s += ` ${join} ${fmtRef(ctx, i)} ON ${exprSql(f.on as AstExpr)}`;
+      s += ` ${join} ${fmtRef(ctx, i)}`;
+      if (f.on) s += ` ON ${exprSql(f.on as AstExpr)}`;
     }
   }
   return s;
@@ -179,7 +190,7 @@ function exec(ctx: EngineCtx, sql: string): { columns: string[]; rows: unknown[]
 function execTuples(ctx: EngineCtx, k: number, where: string | null): Array<Record<string, number | null>> {
   const cols = ctx.refs
     .slice(0, k + 1)
-    .map((r, i) => `${r.alias}.rowid AS k${i}`)
+    .map((r, i) => `${quoteIdent(r.alias)}.rowid AS k${i}`)
     .join(', ');
   const sql = `SELECT ${cols} FROM ${fromClause(ctx, k)}${where ? ` WHERE ${where}` : ''}`;
   const { rows } = exec(ctx, sql);
@@ -239,7 +250,7 @@ function diffSets(prev: Record<string, Set<number>>, next: Record<string, Set<nu
 }
 
 function allPks(ctx: EngineCtx, table: string): Set<number> {
-  const { rows } = exec(ctx, `SELECT rowid FROM "${table}" ORDER BY rowid`);
+  const { rows } = exec(ctx, `SELECT rowid FROM ${quoteIdent(table)} ORDER BY rowid`);
   return new Set(rows.map((r) => Number(r[0])));
 }
 
@@ -319,7 +330,7 @@ function buildSelectList(ctx: EngineCtx): SelectItem[] {
       .filter((r) => !onlyAlias || r.alias === onlyAlias)
       .flatMap((r) => {
         const meta = ctx.schema.find((t) => t.name === r.table);
-        return (meta?.columns ?? []).map((c) => ({ sql: `${r.alias}.${c.name}` }));
+        return (meta?.columns ?? []).map((c) => ({ sql: qualified(r.alias, c.name) }));
       });
 
   if (typeof cols === 'string') return expandStar();
@@ -486,11 +497,107 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
   return steps;
 }
 
+interface Scope {
+  /** alias (lowercase) -> canonical table name, for physical tables in this SELECT. */
+  tables: Map<string, string>;
+  /** Derived-table aliases (lowercase); their columns are not checked. */
+  derived: Set<string>;
+  parent: Scope | null;
+}
+
+/**
+ * SQLite reads an unknown double-quoted name as a string literal, so a typo
+ * such as SELECT GIVEN_NAM would silently return the text 'GIVEN_NAM'. Check
+ * every column reference against the loaded schema first and explain the miss.
+ */
+export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): void {
+  const tableByName = new Map(schema.map((table) => [table.name.toLowerCase(), table]));
+  const columnsOf = (table: string) =>
+    tableByName.get(table.toLowerCase())?.columns.map((column) => column.name) ?? [];
+  const hasColumn = (table: string, column: string) =>
+    columnsOf(table).some((name) => name.toLowerCase() === column.toLowerCase());
+
+  const check = (select: SelectAst, parent: Scope | null) => {
+    const scope: Scope = { tables: new Map(), derived: new Set(), parent };
+    for (const item of select.from ?? []) {
+      const alias = (item.as ?? item.table ?? '').toLowerCase();
+      if (item.expr) scope.derived.add(alias);
+      else if (item.table) {
+        const meta = tableByName.get(item.table.toLowerCase());
+        if (meta) scope.tables.set(alias, meta.name);
+      }
+    }
+    const visible = (node: unknown) => {
+      if (node === null || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        node.forEach(visible);
+        return;
+      }
+      const obj = node as Record<string, unknown>;
+      if (obj.type === 'select') {
+        check(obj as unknown as SelectAst, scope);
+        return;
+      }
+      if (obj.type === 'column_ref') {
+        const column = columnName(obj.column);
+        const qualifier = typeof obj.table === 'string' ? obj.table : null;
+        if (column && column !== '*') verify(qualifier, column, scope);
+      }
+      Object.values(obj).forEach(visible);
+    };
+    visible([select.columns, select.from, select.where, select.groupby, select.having, select.orderby]);
+    if (select._next) check(select._next, parent);
+  };
+
+  const verify = (qualifier: string | null, column: string, scope: Scope) => {
+    if (qualifier) {
+      const key = qualifier.toLowerCase();
+      for (let s: Scope | null = scope; s; s = s.parent) {
+        if (s.derived.has(key)) return;
+        const table = s.tables.get(key);
+        if (table) {
+          if (!hasColumn(table, column)) {
+            throw new TraceError(
+              `Unknown column "${column}" in ${table}. Its columns are: ${columnsOf(table).join(', ')}.`
+            );
+          }
+          return;
+        }
+      }
+      throw new TraceError(
+        `"${qualifier}" is not a table or alias in this query's FROM clause, so ${qualifier}.${column} cannot be resolved.`
+      );
+    }
+    // Unqualified: some table in an enclosing scope must have the column. A
+    // derived table in scope may supply it, so only report when none can.
+    const candidates: string[] = [];
+    for (let s: Scope | null = scope; s; s = s.parent) {
+      if (s.derived.size) return;
+      for (const table of s.tables.values()) {
+        if (hasColumn(table, column)) return;
+        candidates.push(table);
+      }
+    }
+    const unique = Array.from(new Set(candidates));
+    throw new TraceError(
+      `Unknown column "${column}". ${
+        unique.length === 1
+          ? `${unique[0]} has: ${columnsOf(unique[0]).join(', ')}.`
+          : `None of ${unique.join(', ')} has a column with that name.`
+      }`
+    );
+  };
+
+  check(ast, null);
+}
+
 /**
  * Decompose a parsed SELECT into visual execution stages.
  * Pure with respect to inputs: (ast, db, schema) -> TraceStep[].
  */
 export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): TraceStep[] {
+  for (const name of queryTableNames(ast)) resolveTable(schema, name);
+  validateColumnReferences(ast, schema);
   const hasDerivedTable = (ast.from ?? []).some((item) => !!item.expr);
   if (ast._next || hasDerivedTable) return buildAdvancedTrace(ast, db, schema);
 
@@ -564,8 +671,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
     let narration = onSql
       ? `For each surviving row, SQLite looks for rows in ${refs[i].table} where ${onSql} holds. ${matches} matched ${matches === 1 ? 'pair lights' : 'pairs light'} up along the key columns.`
-      : `The comma-style join first forms a Cartesian product with ${matches} row combinations. The WHERE clause must then keep only the related pairs.`;
-    if (onSql && (joinType.startsWith('LEFT') || joinType.startsWith('RIGHT'))) {
+      : `The ${f.join ? 'CROSS JOIN' : 'comma-style join'} first forms a Cartesian product with ${matches} row combinations. ${f.join ? 'Every row pairs with every row of the other table.' : 'The WHERE clause must then keep only the related pairs.'}`;
+    if (onSql && /^(LEFT|RIGHT|FULL)\b/.test(joinType)) {
       narration += ` Because this is a ${joinType}, ${unmatched} unmatched ${unmatched === 1 ? 'row is' : 'rows are'} kept anyway and padded with NULLs (dashed border).`;
     } else if (onSql) {
       narration += ` Rows on either side with no partner are eliminated.`;
@@ -629,7 +736,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   if (ctx.groupExprSqls) {
     const gN = ctx.groupExprSqls.length;
     const gsel = ctx.groupExprSqls.map((g, i) => `${g} AS __grp${i}`);
-    const csel = refs.map((r, i) => `GROUP_CONCAT(${r.alias}.rowid) AS __pks${i}`);
+    const csel = refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}.rowid) AS __pks${i}`);
     const whereFrag = ctx.whereSql ? ` WHERE ${ctx.whereSql}` : '';
     const groupFrag = ` GROUP BY ${ctx.groupExprSqls.join(', ')}`;
     const baseSql = `SELECT ${[...gsel, ...csel].join(', ')}, COUNT(*) AS __cnt FROM ${fromClause(ctx, nJoins)}${whereFrag}${groupFrag}`;
@@ -738,8 +845,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     ast.columns.some((column) => astContainsType(column.expr, 'aggr_func'));
   const groupedProvenance = !!ctx.groupExprSqls || scalarAggregate;
   const provCols = groupedProvenance
-    ? refs.map((r, i) => `GROUP_CONCAT(${r.alias}.rowid) AS __prov${i}`)
-    : refs.map((r, i) => `${r.alias}.rowid AS __prov${i}`);
+    ? refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}.rowid) AS __prov${i}`)
+    : refs.map((r, i) => `${quoteIdent(r.alias)}.rowid AS __prov${i}`);
 
   const coreFrom =
     `FROM ${fromClause(ctx, nJoins)}` +
@@ -864,6 +971,11 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       partialResult: { columns: finalRes.displayColumns, rows: finalRes.displayRows },
     });
   }
+
+  // Tuples are keyed by the alias used in generated SQL; let the UI map each
+  // alias back to the table node it belongs to (self-joins have two aliases).
+  const tupleTables = Object.fromEntries(refs.map((r) => [r.alias, r.table]));
+  for (const step of steps) if (step.tuples) step.tupleTables = tupleTables;
 
   return steps;
 

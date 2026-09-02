@@ -96,6 +96,8 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (fromTextInput(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      // A modal dialog owns the keyboard while it is open.
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const s = useAppStore.getState();
       if (s.editorFocused || !s.trace) return;
       switch (e.key) {

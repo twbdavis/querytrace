@@ -1,6 +1,7 @@
 // Deep import: the package root is a ~2.4 MB bundle of every SQL dialect; the
 // sqlite-only build keeps compile time and the client bundle small.
 import { Parser } from 'node-sql-parser/build/sqlite';
+import { maskSql } from './sqlText';
 
 /** Loose structural types for the slice of the node-sql-parser AST we support. */
 export interface AstExpr {
@@ -14,6 +15,7 @@ export interface FromItem {
   as?: string | null;
   join?: string;
   on?: AstExpr;
+  using?: unknown;
   expr?: { ast?: SelectAst; [key: string]: unknown };
 }
 
@@ -60,7 +62,68 @@ const SUPPORTED_JOINS = new Set([
   'LEFT OUTER JOIN',
   'RIGHT JOIN',
   'RIGHT OUTER JOIN',
+  'FULL JOIN',
+  'FULL OUTER JOIN',
+  'CROSS JOIN',
 ]);
+
+/**
+ * The sqlite grammar of node-sql-parser only knows INNER and LEFT joins.
+ * SQLite itself (3.39+) executes RIGHT, FULL and CROSS joins, so those
+ * keywords are swapped for a parseable spelling of the same length before
+ * parsing and restored on the AST afterwards, in document order.
+ */
+const JOIN_KEYWORD = /\b(RIGHT|FULL|CROSS|LEFT|INNER)(\s+OUTER)?(\s+)JOIN\b|\bJOIN\b/gi;
+
+interface JoinRewrite {
+  sql: string;
+  /** Canonical join kind of every JOIN keyword, in the order they appear. */
+  kinds: string[];
+}
+
+function rewriteJoinKeywords(sql: string): JoinRewrite {
+  const masked = maskSql(sql);
+  const kinds: string[] = [];
+  let out = '';
+  let last = 0;
+  for (const match of masked.matchAll(JOIN_KEYWORD)) {
+    const index = match.index ?? 0;
+    const modifier = match[1]?.toUpperCase();
+    const outer = match[2] ? ' OUTER' : '';
+    kinds.push(modifier ? `${modifier}${outer} JOIN` : 'JOIN');
+    let replacement = match[0];
+    if (modifier === 'RIGHT') replacement = `LEFT ${match[0].slice(5)}`;
+    else if (modifier === 'FULL') replacement = `LEFT${match[0].slice(4)}`;
+    else if (modifier === 'CROSS') replacement = `     ${match[0].slice(5)}`;
+    out += sql.slice(last, index) + replacement;
+    last = index + match[0].length;
+  }
+  return { sql: out + sql.slice(last), kinds };
+}
+
+/** Walk every FROM item that carries a JOIN keyword, in the order the text lists them. */
+function forEachJoinItem(ast: SelectAst, visit: (item: FromItem) => void): void {
+  const visitSelect = (select: SelectAst | null | undefined) => {
+    if (!select) return;
+    nestedSelects(select.columns).forEach(visitSelect);
+    for (const item of select.from ?? []) {
+      if (item.join) visit(item);
+      if (item.expr?.ast) visitSelect(item.expr.ast);
+      nestedSelects(item.on).forEach(visitSelect);
+    }
+    nestedSelects([select.where, select.groupby, select.having, select.orderby]).forEach(visitSelect);
+    visitSelect(select._next);
+  };
+  visitSelect(ast);
+}
+
+function restoreJoinKinds(ast: SelectAst, kinds: string[]): void {
+  let index = 0;
+  forEachJoinItem(ast, (item) => {
+    const kind = kinds[index++];
+    if (kind) item.join = kind;
+  });
+}
 
 function containsAggregate(node: unknown): boolean {
   if (node === null || typeof node !== 'object') return false;
@@ -265,9 +328,16 @@ function validateSelect(ast: SelectAst, nested = false): string | null {
     if (item.join) {
       const join = item.join.toUpperCase();
       if (!SUPPORTED_JOINS.has(join)) {
-        return `${UNSUPPORTED} Only JOIN and LEFT/RIGHT OUTER JOIN are visualized (got "${item.join}").`;
+        return `${UNSUPPORTED} Only JOIN, LEFT/RIGHT/FULL OUTER JOIN and CROSS JOIN are visualized (got "${item.join}").`;
       }
-      if (!item.on) return `${UNSUPPORTED} Every explicit JOIN needs an ON condition.`;
+      if (item.using) {
+        return `${UNSUPPORTED} JOIN ... USING is not covered; spell the condition out with ON table1.column = table2.column.`;
+      }
+      if (join === 'CROSS JOIN') {
+        if (item.on) return 'A CROSS JOIN pairs every row with every row and takes no ON condition; use JOIN ... ON to match keys.';
+      } else if (!item.on) {
+        return `${UNSUPPORTED} Every explicit JOIN needs an ON condition.`;
+      }
     }
   }
 
@@ -324,9 +394,10 @@ export function parseQuery(sql: string): ParseOutcome {
   if (!trimmed) return { ok: false, error: 'Type a query to get started.' };
 
   const parser = new Parser();
+  const rewritten = rewriteJoinKeywords(trimmed);
   let raw: unknown;
   try {
-    raw = parser.astify(trimmed, { database: 'sqlite' });
+    raw = parser.astify(rewritten.sql, { database: 'sqlite' });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `SQL syntax error: ${msg}` };
@@ -340,6 +411,7 @@ export function parseQuery(sql: string): ParseOutcome {
   }
 
   const ast = raw as SelectAst;
+  if (ast && typeof ast === 'object' && ast.type === 'select') restoreJoinKinds(ast, rewritten.kinds);
 
   const validationError = validateSelect(ast);
   if (validationError) return { ok: false, error: validationError };
