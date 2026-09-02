@@ -306,7 +306,12 @@ function nestedSelects(node: unknown, out: SelectAst[] = []): SelectAst[] {
 }
 
 function validateSelect(ast: SelectAst, nested = false): string | null {
-  if (ast.type !== 'select') return `${UNSUPPORTED} Only SELECT queries can be visualized.`;
+  if (ast.type !== 'select') {
+    const kind = typeof ast.type === 'string' ? ast.type.toUpperCase() : 'This';
+    return /^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|REPLACE)$/.test(kind)
+      ? `${UNSUPPORTED} ${kind} changes data rather than reading it. Add it to the schema script (SCHEMA button) to change the tables, then trace a SELECT here.`
+      : `${UNSUPPORTED} Only SELECT queries can be visualized.`;
+  }
   if (ast.with) return `${UNSUPPORTED} CTEs (WITH) are not part of the course query sequence.`;
   if (ast.set_op && !String(ast.set_op).toLowerCase().startsWith('union')) {
     return `${UNSUPPORTED} Only UNION and UNION ALL set operations are covered.`;

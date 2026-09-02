@@ -17,7 +17,8 @@ const DDL_TEMPLATE = `-- Define tables with CREATE TABLE, mark keys, then INSERT
 --   AUTO_INCREMENT is accepted for an INTEGER PRIMARY KEY
 --   CONSTRAINT name FOREIGN KEY (col) REFERENCES parent (col) [ON DELETE CASCADE]
 -- MySQL / PostgreSQL / SQL Server exports paste in as-is: ENGINE=, CHARSET,
--- SERIAL, IDENTITY and inline KEY/INDEX lines are translated for you.
+-- SERIAL, IDENTITY, inline KEY/INDEX lines and ALTER TABLE ... ADD CONSTRAINT
+-- are translated for you. UPDATE and DELETE statements may shape the data too.
 
 CREATE TABLE GARDEN (
   GARDEN_ID INTEGER PRIMARY KEY,
@@ -197,11 +198,12 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
               </div>
               <p className="mb-2 text-[11px] leading-relaxed text-ink-dim">
                 Define tables, attributes and key connections with CREATE TABLE, then add rows
-                with INSERT INTO ... VALUES. Mark each relation&apos;s PRIMARY KEY (composite where
-                appropriate) and connect tables with CONSTRAINT ... FOREIGN KEY ... REFERENCES
-                parent (column): the canvas, key badges and FK wires are all read from your
-                statements. Tables without a key still load and are traced by row position.
-                Your SQL is kept here until it builds, even if this window is closed.
+                with INSERT INTO ... VALUES; UPDATE, DELETE, CREATE INDEX and ALTER TABLE ...
+                ADD CONSTRAINT are accepted as well. Mark each relation&apos;s PRIMARY KEY
+                (composite where appropriate) and connect tables with CONSTRAINT ... FOREIGN KEY
+                ... REFERENCES parent (column): the canvas, key badges and FK wires are all read
+                from your statements. Tables without a key still load and are traced by row
+                position. Your SQL is kept here until it builds, even if this window is closed.
               </p>
               <textarea
                 value={ddl}

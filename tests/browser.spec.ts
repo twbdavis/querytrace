@@ -117,7 +117,7 @@ test('rejects executable custom-schema operations outside the safe subset', asyn
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill("ATTACH DATABASE 'other.db' AS other;");
   await page.getByRole('button', { name: 'BUILD THIS SCHEMA' }).click();
-  await expect(page.getByText(/Custom schemas may contain only CREATE TABLE/)).toBeVisible();
+  await expect(page.getByText(/Custom schemas cannot use ATTACH, DETACH or PRAGMA/)).toBeVisible();
 });
 
 test('runs curriculum DISTINCT, UNION, and subquery lessons through the teaching UI', async ({

@@ -79,16 +79,24 @@ multi-table joins, self-joins, UNION/UNION ALL, and uncorrelated/correlated/deri
 subqueries. Column and table references are checked against the loaded schema before
 execution, so a misspelled name is reported instead of silently becoming a text literal.
 
-**Custom schemas:** the schema builder accepts `CREATE TABLE` and `INSERT INTO ... VALUES`
-scripts as exported by MySQL Workbench / phpMyAdmin, pgAdmin, or SQL Server Management
-Studio. Table options such as `ENGINE=InnoDB`, `DEFAULT CHARSET`, `AUTO_INCREMENT=n` and
-`COMMENT`, column attributes such as `UNSIGNED`, `ENUM(...)`, `SERIAL`, `IDENTITY(1,1)`
-and `ON UPDATE CURRENT_TIMESTAMP`, inline `KEY`/`INDEX` lines, `dbo.` prefixes and
-`GO` separators are translated to SQLite automatically; `USE`, `SET`, `CREATE DATABASE`
-and `DROP TABLE IF EXISTS` are ignored. Statements run one at a time, so an error names
-the statement that failed (`CREATE TABLE equipment: duplicate column name: status`).
-Tables without a declared PRIMARY KEY (import/staging tables) load and are traced by
-SQLite rowid; the canvas marks them `NO PK`.
+**Custom schemas:** the schema builder accepts `CREATE TABLE`, `INSERT`, `UPDATE`,
+`DELETE`/`TRUNCATE`, `CREATE INDEX` and `ALTER TABLE` scripts as exported by MySQL
+Workbench / phpMyAdmin, pgAdmin / pg_dump, SQL Server Management Studio or Oracle tools.
+Dialect syntax is translated to SQLite automatically: table options (`ENGINE=InnoDB`,
+`DEFAULT CHARSET`, `AUTO_INCREMENT=n`, `COMMENT`), column attributes (`UNSIGNED`,
+`ENUM(...)`, `SERIAL`, `IDENTITY(1,1)`, `DEFAULT nextval(...)`, `ON UPDATE
+CURRENT_TIMESTAMP`), inline `KEY`/`INDEX` lines, `ALTER TABLE ... ADD CONSTRAINT`
+(folded into the table's CREATE), `INSERT IGNORE`, `REPLACE INTO`, `INSERT ... SET`,
+`ON DUPLICATE KEY UPDATE`, MySQL `\'` string escapes and `#` comments, `N'...'` and
+`E'...'` literals, `::type` casts, `NOW()`/`GETDATE()`/`SYSDATE`, `TO_DATE` of ISO
+literals, `dbo.`/`public.` prefixes, `GO` separators and psql meta-commands. Session
+statements (`USE`, `SET`, `CREATE DATABASE`, `DROP ... IF EXISTS`, transactions,
+sequences, grants) are ignored. Statements run one at a time, so an error names the
+statement that failed (`CREATE TABLE equipment: duplicate column name: status`). Rows may
+be inserted before their parents, as dumps do: the script is accepted when the final
+state satisfies every foreign key, and the first orphan is reported with its values
+otherwise. Tables without a declared PRIMARY KEY (import/staging tables) load and are
+traced by SQLite rowid; the canvas marks them `NO PK`.
 The detailed row-provenance pipeline is used wherever the query can be safely
 decomposed; compound and derived-table queries expose their inner/branch results
 and exact SQLite final result.

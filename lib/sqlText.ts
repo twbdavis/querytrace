@@ -1,52 +1,149 @@
+export interface ScanOptions {
+  /** Treat a backslash inside a single-quoted literal as an escape (MySQL dumps). */
+  backslashEscapes?: boolean;
+}
+
+/** Index just past the literal that opens at `start`, or -1 when it never closes. */
+function literalEnd(sql: string, start: number, backslashEscapes: boolean): number {
+  const open = sql[start];
+  const close = open === '[' ? ']' : open;
+  let j = start + 1;
+  while (j < sql.length) {
+    const ch = sql[j];
+    if (backslashEscapes && open === "'" && ch === '\\') {
+      j += 2;
+      continue;
+    }
+    if (ch === close) {
+      if (close !== ']' && sql[j + 1] === close) {
+        j += 2;
+        continue;
+      }
+      return j + 1;
+    }
+    j++;
+  }
+  return -1;
+}
+
+/** Index just past the comment that starts at `i`, or -1 when no comment starts there. */
+function commentEnd(sql: string, i: number): number {
+  const ch = sql[i];
+  if ((ch === '-' && sql[i + 1] === '-') || ch === '#') {
+    const newline = sql.indexOf('\n', i);
+    return newline === -1 ? sql.length : newline;
+  }
+  if (ch === '/' && sql[i + 1] === '*') {
+    const close = sql.indexOf('*/', i + 2);
+    return close === -1 ? sql.length : close + 2;
+  }
+  return -1;
+}
+
+function isQuote(ch: string): boolean {
+  return ch === "'" || ch === '"' || ch === '`' || ch === '[';
+}
+
 /**
- * Replace comments and string literals with filler of the same length so
- * statement boundaries and keywords can be inspected safely. Every index in
- * the masked text lines up with the same index in the original.
+ * Walk SQL text once, handing every comment and literal to the callbacks and
+ * copying everything else verbatim. Both callbacks return replacement text.
  */
-export function maskSql(sql: string): string {
+function rewriteSql(
+  sql: string,
+  options: ScanOptions,
+  onComment: (text: string) => string,
+  onLiteral: (text: string, terminated: boolean) => string
+): string {
   let out = '';
   let i = 0;
   const n = sql.length;
   while (i < n) {
     const ch = sql[i];
-    if (ch === '-' && sql[i + 1] === '-') {
-      while (i < n && sql[i] !== '\n') {
-        out += ' ';
-        i++;
-      }
+    const comment = commentEnd(sql, i);
+    if (comment !== -1) {
+      out += onComment(sql.slice(i, comment));
+      i = comment;
       continue;
     }
-    if (ch === '/' && sql[i + 1] === '*') {
-      const close = sql.indexOf('*/', i + 2);
-      const end = close === -1 ? n : close + 2;
-      out += ' '.repeat(end - i);
-      i = end;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`' || ch === '[') {
-      const quote = ch === '[' ? ']' : ch;
-      let j = i + 1;
-      while (j < n) {
-        if (sql[j] === quote) {
-          if (quote !== ']' && sql[j + 1] === quote) {
-            j += 2;
-            continue;
-          }
-          j++;
-          break;
-        }
-        j++;
-      }
-      // Keep the delimiters, blank the contents: a ';' or keyword inside a
-      // literal or quoted name must never be mistaken for structure.
-      out += sql[i] + ' '.repeat(Math.max(0, j - i - 2)) + (j - i >= 2 ? sql[j - 1] : '');
-      i = j;
+    if (isQuote(ch)) {
+      const end = literalEnd(sql, i, options.backslashEscapes ?? false);
+      const stop = end === -1 ? n : end;
+      out += onLiteral(sql.slice(i, stop), end !== -1);
+      i = stop;
       continue;
     }
     out += ch;
     i++;
   }
   return out;
+}
+
+/**
+ * Replace comments and literal contents with blanks of the same length so
+ * statement boundaries and keywords can be inspected safely. Every index in
+ * the masked text lines up with the same index in the original. Quote
+ * delimiters are kept so quoted names remain recognizable as names.
+ */
+export function maskSql(sql: string, options: ScanOptions = {}): string {
+  return rewriteSql(
+    sql,
+    options,
+    (text) => ' '.repeat(text.length),
+    (text, terminated) =>
+      terminated
+        ? text[0] + ' '.repeat(text.length - 2) + text[text.length - 1]
+        : text[0] + ' '.repeat(text.length - 1)
+  );
+}
+
+/** True when a literal opens but never closes under the given scanning rules. */
+export function hasUnterminatedLiteral(sql: string, options: ScanOptions = {}): boolean {
+  let unterminated = false;
+  rewriteSql(
+    sql,
+    options,
+    (text) => text,
+    (text, terminated) => {
+      if (!terminated) unterminated = true;
+      return text;
+    }
+  );
+  return unterminated;
+}
+
+/** Blank out every comment (dash-dash, hash and block comments) while leaving literals intact. Same length as the input. */
+export function stripComments(sql: string, options: ScanOptions = {}): string {
+  return rewriteSql(
+    sql,
+    options,
+    (text) => text.replace(/[^\n]/g, ' '),
+    (text) => text
+  );
+}
+
+const BACKSLASH_ESCAPES: Record<string, string> = {
+  "'": "''",
+  '"': '"',
+  '\\': '\\',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  0: '',
+  Z: '',
+  b: '\b',
+};
+
+/** Rewrite MySQL-style backslash escapes inside single-quoted literals into SQL's doubled quotes. */
+export function convertBackslashEscapes(sql: string): string {
+  return rewriteSql(
+    sql,
+    { backslashEscapes: true },
+    (text) => text,
+    (text) => {
+      if (text[0] !== "'") return text;
+      return text.replace(/\\([\s\S])/g, (_, ch: string) => BACKSLASH_ESCAPES[ch] ?? ch);
+    }
+  );
 }
 
 export interface SqlStatement {
@@ -71,6 +168,25 @@ export function splitSqlStatements(sql: string): SqlStatement[] {
     }
   }
   return statements;
+}
+
+/** Split text on commas that sit outside parentheses, literals and comments. */
+export function splitTopLevel(text: string): string[] {
+  const masked = maskSql(text);
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (ch === ',' && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts.map((part) => part.trim()).filter(Boolean);
 }
 
 const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -102,4 +218,14 @@ export function quoteIdent(name: string): string {
 /** Quote an identifier only when SQLite would otherwise misread it. */
 export function quoteIdentIfNeeded(name: string): string {
   return SIMPLE_IDENTIFIER.test(name) && !RESERVED_WORDS.has(name.toUpperCase()) ? name : quoteIdent(name);
+}
+
+/** Strip the quoting from an identifier as written (`"Name"`, `` `Name` ``, `[Name]`). */
+export function unquoteIdent(name: string): string {
+  const trimmed = name.trim();
+  const open = trimmed[0];
+  if (open === '"' && trimmed.endsWith('"')) return trimmed.slice(1, -1).replace(/""/g, '"');
+  if (open === '`' && trimmed.endsWith('`')) return trimmed.slice(1, -1).replace(/``/g, '`');
+  if (open === '[' && trimmed.endsWith(']')) return trimmed.slice(1, -1);
+  return trimmed;
 }

@@ -573,10 +573,145 @@ async function main() {
       /^INSERT INTO a: UNIQUE constraint failed/,
       'insert errors name their table'
     );
-    expectDdlError("ATTACH DATABASE 'x' AS y;", /only CREATE TABLE and INSERT INTO statements\. Remove or rewrite: ATTACH DATABASE/, 'unsupported statements are quoted back');
+    expectDdlError("ATTACH DATABASE 'x' AS y;", /cannot use ATTACH, DETACH or PRAGMA/, 'ATTACH is rejected by name');
     expectDdlError('CREATE TABLE t AS SELECT 1 AS x;', /AS SELECT is not supported/, 'CREATE TABLE AS SELECT is rejected');
-    expectDdlError('CREATE TABLE t (x INT PRIMARY KEY); INSERT INTO t SELECT 1;', /must list its rows with VALUES/, 'INSERT ... SELECT is rejected');
+    expectDdlError('CREATE VIEW v AS SELECT 1;', /Views, triggers, procedures and functions are not part/, 'CREATE VIEW is explained');
+    expectDdlError('SELECT * FROM x;', /Run SELECT queries from the query editor/, 'SELECT in the script points to the editor');
+    expectDdlError('COPY t (a) FROM stdin;', /COPY \.\.\. FROM stdin/, 'COPY is explained');
+    expectDdlError('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) INSERT INTO t SELECT x FROM c;', /Recursive queries are not allowed|only CREATE TABLE, INSERT/, 'recursive CTEs are refused');
     console.log('  dialect normalization + statement-level errors: ok');
+  }
+
+  console.log('\n=== INSERT / UPDATE / DELETE / ALTER dialect coverage');
+  {
+    const { buildCustomDatabase, prepareCustomDdl } = await import('../lib/db');
+    const build = async (ddl: string): Promise<Database> => buildCustomDatabase(SQL, prepareCustomDdl(ddl));
+    const count = (database: Database, sql: string) => Number(database.exec(sql)[0]?.values[0]?.[0] ?? 0);
+
+    // MySQL dump: # comments, \' escapes, INSERT ... SET, REPLACE, upsert, NOW(), FK checks off.
+    const mysql = await build(`
+      # phpMyAdmin dump
+      SET FOREIGN_KEY_CHECKS=0;
+      /*!40101 SET NAMES utf8mb4 */;
+      CREATE TABLE \`customers\` (
+        \`id\` INT(11) NOT NULL AUTO_INCREMENT,
+        \`name\` VARCHAR(60) NOT NULL,
+        \`joined\` DATETIME DEFAULT NOW(),
+        PRIMARY KEY (\`id\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      CREATE TABLE \`orders\` (
+        \`id\` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`customer_id\` INT NOT NULL,
+        \`note\` TEXT,
+        KEY \`fk_idx\` (\`customer_id\`),
+        CONSTRAINT \`fk_orders_customers\` FOREIGN KEY (\`customer_id\`) REFERENCES \`customers\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+      -- child rows first, as dumps often do
+      INSERT INTO \`orders\` VALUES (1, 1, 'Ship to O\\'Brien; urgent'), (2, 2, "double quoted");
+      INSERT INTO \`customers\` (\`id\`, \`name\`) VALUES (1, 'O\\'Brien'), (2, 'Ada');
+      INSERT INTO customers SET id = 3, name = 'Set form';
+      REPLACE INTO customers (id, name) VALUES (3, 'Replaced');
+      INSERT INTO customers (id, name) VALUES (2, 'Dup') ON DUPLICATE KEY UPDATE name = VALUES(name);
+      INSERT IGNORE INTO customers (id, name) VALUES (1, 'Ignored');
+      UPDATE customers SET name = UPPER(name) WHERE id = 1;
+      DELETE FROM orders WHERE note LIKE '%double%';
+      SET FOREIGN_KEY_CHECKS=1;
+      COMMIT;
+    `);
+    assert(count(mysql, 'SELECT COUNT(*) FROM customers') === 3, 'MySQL dump: three customers after REPLACE, upsert and IGNORE');
+    assert(mysql.exec("SELECT name FROM customers WHERE id = 1")[0].values[0][0] === "O'BRIEN", "backslash-escaped quote converted and UPDATE applied");
+    assert(mysql.exec('SELECT name FROM customers WHERE id = 2')[0].values[0][0] === 'Dup', 'ON DUPLICATE KEY UPDATE became an upsert');
+    assert(mysql.exec('SELECT name FROM customers WHERE id = 3')[0].values[0][0] === 'Replaced', 'INSERT ... SET and REPLACE INTO work');
+    assert(count(mysql, 'SELECT COUNT(*) FROM orders') === 1, 'child rows inserted before parents are accepted; DELETE applied');
+    assert(mysql.exec("SELECT note FROM orders")[0].values[0][0] === "Ship to O'Brien; urgent", 'escaped quote and semicolon inside a literal survive');
+    assert(count(mysql, 'PRAGMA foreign_keys') === 1, 'foreign keys are re-enabled after an out-of-order load');
+
+    // pg_dump: public. prefixes, ::casts, nextval, ALTER TABLE ONLY ... ADD CONSTRAINT, COMMENT ON, setval.
+    const postgres = await build(`
+      SET statement_timeout = 0;
+      \\connect course
+      CREATE SEQUENCE public.department_id_seq;
+      CREATE TABLE public.department (
+          id integer NOT NULL DEFAULT nextval('public.department_id_seq'::regclass),
+          name character varying(50) NOT NULL,
+          founded date DEFAULT '2000-01-01'::date
+      );
+      CREATE TABLE public.staff (
+          id integer NOT NULL,
+          department_id integer,
+          full_name text,
+          active boolean DEFAULT true
+      );
+      COMMENT ON TABLE public.staff IS 'people';
+      INSERT INTO public.department (name) VALUES (E'Physics'), ('Maths');
+      INSERT INTO public.staff (id, department_id, full_name, active) VALUES (1, 1, 'Ada', true), (2, 2, 'Grace', false);
+      ALTER TABLE ONLY public.department ADD CONSTRAINT department_pkey PRIMARY KEY (id);
+      ALTER TABLE ONLY public.staff
+          ADD CONSTRAINT staff_pkey PRIMARY KEY (id),
+          ADD CONSTRAINT staff_department_fkey FOREIGN KEY (department_id) REFERENCES public.department(id) ON DELETE SET NULL;
+      SELECT pg_catalog.setval('public.department_id_seq', 2, true);
+      CREATE INDEX staff_department_idx ON public.staff USING btree (department_id);
+      UPDATE public.staff SET active = true WHERE id = 2;
+    `);
+    const pgModel = introspectSchema(postgres);
+    assert(pgModel.schema.find((t) => t.name === 'department')?.columns.find((c) => c.name === 'id')?.pk === true, 'ALTER TABLE ADD PRIMARY KEY is folded into CREATE TABLE');
+    assert(pgModel.fkEdges.length === 1, 'ALTER TABLE ADD FOREIGN KEY becomes an edge');
+    assert(count(postgres, 'SELECT COUNT(*) FROM department') === 2 && count(postgres, 'SELECT MAX(id) FROM department') === 2, 'nextval column auto-numbers like a sequence');
+    assert(count(postgres, 'SELECT COUNT(*) FROM staff WHERE active = 1') === 2, 'UPDATE applied; boolean literals accepted');
+
+    // SQL Server: N'' strings, GETDATE(), IDENTITY, BEGIN TRANSACTION, [brackets], GO batches.
+    const sqlServer = await build(`
+      SET IDENTITY_INSERT [dbo].[course] ON
+      GO
+      BEGIN TRANSACTION
+      CREATE TABLE [dbo].[course] (
+        [course_id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [title] NVARCHAR(100) NOT NULL,
+        [created] DATETIME2 DEFAULT GETDATE()
+      );
+      GO
+      INSERT INTO [dbo].[course] ([course_id], [title]) VALUES (10, N'Databases'), (11, N'Networks');
+      UPDATE [dbo].[course] SET [title] = N'Advanced Databases' WHERE [course_id] = 10;
+      DELETE FROM [dbo].[course] WHERE [course_id] = 11;
+      COMMIT TRANSACTION
+      GO
+    `);
+    assert(sqlServer.exec('SELECT title FROM course')[0].values.length === 1, 'SQL Server batch: UPDATE and DELETE applied');
+    assert(sqlServer.exec('SELECT title FROM course')[0].values[0][0] === 'Advanced Databases', 'N-prefixed strings are plain text');
+
+    // Oracle: VARCHAR2, NUMBER, TO_DATE, SYSDATE, TRUNCATE.
+    const oracle = await build(`
+      CREATE TABLE patient (
+        patient_id NUMBER(6) PRIMARY KEY,
+        surname VARCHAR2(40) NOT NULL,
+        admitted DATE DEFAULT SYSDATE
+      );
+      INSERT INTO patient VALUES (1, 'Okafor', TO_DATE('2024-03-05', 'YYYY-MM-DD'));
+      INSERT INTO patient VALUES (2, 'Lind', TO_DATE('2024-04-06 10:30', 'YYYY-MM-DD HH24:MI'));
+      TRUNCATE TABLE patient;
+      INSERT INTO patient (patient_id, surname) VALUES (3, 'Reyes');
+    `);
+    assert(count(oracle, 'SELECT COUNT(*) FROM patient') === 1, 'TRUNCATE empties the table before the final insert');
+    assert(String(oracle.exec("SELECT admitted FROM patient")[0].values[0][0]).length >= 19, 'SYSDATE default became CURRENT_TIMESTAMP');
+
+    // Referential errors after the order-insensitive retry name the orphan.
+    const orphan = await build(`
+      CREATE TABLE parent_t (id INT PRIMARY KEY);
+      CREATE TABLE child_t (id INT PRIMARY KEY, parent_id INT REFERENCES parent_t(id));
+      INSERT INTO child_t VALUES (1, 999);
+    `).then(() => '', (error: Error) => error.message);
+    assert(/FOREIGN KEY constraint failed: child_t has a row with parent_id = 999, but no parent_t row/.test(orphan), `orphan rows are explained (got "${orphan}")`);
+
+    let modifyMessage = '';
+    try {
+      prepareCustomDdl('CREATE TABLE t (id INT PRIMARY KEY, n INT); ALTER TABLE t MODIFY n BIGINT;');
+    } catch (error) {
+      modifyMessage = error instanceof Error ? error.message : String(error);
+    }
+    assert(/cannot change a column's definition afterwards/.test(modifyMessage), 'ALTER TABLE MODIFY gets a specific explanation');
+    const addColumn = await build('CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD extra TEXT DEFAULT \'x\', ADD INDEX ix (extra); INSERT INTO t (id) VALUES (1);');
+    assert(addColumn.exec('SELECT extra FROM t')[0].values[0][0] === 'x', 'ALTER TABLE ADD column runs natively while ADD INDEX is dropped');
+    console.log('  INSERT / UPDATE / DELETE / ALTER dialects: ok');
   }
 
   console.log('\n=== clause ranges');
