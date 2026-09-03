@@ -190,7 +190,7 @@ function exec(ctx: EngineCtx, sql: string): { columns: string[]; rows: unknown[]
 function execTuples(ctx: EngineCtx, k: number, where: string | null): Array<Record<string, number | null>> {
   const cols = ctx.refs
     .slice(0, k + 1)
-    .map((r, i) => `${quoteIdent(r.alias)}.rowid AS k${i}`)
+    .map((r, i) => `${quoteIdent(r.alias)}._rowid_ AS k${i}`)
     .join(', ');
   const sql = `SELECT ${cols} FROM ${fromClause(ctx, k)}${where ? ` WHERE ${where}` : ''}`;
   const { rows } = exec(ctx, sql);
@@ -250,7 +250,7 @@ function diffSets(prev: Record<string, Set<number>>, next: Record<string, Set<nu
 }
 
 function allPks(ctx: EngineCtx, table: string): Set<number> {
-  const { rows } = exec(ctx, `SELECT rowid FROM ${quoteIdent(table)} ORDER BY rowid`);
+  const { rows } = exec(ctx, `SELECT _rowid_ FROM ${quoteIdent(table)} ORDER BY _rowid_`);
   return new Set(rows.map((r) => Number(r[0])));
 }
 
@@ -736,7 +736,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   if (ctx.groupExprSqls) {
     const gN = ctx.groupExprSqls.length;
     const gsel = ctx.groupExprSqls.map((g, i) => `${g} AS __grp${i}`);
-    const csel = refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}.rowid) AS __pks${i}`);
+    const csel = refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}._rowid_) AS __pks${i}`);
     const whereFrag = ctx.whereSql ? ` WHERE ${ctx.whereSql}` : '';
     const groupFrag = ` GROUP BY ${ctx.groupExprSqls.join(', ')}`;
     const baseSql = `SELECT ${[...gsel, ...csel].join(', ')}, COUNT(*) AS __cnt FROM ${fromClause(ctx, nJoins)}${whereFrag}${groupFrag}`;
@@ -845,8 +845,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     ast.columns.some((column) => astContainsType(column.expr, 'aggr_func'));
   const groupedProvenance = !!ctx.groupExprSqls || scalarAggregate;
   const provCols = groupedProvenance
-    ? refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}.rowid) AS __prov${i}`)
-    : refs.map((r, i) => `${quoteIdent(r.alias)}.rowid AS __prov${i}`);
+    ? refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}._rowid_) AS __prov${i}`)
+    : refs.map((r, i) => `${quoteIdent(r.alias)}._rowid_ AS __prov${i}`);
 
   const coreFrom =
     `FROM ${fromClause(ctx, nJoins)}` +

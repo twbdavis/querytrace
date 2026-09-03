@@ -89,7 +89,11 @@ CURRENT_TIMESTAMP`), inline `KEY`/`INDEX` lines, `ALTER TABLE ... ADD CONSTRAINT
 (folded into the table's CREATE), `INSERT IGNORE`, `REPLACE INTO`, `INSERT ... SET`,
 `ON DUPLICATE KEY UPDATE`, MySQL `\'` string escapes and `#` comments, `N'...'` and
 `E'...'` literals, `::type` casts, `NOW()`/`GETDATE()`/`SYSDATE`, `TO_DATE` of ISO
-literals, `dbo.`/`public.` prefixes, `GO` separators and psql meta-commands. Session
+literals, typed literals (`DATE '...'`), `NVARCHAR(MAX)`, `VARCHAR2(n CHAR)`, `text[]`,
+`CLUSTERED`/`ON [PRIMARY]`, any `schema.` prefix in a table position, `GO` separators and
+psql meta-commands. Text pasted from Word or e-mail is repaired too (byte order mark,
+curly quotes, non-breaking spaces). A user column named `rowid` is fine: tracing uses
+SQLite's `_rowid_` alias. Session
 statements (`USE`, `SET`, `CREATE DATABASE`, `DROP ... IF EXISTS`, transactions,
 sequences, grants) are ignored. Statements run one at a time, so an error names the
 statement that failed (`CREATE TABLE equipment: duplicate column name: status`). Rows may

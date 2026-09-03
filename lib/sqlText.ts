@@ -133,17 +133,110 @@ const BACKSLASH_ESCAPES: Record<string, string> = {
   b: '\b',
 };
 
+function unescapeBackslashes(literal: string): string {
+  return literal.replace(/\\([\s\S])/g, (_, ch: string) => BACKSLASH_ESCAPES[ch] ?? ch);
+}
+
 /** Rewrite MySQL-style backslash escapes inside single-quoted literals into SQL's doubled quotes. */
 export function convertBackslashEscapes(sql: string): string {
   return rewriteSql(
     sql,
     { backslashEscapes: true },
     (text) => text,
-    (text) => {
-      if (text[0] !== "'") return text;
-      return text.replace(/\\([\s\S])/g, (_, ch: string) => BACKSLASH_ESCAPES[ch] ?? ch);
+    (text) => (text[0] === "'" ? unescapeBackslashes(text) : text)
+  );
+}
+
+/**
+ * PostgreSQL escape strings: E'It\'s' becomes 'It''s'. Only the E-prefixed
+ * literals use backslash escapes, so they are converted one at a time.
+ */
+export function convertEscapeStringLiterals(sql: string): string {
+  let out = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const comment = commentEnd(sql, i);
+    if (comment !== -1) {
+      out += sql.slice(i, comment);
+      i = comment;
+      continue;
+    }
+    const ch = sql[i];
+    if ((ch === 'E' || ch === 'e') && sql[i + 1] === "'" && !/[\w"`\]]/.test(sql[i - 1] ?? '')) {
+      const end = literalEnd(sql, i + 1, true);
+      if (end !== -1) {
+        out += unescapeBackslashes(sql.slice(i + 1, end));
+        i = end;
+        continue;
+      }
+    }
+    if (isQuote(ch)) {
+      const end = literalEnd(sql, i, false);
+      const stop = end === -1 ? n : end;
+      out += sql.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** MySQL reads "text" as a string; SQLite reads it as a name. Rewrite such literals to 'text'. */
+export function convertDoubleQuotedStrings(sql: string): string {
+  return rewriteSql(
+    sql,
+    {},
+    (text) => text,
+    (text, terminated) => {
+      if (text[0] !== '"' || !terminated) return text;
+      const inner = text.slice(1, -1).replace(/""/g, '"').replace(/'/g, "''");
+      return `'${inner}'`;
     }
   );
+}
+
+/**
+ * Apply a regex to the masked form of `text` and let `replace` rebuild each
+ * match from its original (unmasked) characters, so literals are never edited
+ * and quoted names keep their content.
+ */
+export function replaceOutsideLiterals(
+  text: string,
+  pattern: RegExp,
+  replace: string | ((original: string, match: RegExpMatchArray) => string),
+  options: ScanOptions = {}
+): string {
+  const masked = maskSql(text, options);
+  const global = pattern.global ? pattern : new RegExp(pattern.source, `${pattern.flags}g`);
+  let result = '';
+  let last = 0;
+  for (const match of masked.matchAll(global)) {
+    const index = match.index ?? 0;
+    const original = text.slice(index, index + match[0].length);
+    result += text.slice(last, index) + (typeof replace === 'string' ? replace : replace(original, match));
+    last = index + match[0].length;
+  }
+  return result + text.slice(last);
+}
+
+/**
+ * Repair what word processors and e-mail clients do to pasted SQL: a byte
+ * order mark, curly quotes in place of straight ones, and non-breaking spaces.
+ * Curly quotes are only converted when the text has no straight single quotes
+ * at all (the whole script was "smartened"); otherwise a curly apostrophe is
+ * data inside a normal string and must stay.
+ */
+export function normalizePastedText(sql: string): string {
+  let text = sql.replace(/^﻿/, '');
+  if (/[‘’“”]/.test(text) && !text.includes("'")) {
+    text = text.replace(/[‘’‚‛]/g, "'").replace(/[“”„‟]/g, '"');
+  }
+  // Exotic whitespace outside literals is just whitespace to SQL.
+  text = replaceOutsideLiterals(text, /[   -​  　]/g, ' ');
+  return text;
 }
 
 export interface SqlStatement {

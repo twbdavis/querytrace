@@ -1,7 +1,7 @@
 /* End-to-end parser and trace-engine tests against every bundled schema and
    lesson. Run with: npm run test:trace */
 import initSqlJs, { type Database } from 'sql.js';
-import { introspectSchema } from '../lib/db';
+import { getTableData, introspectSchema } from '../lib/db';
 import { LESSONS } from '../lib/lessons';
 import { parseQuery } from '../lib/parser';
 import { PRELOADED_SCHEMAS } from '../lib/schemas';
@@ -712,6 +712,116 @@ async function main() {
     const addColumn = await build('CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD extra TEXT DEFAULT \'x\', ADD INDEX ix (extra); INSERT INTO t (id) VALUES (1);');
     assert(addColumn.exec('SELECT extra FROM t')[0].values[0][0] === 'x', 'ALTER TABLE ADD column runs natively while ADD INDEX is dropped');
     console.log('  INSERT / UPDATE / DELETE / ALTER dialects: ok');
+
+    console.log('\n=== CREATE TABLE / INSERT edge cases');
+    const failure = async (ddl: string): Promise<string> =>
+      build(ddl).then(() => '', (error: Error) => error.message);
+    const cell = (database: Database, sql: string) => database.exec(sql)[0]?.values[0]?.[0];
+
+    // Pasted from Word / Outlook: BOM, curly quotes, non-breaking spaces, CRLF.
+    const pasted = await build(
+      '﻿CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);\r\n' +
+        'INSERT INTO notes VALUES (1, ‘It’s here’);\r\n'.replace('‘It’s here’', '‘Word text’')
+    );
+    assert(cell(pasted, 'SELECT body FROM notes') === 'Word text', 'BOM, NBSP and smart quotes from a word processor are repaired');
+    const curlyData = await build("CREATE TABLE q (id INT PRIMARY KEY, body TEXT); INSERT INTO q VALUES (1, 'O’Brien');");
+    assert(cell(curlyData, 'SELECT body FROM q') === 'O’Brien', 'a curly apostrophe inside a normal string is kept as data');
+
+    // Columns whose names look like keywords the normalizer handles.
+    const keywordColumns = await build(`
+      CREATE TABLE \`cars\` (
+        \`id\` INT(11) NOT NULL AUTO_INCREMENT,
+        \`key\` INT(11) DEFAULT NULL,
+        \`index\` VARCHAR(20) DEFAULT "n/a",
+        \`engine\` VARCHAR(30) COLLATE NOCASE,
+        \`comment\` TEXT,
+        \`charset\` VARCHAR(10),
+        \`type\` ENUM('a','b') DEFAULT 'a',
+        \`flag\` BIT(1) DEFAULT b'1',
+        PRIMARY KEY (\`id\`),
+        UNIQUE KEY \`uq_key\` (\`key\`),
+        KEY \`ix_index\` (\`index\`(10)) USING BTREE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='engine, key and index are column names here';
+      INSERT INTO cars (\`key\`, \`index\`, \`engine\`, \`comment\`, \`charset\`) VALUES (7, "idx", "v8", "fine; really", "utf8");
+      INSERT INTO cars (\`key\`) VALUES (7);
+    `.replace('INSERT INTO cars (`key`) VALUES (7);', ''));
+    const carsModel = introspectSchema(keywordColumns);
+    assert(
+      carsModel.schema[0].columns.map((c) => c.name).join(',') === 'id,key,index,engine,comment,charset,type,flag',
+      `columns named key/index/engine/comment/charset survive (got ${carsModel.schema[0].columns.map((c) => c.name).join(',')})`
+    );
+    assert(cell(keywordColumns, 'SELECT `index` FROM cars') === 'idx' && cell(keywordColumns, 'SELECT id FROM cars') === 1, 'MySQL double-quoted strings and auto id work');
+    assert(cell(keywordColumns, 'SELECT flag FROM cars') === 1, "b'1' bit literal becomes 1");
+    assert(/UNIQUE constraint failed/.test(await failure('CREATE TABLE u (id INT PRIMARY KEY, k INT, UNIQUE KEY uq (k)); INSERT INTO u VALUES (1, 5), (2, 5);')), 'UNIQUE KEY is kept as a constraint rather than dropped');
+    const nocase = await build("CREATE TABLE n (id INT PRIMARY KEY, name TEXT COLLATE NOCASE); INSERT INTO n VALUES (1, 'Ada');");
+    assert(cell(nocase, "SELECT COUNT(*) FROM n WHERE name = 'ADA'") === 1, 'SQLite COLLATE NOCASE is preserved');
+
+    // Type spellings from other engines.
+    const types = await build(`
+      CREATE TABLE [dbo].[mixed] (
+        [id] INT IDENTITY(1,1) NOT NULL,
+        [title] NVARCHAR(MAX) NULL,
+        [code] VARCHAR2(10 CHAR),
+        [tags] text[],
+        [amount] MONEY DEFAULT ((0)),
+        [created] DATETIME2(7) DEFAULT (getdate()),
+        [stamp] TIMESTAMP DEFAULT TIMESTAMP '2024-01-01 00:00:00',
+        CONSTRAINT [PK_mixed] PRIMARY KEY CLUSTERED ([id] ASC) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF) ON [PRIMARY]
+      ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
+      INSERT INTO [dbo].[mixed] ([title], [code], [tags]) VALUES (N'Wide', 'AB', 'x');
+    `);
+    assert(cell(types, 'SELECT id FROM mixed') === 1 && cell(types, 'SELECT stamp FROM mixed') === '2024-01-01 00:00:00', 'SQL Server / Oracle / Postgres type decorations are stripped');
+
+    // INSERT shapes.
+    const inserts = await build(`
+      CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'anon', qty INT DEFAULT 0);
+      INSERT INTO p () VALUES ();
+      INSERT LOW_PRIORITY INTO p (name) VALUE ('single');
+      INSERT INTO p (id, name, qty) VALUES
+        (10, 'It''s "quoted"', 0x1F),
+        (11, 'semi;colon -- not a comment /* nor this */', -3),
+        (12, '中文 émoji 🙂', 1e2);
+      INSERT INTO p (name) SELECT name || '2' FROM p WHERE id = 10;
+    `);
+    assert(cell(inserts, 'SELECT COUNT(*) FROM p') === 6, 'empty VALUES (), VALUE, multi-row, hex, negative, scientific and INSERT ... SELECT all load');
+    assert(cell(inserts, "SELECT name FROM p WHERE id = 12") === '中文 émoji 🙂', 'unicode data round-trips');
+    assert(cell(inserts, 'SELECT name FROM p WHERE id = 11') === 'semi;colon -- not a comment /* nor this */', 'comment markers inside strings are data');
+    assert(/SQLite has no DEFAULT keyword inside VALUES/.test(await failure('CREATE TABLE d (id INT PRIMARY KEY, n INT DEFAULT 1); INSERT INTO d VALUES (1, DEFAULT);')), 'DEFAULT inside VALUES gets a specific explanation');
+    assert(/INSERT INTO d: table d has 2 columns but 3 values were supplied/.test(await failure('CREATE TABLE d (id INT PRIMARY KEY, n INT); INSERT INTO d VALUES (1, 2, 3);')), 'a column-count mismatch names the statement');
+    assert(/CREATE TABLE d: table d already exists/.test(await failure('CREATE TABLE d (id INT PRIMARY KEY); CREATE TABLE d (x INT);')), 'a duplicate table names the statement');
+    assert(/No tables|only sets up data|Remove/.test(await failure('-- nothing but comments\n# and more\n')) || (await failure('-- only comments\n')) === '', 'a comment-only script does not crash the builder');
+
+    // Forward references: child table created before its parent.
+    const forward = await build(`
+      CREATE TABLE enrollment (id INT PRIMARY KEY, student_id INT REFERENCES student(id));
+      INSERT INTO enrollment VALUES (1, 100);
+      CREATE TABLE student (id INT PRIMARY KEY, name TEXT);
+      INSERT INTO student VALUES (100, 'Ada');
+    `);
+    assert(cell(forward, 'SELECT COUNT(*) FROM enrollment') === 1 && cell(forward, 'PRAGMA foreign_keys') === 1, 'a child table referencing a table created later still loads with keys enforced');
+
+    // A column literally named rowid must not hijack row tracing.
+    const rowidColumn = await build('CREATE TABLE legacy (rowid TEXT, note TEXT); INSERT INTO legacy VALUES (\'A\', \'first\'), (\'B\', \'second\');');
+    const legacyData = getTableData(rowidColumn, 'legacy');
+    assert(JSON.stringify(legacyData.rids) === '[1,2]' && legacyData.columns.join(',') === 'rowid,note', 'a user column named rowid does not replace the real row numbers');
+    const legacyParsed = parseQuery("SELECT note FROM legacy WHERE rowid = 'B'");
+    if (!legacyParsed.ok) throw new Error(legacyParsed.error);
+    const legacyTrace = buildTrace(legacyParsed.ast, rowidColumn, introspectSchema(rowidColumn).schema);
+    assert(legacyTrace.at(-1)?.resultRowSources?.[0]?.legacy[0] === 2, 'tracing uses _rowid_ so provenance survives a rowid column');
+    assert(/reserves for tracing rows/.test(await failure('CREATE TABLE r (_rowid_ INT PRIMARY KEY);')), 'a column named _rowid_ is refused with an explanation');
+
+    // Schema prefixes other than dbo/public, quoted names, TEMP tables, IF NOT EXISTS.
+    const prefixed = await build(`
+      CREATE TEMPORARY TABLE IF NOT EXISTS hr."Employee Roster" (id INT PRIMARY KEY, dept_id INT REFERENCES hr.dept(id));
+      CREATE TABLE hr.dept (id INT PRIMARY KEY, name TEXT);
+      INSERT INTO hr.dept VALUES (1, 'Ops');
+      INSERT INTO hr."Employee Roster" VALUES (7, 1);
+      UPDATE hr."Employee Roster" SET dept_id = 1 WHERE id = 7;
+      DELETE FROM hr.dept WHERE id = 99;
+    `);
+    const prefixedModel = introspectSchema(prefixed);
+    assert(prefixedModel.schema.map((t) => t.name).join('|') === 'Employee Roster|dept' && prefixedModel.fkEdges.length === 1, `schema prefixes are dropped at every table position (got ${prefixedModel.schema.map((t) => t.name).join('|')})`);
+    console.log('  CREATE TABLE / INSERT edge cases: ok');
   }
 
   console.log('\n=== clause ranges');

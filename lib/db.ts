@@ -2,9 +2,13 @@ import type { Database, SqlJsStatic } from 'sql.js';
 import type { FkEdgeDef, TableMeta } from './schemas';
 import {
   convertBackslashEscapes,
+  convertDoubleQuotedStrings,
+  convertEscapeStringLiterals,
   hasUnterminatedLiteral,
   maskSql,
+  normalizePastedText,
   quoteIdent,
+  replaceOutsideLiterals,
   splitSqlStatements,
   splitTopLevel,
   stripComments,
@@ -19,11 +23,11 @@ let sqlJs: Promise<SqlJsStatic> | null = null;
 
 const MAX_CUSTOM_DDL_CHARS = 300_000;
 const MAX_CUSTOM_STATEMENTS = 1_500;
-const MAX_CUSTOM_TABLES = 12;
-const MAX_CUSTOM_COLUMNS_PER_TABLE = 32;
-const MAX_CUSTOM_TOTAL_COLUMNS = 160;
-const MAX_CUSTOM_ROWS_PER_TABLE = 200;
-const MAX_CUSTOM_TOTAL_ROWS = 1_000;
+const MAX_CUSTOM_TABLES = 24;
+const MAX_CUSTOM_COLUMNS_PER_TABLE = 40;
+const MAX_CUSTOM_TOTAL_COLUMNS = 480;
+const MAX_CUSTOM_ROWS_PER_TABLE = 500;
+const MAX_CUSTOM_TOTAL_ROWS = 3_000;
 const MAX_PERSISTED_DATABASE_BYTES = 16 * 1024 * 1024;
 
 /** Lazily initialize sql.js (the content-hashed WASM asset is served from /public). */
@@ -77,35 +81,41 @@ const IGNORED_STATEMENT = new RegExp(
   'i'
 );
 
+const QUOTED_OR_WORD = '(?:"[^"]*"|`[^`]*`|\\[[^\\]]*\\]|\\w+)';
 const TABLE_NAME = '((?:"[^"]*"|`[^`]*`|\\[[^\\]]*\\]|[^\\s(,]+))';
 
-/** Table options MySQL and PostgreSQL append after the closing parenthesis of CREATE TABLE. */
+/** Table options MySQL, PostgreSQL and SQL Server append after the closing parenthesis of CREATE TABLE. */
 const KEY_VALUE_OPTION =
   '(?:ENGINE|(?:DEFAULT\\s+)?(?:CHARSET|CHARACTER\\s+SET|COLLATE)|AUTO_INCREMENT|COMMENT|ROW_FORMAT|CHECKSUM' +
   '|MAX_ROWS|MIN_ROWS|PACK_KEYS|DELAY_KEY_WRITE|STATS_PERSISTENT|STATS_AUTO_RECALC|KEY_BLOCK_SIZE|TABLESPACE' +
   '|COMPRESSION|ENCRYPTION|CONNECTION|DATA\\s+DIRECTORY|INDEX\\s+DIRECTORY|INSERT_METHOD|PASSWORD|TYPE)';
 const TABLE_OPTION_ITEM =
   `(?:${KEY_VALUE_OPTION}\\s*=?\\s*(?:'(?:''|[^'])*'|"(?:""|[^"])*"|[\\w.]+)` +
-  '|WITH\\s*\\([^)]*\\)|WITHOUT\\s+OIDS|INHERITS\\s*\\([^)]*\\)|PARTITION\\s+BY\\b[^;]*)';
+  '|WITH\\s*\\([^)]*\\)|WITHOUT\\s+OIDS|INHERITS\\s*\\([^)]*\\)|PARTITION\\s+BY\\b[^;]*' +
+  `|(?:TEXTIMAGE_)?ON\\s+${QUOTED_OR_WORD})`;
 const TABLE_OPTIONS_TAIL = new RegExp(`\\)\\s*(?:${TABLE_OPTION_ITEM}\\s*,?\\s*)+$`, 'i');
 
 const INTEGER_TYPES = '(?:TINYINT|SMALLINT|MEDIUMINT|BIGINT|INTEGER|INT)';
 
-/** Apply a regex replacement to SQL text while leaving literals and comments untouched. */
-function replaceOutsideLiteralsIn(text: string, pattern: RegExp, replacement: string): string {
-  const masked = maskSql(text);
-  let result = '';
-  let last = 0;
-  for (const match of masked.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    result += text.slice(last, index) + replacement;
-    last = index + match[0].length;
-  }
-  return result + text.slice(last);
-}
+/** Keywords after which a `schema.` prefix names a table (never a column). */
+const TABLE_POSITION = new RegExp(
+  '\\b(CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?|INSERT\\s+(?:OR\\s+\\w+\\s+|IGNORE\\s+)?INTO' +
+    '|REPLACE\\s+INTO|UPDATE(?:\\s+ONLY)?|DELETE\\s+FROM(?:\\s+ONLY)?|TRUNCATE(?:\\s+TABLE)?|REFERENCES' +
+    `|ALTER\\s+TABLE(?:\\s+ONLY)?(?:\\s+IF\\s+EXISTS)?)(\\s+)(${QUOTED_OR_WORD}\\.)(?=[\\w"\`[])`,
+  'gi'
+);
 
 function sameTable(a: string, b: string): boolean {
   return unquoteIdent(a).toLowerCase() === unquoteIdent(b).toLowerCase();
+}
+
+/** Remove "(10)" prefix lengths from a key column list: PRIMARY KEY (name(10)) -> PRIMARY KEY (name). */
+function stripPrefixLengths(text: string): string {
+  return replaceOutsideLiterals(
+    text,
+    /\b(PRIMARY\s+KEY|UNIQUE)\s*\(((?:[^()]|\(\s*\d+\s*\))*)\)/gi,
+    (original, match) => `${match[1]} (${original.slice(match[1].length, -1).replace(/^\s*\(/, '').replace(/\(\s*\d+\s*\)/g, '')})`
+  );
 }
 
 /**
@@ -117,28 +127,34 @@ function sameTable(a: string, b: string): boolean {
  */
 function normalizeStatement(statement: SqlStatement): string {
   let text = statement.text;
-  const replaceOutsideLiterals = (pattern: RegExp, replacement: string) => {
-    text = replaceOutsideLiteralsIn(text, pattern, replacement);
+  const sub = (pattern: RegExp, replacement: string | ((original: string, match: RegExpMatchArray) => string)) => {
+    text = replaceOutsideLiterals(text, pattern, replacement);
   };
   const head = (pattern: RegExp) => pattern.test(maskSql(text));
 
   // --- Every statement -----------------------------------------------------
-  // Schema prefixes ("dbo.customers", "public.customers", "[dbo].[customers]")
-  // would name an attached database in SQLite. Quoted forms are matched on the
-  // original text because the mask blanks quoted names.
-  replaceOutsideLiterals(/\b(?:dbo|public)\.(?=[\w"`[])/gi, '');
-  text = text.replace(/(?:\[(?:dbo|public)\]|"(?:dbo|public)"|`(?:dbo|public)`)\.(?=[\w"`[])/gi, '');
-  // PostgreSQL casts ('2024-01-01'::date, nextval('seq'::regclass)).
-  replaceOutsideLiterals(/::\s*\w+(?:\s+\w+)?(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\s*\[\s*\])*/g, '');
-  // National / escape string prefixes: N'text', E'text'.
-  replaceOutsideLiterals(/(?<![\w"`\]])[NE](?=')/g, '');
+  // Schema prefixes ("hr.employees", "[dbo].[course]", "public.staff") would
+  // name an attached database in SQLite. Strip them where a table name is
+  // expected; column references such as t.col are left alone.
+  sub(TABLE_POSITION, (original, match) => original.slice(0, match[1].length + match[2].length));
+  // PostgreSQL casts ('2024-01-01'::date, nextval('seq'::regclass), 'x'::timestamp without time zone).
+  sub(
+    /::\s*(?:character\s+varying|double\s+precision|bit\s+varying|(?:timestamp|time)(?:\s+with(?:out)?\s+time\s+zone)?|\w+)(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\s*\[\s*\])*/gi,
+    ''
+  );
+  // National string prefix: N'text'. (E'text' was unescaped earlier.)
+  sub(/(?<![\w"`\]])N(?=')/g, '');
+  // Typed literals: DATE '2024-01-01', TIMESTAMP '...'.
+  sub(/\b(?:DATE|TIME|TIMESTAMP)\s+(?=')/gi, '');
+  // MySQL bit literals: b'1'.
+  sub(/\bb' *'/gi, (original) => String(parseInt(original.slice(2, -1), 2) || 0));
   // Current date/time in other dialects.
-  replaceOutsideLiterals(
+  sub(
     /\b(?:NOW|GETDATE|SYSDATETIME|CURRENT_TIMESTAMP|LOCALTIMESTAMP)\s*\(\s*\d*\s*\)|\bSYSDATE\b|\bLOCALTIMESTAMP\b/gi,
     'CURRENT_TIMESTAMP'
   );
-  replaceOutsideLiterals(/\bCURDATE\s*\(\s*\)|\bCURRENT_DATE\s*\(\s*\)/gi, 'CURRENT_DATE');
-  replaceOutsideLiterals(/\bCURTIME\s*\(\s*\)|\bCURRENT_TIME\s*\(\s*\)/gi, 'CURRENT_TIME');
+  sub(/\bCURDATE\s*\(\s*\)|\bCURRENT_DATE\s*\(\s*\)/gi, 'CURRENT_DATE');
+  sub(/\bCURTIME\s*\(\s*\)|\bCURRENT_TIME\s*\(\s*\)/gi, 'CURRENT_TIME');
   // Oracle TO_DATE of an ISO literal is just that literal.
   text = text.replace(
     /\bTO_DATE\s*\(\s*('\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}(?::\d{2})?)?')\s*,\s*'[^']*'\s*\)/gi,
@@ -147,45 +163,63 @@ function normalizeStatement(statement: SqlStatement): string {
 
   // --- CREATE TABLE ----------------------------------------------------------
   if (head(/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b/i)) {
+    // Temporary tables live outside the schema the canvas reads; make them ordinary.
+    sub(/^CREATE\s+TEMP(?:ORARY)?\s+TABLE\b/i, 'CREATE TABLE');
     // SQLite assigns an omitted key itself only for a column typed exactly
     // INTEGER, so an auto-numbered "INT(11) NOT NULL AUTO_INCREMENT" or
     // "INT IDENTITY(1,1)" column is retyped and the identity keyword dropped.
-    replaceOutsideLiterals(
+    sub(
       new RegExp(
         `\\b${INTEGER_TYPES}\\b(?:\\s*\\(\\s*\\d+\\s*\\))?(\\s+UNSIGNED)?(?=[^,()]*?\\bAUTO_INCREMENT\\b)`,
         'gi'
       ),
       'INTEGER'
     );
-    replaceOutsideLiterals(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
-    replaceOutsideLiterals(
-      new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'),
-      'INTEGER'
-    );
-    replaceOutsideLiterals(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
-    replaceOutsideLiterals(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
+    sub(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
+    sub(new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'), 'INTEGER');
+    sub(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
+    sub(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
     // pg_dump: "id integer NOT NULL DEFAULT nextval('t_id_seq')" plus a later
     // ALTER TABLE ... ADD PRIMARY KEY; without the DEFAULT the folded INTEGER
     // PRIMARY KEY auto-assigns exactly like the sequence did.
-    replaceOutsideLiterals(/\bDEFAULT\s+nextval\s*\([^)]*\)/gi, '');
+    sub(/\bDEFAULT\s+nextval\s*\([^)]*\)/gi, '');
+    // Type spellings SQLite's "TYPE(n)" grammar rejects.
+    sub(/\(\s*MAX\s*\)/gi, ''); // NVARCHAR(MAX)
+    sub(/\(\s*(\d+)\s+(?:CHAR|BYTE)\s*\)/gi, (_, match) => `(${match[1]})`); // VARCHAR2(50 CHAR)
+    // text[] (the mask blanks bracketed names too, so confirm the brackets are really empty)
+    sub(/(?<=\w)\s*\[\s*\]/g, (original) => (/^\s*\[\s*\]$/.test(original) ? '' : original));
     // MySQL column attributes with no SQLite counterpart.
-    replaceOutsideLiterals(/\bON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/gi, '');
-    replaceOutsideLiterals(/\bCHARACTER\s+SET\s+\w+/gi, '');
-    replaceOutsideLiterals(/\bCHARSET\s+\w+/gi, '');
-    replaceOutsideLiterals(/\bCOLLATE\s+\w+/gi, '');
-    replaceOutsideLiterals(/\bCOMMENT\s+(?:'(?:''|[^'])*'|"(?:""|[^"])*")/gi, '');
-    replaceOutsideLiterals(/\bZEROFILL\b/gi, '');
+    sub(/\bON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/gi, '');
+    sub(/\bCHARACTER\s+SET\s+\w+/gi, '');
+    sub(/\bCHARSET\s+\w+/gi, '');
+    // COLLATE is SQLite syntax too (NOCASE etc.); only foreign collation names go.
+    sub(/\bCOLLATE\s+(?!(?:BINARY|NOCASE|RTRIM)\b)(?:"[^"]*"|`[^`]*`|\w+)/gi, '');
+    sub(/\bCOMMENT\s+(?:'(?:''|[^'])*'|"(?:""|[^"])*")/gi, '');
+    sub(/\bZEROFILL\b/gi, '');
     // "INT(11) UNSIGNED": SQLite allows a size only at the end of a type name.
-    replaceOutsideLiterals(/\bUNSIGNED\b/gi, '');
-    replaceOutsideLiterals(/\b(?:ENUM|SET)\s*\((?:\s*'(?:''|[^'])*'\s*,?)+\s*\)/gi, 'TEXT');
+    sub(/\bUNSIGNED\b/gi, '');
+    sub(/\b(?:ENUM|SET)\s*\((?:\s*'(?:''|[^'])*'\s*,?)+\s*\)/gi, 'TEXT');
+    // SQL Server and Oracle constraint decorations.
+    sub(/\b(?:NON)?CLUSTERED\b/gi, '');
+    sub(/\bWITH\s*\([^)]*\)/gi, '');
+    sub(/\b(?:TEXTIMAGE_)?ON\s+(?:\[\s*\]|PRIMARY\b)/gi, '');
+    sub(/\b(?:ENABLE|DISABLE)(?:\s+(?:NO)?VALIDATE)?\b/gi, '');
+    sub(/\bUSING\s+(?:BTREE|HASH)\b/gi, '');
     // Inline secondary indexes: SQLite only accepts them as separate CREATE
-    // INDEX statements, and the canvas does not draw them anyway.
-    replaceOutsideLiterals(
-      /,\s*(?:UNIQUE\s+(?:KEY|INDEX)|(?:FULLTEXT|SPATIAL)\s+(?:KEY|INDEX)?|KEY|INDEX)\s+(?:`[^`]*`|"[^"]*"|\w+)\s*(?:USING\s+\w+\s*)?\([^)]*\)/gi,
+    // INDEX statements, and the canvas does not draw them anyway. A column
+    // that happens to be called "key" keeps its "key INT(11)" definition: the
+    // parenthesis after an index name holds column names, not a size.
+    sub(
+      new RegExp(
+        `,\\s*(?:(?:FULLTEXT|SPATIAL)\\s+(?:KEY|INDEX)?|KEY|INDEX)\\s+${QUOTED_OR_WORD}\\s*(?:USING\\s+\\w+\\s*)?\\((?![\\s\\d,]*\\))(?:[^()]|\\([^()]*\\))*\\)(?:\\s*COMMENT\\s+'[^']*')?`,
+        'gi'
+      ),
       ''
     );
-    replaceOutsideLiterals(/\bUNIQUE\s+(?:KEY|INDEX)\s*\(/gi, 'UNIQUE (');
-    replaceOutsideLiterals(/\bFOREIGN\s+KEY\s+(?:`[^`]*`|"[^"]*"|\w+)\s*\(/gi, 'FOREIGN KEY (');
+    // UNIQUE KEY name (cols) carries meaning: keep it as a UNIQUE constraint.
+    sub(new RegExp(`\\bUNIQUE\\s+(?:KEY|INDEX)\\s+(?:${QUOTED_OR_WORD}\\s*)?(?:USING\\s+\\w+\\s*)?\\(`, 'gi'), 'UNIQUE (');
+    sub(new RegExp(`\\bFOREIGN\\s+KEY\\s+${QUOTED_OR_WORD}\\s*\\(`, 'gi'), 'FOREIGN KEY (');
+    text = stripPrefixLengths(text);
     // ENGINE=InnoDB and friends after the column list.
     const tail = maskSql(text).match(TABLE_OPTIONS_TAIL);
     if (tail && tail.index !== undefined) text = `${text.slice(0, tail.index)})`;
@@ -195,8 +229,16 @@ function normalizeStatement(statement: SqlStatement): string {
   // --- INSERT ----------------------------------------------------------------
   if (head(/^(?:INSERT|REPLACE)\b/i)) {
     text = text.replace(/^REPLACE\s+INTO\b/i, 'INSERT OR REPLACE INTO');
+    text = text.replace(/^INSERT\s+(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY)\s+/i, 'INSERT ');
     text = text.replace(/^INSERT\s+IGNORE\s+INTO\b/i, 'INSERT OR IGNORE INTO');
     text = text.replace(/^INSERT\s+INTO\s+TABLE\b/i, 'INSERT INTO');
+    // MySQL accepts the singular VALUE.
+    sub(/\bVALUE\s*(?=\()/gi, 'VALUES ');
+    // MySQL "INSERT INTO t () VALUES ()".
+    sub(
+      new RegExp(`^(INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${TABLE_NAME})\\s*\\(\\s*\\)\\s*VALUES\\s*\\(\\s*\\)\\s*$`, 'i'),
+      (original, match) => `${original.slice(0, match[1].length)} DEFAULT VALUES`
+    );
     // MySQL "INSERT INTO t SET a = 1, b = 'x'" -> column list plus VALUES.
     const setForm = maskSql(text).match(
       new RegExp(`^(INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${TABLE_NAME}\\s+)SET\\s+`, 'i')
@@ -228,14 +270,15 @@ function normalizeStatement(statement: SqlStatement): string {
 
   // --- CREATE INDEX ------------------------------------------------------------
   if (head(/^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i)) {
-    replaceOutsideLiterals(/\bCONCURRENTLY\b/gi, '');
-    replaceOutsideLiterals(/\bUSING\s+\w+/gi, '');
-    replaceOutsideLiterals(/\b(?:INCLUDE|WITH)\s*\([^)]*\)/gi, '');
-    replaceOutsideLiterals(/\bTABLESPACE\s+\w+/gi, '');
+    sub(/\bCONCURRENTLY\b/gi, '');
+    sub(new RegExp(`\\bON(\\s+)(${QUOTED_OR_WORD}\\.)(?=[\\w"\`[])`, 'i'), (original, match) => original.slice(0, 2 + match[1].length));
+    sub(/\bUSING\s+\w+/gi, '');
+    sub(/\b(?:INCLUDE|WITH)\s*\([^)]*\)/gi, '');
+    sub(/\bTABLESPACE\s+\w+/gi, '');
     return text;
   }
 
-  // --- UPDATE / DELETE / TRUNCATE -------------------------------------------
+  // --- UPDATE / DELETE / TRUNCATE / ALTER -------------------------------------
   text = text.replace(/^TRUNCATE\s+(?:TABLE\s+)?/i, 'DELETE FROM ');
   text = text.replace(/^DELETE\s+FROM\s+ONLY\b/i, 'DELETE FROM');
   text = text.replace(/^UPDATE\s+ONLY\b/i, 'UPDATE');
@@ -255,10 +298,7 @@ interface Classified extends PreparedStatement {
   table: string;
 }
 
-const CREATE_TABLE_HEAD = new RegExp(
-  `^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${TABLE_NAME}`,
-  'i'
-);
+const CREATE_TABLE_HEAD = new RegExp(`^CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${TABLE_NAME}`, 'i');
 const INSERT_HEAD = new RegExp(`^INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${TABLE_NAME}`, 'i');
 const UPDATE_HEAD = new RegExp(`^UPDATE\\s+(?:OR\\s+\\w+\\s+)?${TABLE_NAME}`, 'i');
 const DELETE_HEAD = new RegExp(`^DELETE\\s+FROM\\s+${TABLE_NAME}`, 'i');
@@ -296,10 +336,19 @@ function classify(sql: string): Classified {
     if (/\bAS\s+SELECT\b/i.test(masked)) {
       throw new Error(`CREATE TABLE ... AS SELECT is not supported here. Declare the columns of ${table} explicitly.`);
     }
+    if (/\bLIKE\b/i.test(masked) && !/\(/.test(masked)) {
+      throw new Error(`CREATE TABLE ... LIKE is not supported here. Declare the columns of ${table} explicitly.`);
+    }
     return { sql, summary: `CREATE TABLE ${table}`, kind: 'create', table };
   }
   if ((match = masked.match(INSERT_HEAD))) {
     const table = captured(sql, match, 1);
+    const values = masked.search(/\bVALUES\b/i);
+    if (values !== -1 && /\bDEFAULT\b/i.test(masked.slice(values))) {
+      throw new Error(
+        `INSERT INTO ${table}: SQLite has no DEFAULT keyword inside VALUES. Leave that column out of the column list and it receives its default.`
+      );
+    }
     return { sql, summary: `INSERT INTO ${table}`, kind: 'insert', table };
   }
   if ((match = masked.match(UPDATE_HEAD))) {
@@ -355,7 +404,7 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
     for (const action of splitTopLevel(body)) {
       const masked = maskSql(action);
       const constraint = masked.match(
-        /^ADD\s+(?:CONSTRAINT\s+(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+)\s+)?(FOREIGN\s+KEY|PRIMARY\s+KEY|UNIQUE(?:\s+(?:KEY|INDEX))?|CHECK)\b/i
+        new RegExp(`^ADD\\s+(?:CONSTRAINT\\s+${QUOTED_OR_WORD}\\s+)?(FOREIGN\\s+KEY|PRIMARY\\s+KEY|UNIQUE(?:\\s+(?:KEY|INDEX))?|CHECK)\\b`, 'i')
       );
       if (constraint) {
         if (!create) {
@@ -364,10 +413,10 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
           );
         }
         let clause = action.replace(/^ADD\s+/i, '');
-        clause = replaceOutsideLiteralsIn(clause, /\bUNIQUE\s+(?:KEY|INDEX)\s+(?:`[^`]*`|"[^"]*"|\w+)?\s*\(/gi, 'UNIQUE (');
-        clause = replaceOutsideLiteralsIn(clause, /\bFOREIGN\s+KEY\s+(?:`[^`]*`|"[^"]*"|\w+)\s*\(/gi, 'FOREIGN KEY (');
-        clause = replaceOutsideLiteralsIn(clause, /\bUSING\s+INDEX\s+TABLESPACE\s+\w+/gi, '');
-        clause = replaceOutsideLiteralsIn(clause, /\bNOT\s+VALID\b/gi, '');
+        clause = replaceOutsideLiterals(clause, new RegExp(`\\bUNIQUE\\s+(?:KEY|INDEX)\\s+(?:${QUOTED_OR_WORD}\\s*)?\\(`, 'gi'), 'UNIQUE (');
+        clause = replaceOutsideLiterals(clause, new RegExp(`\\bFOREIGN\\s+KEY\\s+${QUOTED_OR_WORD}\\s*\\(`, 'gi'), 'FOREIGN KEY (');
+        clause = replaceOutsideLiterals(clause, /\bUSING\s+INDEX\s+TABLESPACE\s+\w+|\bUSING\s+(?:BTREE|HASH)\b|\b(?:NON)?CLUSTERED\b|\bWITH\s*\([^)]*\)|\bNOT\s+VALID\b|\b(?:ENABLE|DISABLE)(?:\s+(?:NO)?VALIDATE)?\b/gi, '');
+        clause = stripPrefixLengths(clause);
         const closing = create.sql.lastIndexOf(')');
         create.sql = `${create.sql.slice(0, closing).replace(/\s+$/, '')},\n  ${clause.trim()}\n)`;
         continue;
@@ -390,29 +439,39 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
   return out;
 }
 
+/** Does the script read like MySQL, where "text" is a string and \' escapes a quote? */
+function looksLikeMySql(script: string): boolean {
+  return /`/.test(script) || /\bENGINE\s*=/i.test(script) || /^\s*#/m.test(script) || /\\'/.test(script);
+}
+
 /** Normalize, validate and split a custom-schema script into executable statements. */
 export function prepareCustomDdl(ddl: string): PreparedStatement[] {
   if (ddl.length > MAX_CUSTOM_DDL_CHARS) {
     throw new Error(`Custom schema SQL is limited to ${MAX_CUSTOM_DDL_CHARS.toLocaleString()} characters.`);
   }
-  let script = ddl;
-  // MySQL dumps escape quotes as \' ; adopt that reading when it parses cleanly.
-  if (/\\'/.test(script) && !hasUnterminatedLiteral(script, { backslashEscapes: true })) {
-    script = convertBackslashEscapes(script);
+  let script = normalizePastedText(ddl);
+  if (looksLikeMySql(script)) {
+    // MySQL dumps escape quotes as \' ; adopt that reading when it parses cleanly.
+    if (/\\/.test(script) && !hasUnterminatedLiteral(script, { backslashEscapes: true })) {
+      script = convertBackslashEscapes(script);
+    }
+    script = convertDoubleQuotedStrings(script);
+  } else {
+    script = convertEscapeStringLiterals(script);
   }
   // Comments go first so '#' (MySQL) never reaches SQLite and ';' inside them is inert.
   script = stripComments(script);
   // SQL Server separates batches with a bare GO line; psql meta-commands start with a backslash.
-  script = replaceOutsideLiteralsIn(script, /^[ \t]*GO[ \t]*(?=\r?\n|$)/gim, ';');
-  script = replaceOutsideLiteralsIn(script, /^[ \t]*\\\w.*$/gm, '');
+  script = replaceOutsideLiterals(script, /^[ \t]*GO[ \t]*(?=\r?\n|$)/gim, ';');
+  script = replaceOutsideLiterals(script, /^[ \t]*\\\w.*$/gm, '');
   // T-SQL leaves transaction and session lines unterminated; keep them from
   // swallowing the statement on the next line.
-  script = replaceOutsideLiteralsIn(
+  script = replaceOutsideLiterals(
     script,
     /^[ \t]*(?:BEGIN|COMMIT|ROLLBACK)(?:[ \t]+TRAN(?:SACTION)?)?(?:[ \t]+\w+)?[ \t]*;?[ \t]*(?=\r?\n|$)/gim,
     ';'
   );
-  script = replaceOutsideLiteralsIn(
+  script = replaceOutsideLiterals(
     script,
     /^[ \t]*SET[ \t]+\w+(?:[ \t]+[^\s;]+)?[ \t]+(?:ON|OFF)[ \t]*;?[ \t]*(?=\r?\n|$)/gim,
     ';'
@@ -507,7 +566,7 @@ function describeForeignKeyViolation(db: Database): string | null {
   const toColumns = fk.map((row) => (row[4] === null ? 'its primary key' : String(row[4])));
   const values = queryAll(
     db,
-    `SELECT ${fromColumns.map(quoteIdent).join(', ')} FROM ${quoteIdent(table)} WHERE rowid = ${Number(rowid)}`
+    `SELECT ${fromColumns.map(quoteIdent).join(', ')} FROM ${quoteIdent(table)} WHERE _rowid_ = ${Number(rowid)}`
   ).rows[0];
   const pairs = fromColumns.map((column, i) => `${column} = ${values?.[i] === null ? 'NULL' : JSON.stringify(values?.[i])}`);
   return `FOREIGN KEY constraint failed: ${table} has a row with ${pairs.join(', ')}, but no ${parent} row has that value in ${toColumns.join(', ')}.`;
@@ -526,11 +585,11 @@ export function buildCustomDatabase(SQL: SqlJsStatic, statements: PreparedStatem
   try {
     try {
       runStatements(db, statements);
-    } catch (err) {
-      if (!(err instanceof Error) || !/FOREIGN KEY constraint failed/i.test(err.message)) throw err;
-      // Exports insert child rows before parents or add keys last (MySQL with
-      // FOREIGN_KEY_CHECKS=0, pg_dump). Accept the script when its final
-      // state is consistent; otherwise explain the first orphan precisely.
+    } catch {
+      // Exports insert child rows before parents, reference tables created
+      // later, or add keys last (MySQL with FOREIGN_KEY_CHECKS=0, pg_dump).
+      // Accept the script when its final state is consistent; otherwise report
+      // the statement that still fails, or the first orphan precisely.
       db.close();
       db = openBoundedDatabase(SQL, false);
       runStatements(db, statements);
@@ -639,6 +698,11 @@ export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEd
       pk: Number(r[5]) > 0 ? true : undefined,
       fk: undefined as TableMeta['columns'][number]['fk'],
     }));
+    if (columns.some((column) => column.name.toLowerCase() === '_rowid_')) {
+      throw new Error(
+        `Table "${table}" has a column named _rowid_, which QueryTrace reserves for tracing rows. Rename it.`
+      );
+    }
 
     const fks = queryAll(db, `PRAGMA foreign_key_list(${quoteIdent(table)})`);
     // PRAGMA foreign_key_list: id, seq, table, from, to, on_update, on_delete, match
@@ -691,8 +755,13 @@ export interface TableData extends QueryResult {
   rids: number[];
 }
 
+/**
+ * `_rowid_` rather than `rowid`: a user table may legitimately have a column
+ * called rowid (imports often do), and SQLite then makes the bare word mean
+ * that column. The underscored alias always means the real row number.
+ */
 export function getTableData(db: Exec, table: string): TableData {
-  const res = queryAll(db, `SELECT rowid AS __rid, * FROM ${quoteIdent(table)} ORDER BY rowid`);
+  const res = queryAll(db, `SELECT _rowid_ AS __rid, * FROM ${quoteIdent(table)} ORDER BY _rowid_`);
   return {
     columns: res.columns.slice(1),
     rows: res.rows.map((r) => r.slice(1)),
