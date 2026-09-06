@@ -432,6 +432,24 @@ async function main() {
     const selfStep = selfJoin.find((step) => step.stage === 'join')!;
     const rootPlot = provenanceFor(selfStep, 'ORCHARD_PLOT', 1);
     assert((rootPlot.rows.ORCHARD_PLOT?.size ?? 0) > 1, 'self-join provenance spans both aliases of the same table');
+    // Indexing must preserve outer-join NULLs, duplicate self-join roles,
+    // aggregate result sources, and per-step isolation on repeated probes.
+    const fixture: TraceStep = {
+      ...join,
+      tuples: [{ a: 1, b: 1, c: null }, { a: 2, b: 1, c: 8 }, { a: 3, b: 4, c: 9 }],
+      tupleTables: { a: 'P', b: 'P', c: 'C' },
+      resultRowSources: [{ P: [1, 2], C: [8] }, { P: [3, 4], C: [9] }],
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const parent = provenanceFor(fixture, 'P', 1);
+      assert([...parent.rows.P].sort().join(',') === '1,2', 'index preserves self-join partners without unrelated rows');
+      assert([...parent.rows.C].join(',') === '8', 'index excludes NULL-extended partners');
+      assert([...parent.resultRows].join(',') === '0', 'index maps aggregate results to their original indices');
+      const missing = provenanceFor(fixture, 'P', 99);
+      assert(missing.rows.P.size === 1 && missing.resultRows.size === 0, 'unmatched probe retains only itself');
+    }
+    const nextStage = { ...fixture, tuples: [], resultRowSources: [] };
+    assert(provenanceFor(nextStage, 'P', 1).resultRows.size === 0, 'index never leaks across trace steps');
     console.log('  alias-aware provenance: ok');
   }
   {

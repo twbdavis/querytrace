@@ -34,6 +34,7 @@
   --row-lit-border: #8b98ff;
   --row-null-border: #fcd34d; /* dashed */
   --row-inspect-bg: rgba(94, 234, 212, 0.2);
+  --motion-enter: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html,
@@ -104,7 +105,7 @@ body {
 @keyframes modal-dialog-enter {
   from {
     opacity: 0;
-    transform: translateY(12px) scale(0.96);
+    transform: translateY(8px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -115,18 +116,29 @@ body {
 @keyframes result-row-enter {
   from {
     opacity: 0;
-    transform: translateX(8px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0);
   }
 }
 
-.panel-enter { animation: panel-enter 180ms ease-out both; }
+.panel-enter { animation: panel-enter 180ms var(--motion-enter) backwards; }
 .modal-backdrop-enter { animation: modal-backdrop-enter 150ms ease-out both; }
-.modal-dialog-enter { animation: modal-dialog-enter 200ms ease-out both; }
-.result-row-enter { animation: result-row-enter 250ms ease-out both; }
+.modal-dialog-enter { animation: modal-dialog-enter 200ms var(--motion-enter) backwards; }
+.result-row-enter { animation: result-row-enter 180ms var(--motion-enter) backwards; }
+
+/* Matches ResultTable's scroll window math; cells stay single-line. */
+.result-data-row { height: 24px; }
+
+.key-connection:hover,
+.react-flow__edge:focus .key-connection {
+  --key-stroke: var(--accent-pulse) !important;
+}
+@media (max-width: 639px) {
+  .result-data-row { height: 32px; }
+}
 
 kbd {
   @apply rounded border border-line bg-node px-1 py-0.5 font-data text-[9px] text-ink-dim;
@@ -147,6 +159,7 @@ kbd {
   *,
   *::before,
   *::after {
+    animation-delay: 0ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

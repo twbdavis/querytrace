@@ -1,58 +1,27 @@
 'use client';
 
-import { memo } from 'react';
+import { memo, useMemo, type CSSProperties } from 'react';
 import { BaseEdge, type EdgeProps } from '@xyflow/react';
-import { useAppStore, useCurrentStep } from '@/store/useAppStore';
+import { useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
+import { useDocumentVisible } from '@/lib/useDocumentVisible';
+import { routeKeys, type KeySide } from '@/lib/keyRoutes';
+import { useTableBounds } from '@/lib/useTableBounds';
 
 /**
- * Orthogonal key wire, schema-diagram style: rises from the PK column, runs
- * along a horizontal rail above both tables, then drops straight down into
- * the FK column header. Rail heights are staggered per edge so parallel
- * wires do not sit on top of each other.
- *
- * Idle edges read as drafting lines (dashed chalk); active edges snap to a
- * solid periwinkle with traveling pulses - no glow, just dash-to-solid.
+ * Column handles supply the horizontal alignment. Project those anchors to
+ * the table's top/bottom border so wires can approach outside its title/rows.
  */
-function railPath(
-  sx: number,
-  sy: number,
-  tx: number,
-  ty: number,
-  clearance: number,
-  r = 8
-): string {
-  if (Math.abs(tx - sx) < 4) {
-    // Columns vertically aligned: a straight drop reads best.
-    return `M ${sx} ${sy} L ${tx} ${ty}`;
-  }
-  const railY = Math.min(sy, ty) - clearance;
-  const dir = tx > sx ? 1 : -1;
-  const rr = Math.min(r, Math.abs(tx - sx) / 2);
-  return [
-    `M ${sx} ${sy}`,
-    `L ${sx} ${railY + rr}`,
-    `Q ${sx} ${railY} ${sx + dir * rr} ${railY}`,
-    `L ${tx - dir * rr} ${railY}`,
-    `Q ${tx} ${railY} ${tx} ${railY + rr}`,
-    `L ${tx} ${ty}`,
-  ].join(' ');
-}
-
-/** Arrowhead pointing straight down, tip on the FK column header. */
-function arrowPath(x: number, y: number): string {
-  return `M ${x - 4.5} ${y - 9} L ${x} ${y - 0.5} L ${x + 4.5} ${y - 9} Z`;
-}
-
-/** Small deterministic stagger so edges sharing an area get distinct rails. */
-function railStagger(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return (Math.abs(h) % 4) * 14;
+function arrowPath(x: number, y: number, side: KeySide): string {
+  const direction = side === 'top' ? -1 : 1;
+  return `M ${x - 4} ${y + direction * 9} L ${x} ${y + direction} L ${x + 4} ${y + direction * 9} Z`;
 }
 
 function FKEdgeInner({
   id,
+  source,
+  target,
+  data,
   sourceX,
   sourceY,
   targetX,
@@ -60,58 +29,45 @@ function FKEdgeInner({
   sourceHandleId,
   targetHandleId,
 }: EdgeProps) {
-  const step = useCurrentStep();
+  const active = useAppStore((s) => s.trace?.[s.currentStep]?.activeEdges.includes(id) ?? false);
+  const playing = useAppStore((s) => s.playing);
   const speed = useAppStore((s) => s.speed);
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
-  const active = step?.activeEdges.includes(id) ?? false;
-
-  const clearance = 46 + railStagger(id);
-  const path = railPath(sourceX, sourceY, targetX, targetY, clearance);
-  const stroke = active ? 'var(--accent-active)' : 'var(--border-strong)';
-
-  // Label sits on the rail's horizontal run (or mid-drop when aligned).
-  const straightDrop = Math.abs(targetX - sourceX) < 4;
-  const labelX = (sourceX + targetX) / 2;
-  const labelY = straightDrop
-    ? (sourceY + targetY) / 2
-    : Math.min(sourceY, targetY) - clearance;
-  const label =
-    sourceHandleId && targetHandleId ? `${sourceHandleId} → ${targetHandleId}` : null;
+  const visible = useDocumentVisible();
+  const bounds = useTableBounds();
+  const lane = typeof data?.lane === 'number' ? data.lane : 0;
+  const route = useMemo(() => routeKeys(
+    bounds.find((box) => box.id === source) ?? { id: source, x: sourceX, y: sourceY, width: 0, height: 0 },
+    bounds.find((box) => box.id === target) ?? { id: target, x: targetX, y: targetY, width: 0, height: 0 },
+    sourceX, targetX, bounds, lane
+  ), [bounds, source, target, sourceX, sourceY, targetX, targetY, lane]);
+  const { path, points } = route;
+  const start = points[0];
+  const end = points[points.length - 1];
+  const label = `${source}.${sourceHandleId} → ${target}.${targetHandleId}`;
 
   return (
-    <>
+    <g
+      className="key-connection"
+      data-source-side={route.sourceSide}
+      data-target-side={route.targetSide}
+      style={{ '--key-stroke': active ? 'var(--accent-active)' : 'var(--border-strong)' } as CSSProperties}
+    >
+      <title>{label}</title>
       <BaseEdge
         id={id}
         path={path}
         style={{
-          stroke,
-          strokeWidth: active ? 2.5 : 1.25,
-          strokeDasharray: active ? undefined : '6 4',
-          transition: 'stroke 0.3s, stroke-width 0.3s',
+          stroke: 'var(--key-stroke)',
+          strokeWidth: active ? 2.5 : 1.5,
+          strokeLinejoin: 'miter',
+          strokeLinecap: 'butt',
+          transition: 'stroke 180ms ease-out',
         }}
       />
-      <path d={arrowPath(targetX, targetY)} fill={stroke} style={{ transition: 'fill 0.3s' }} />
-      {label && (
-        <text
-          x={labelX}
-          y={labelY - 5}
-          textAnchor="middle"
-          style={{
-            fill: active ? 'var(--accent-active)' : 'var(--text-muted)',
-            fontFamily: 'var(--font-data), monospace',
-            fontSize: 10,
-            // Halo in the canvas color knocks the grid out behind the label.
-            paintOrder: 'stroke',
-            stroke: 'var(--bg-canvas)',
-            strokeWidth: 5,
-            strokeLinejoin: 'round',
-            transition: 'fill 0.3s',
-          }}
-        >
-          {label}
-        </text>
-      )}
-      {active && !reducedMotion && (
+      <rect x={start.x - 2.5} y={start.y - 2.5} width={5} height={5} fill="var(--key-stroke)" />
+      <path className="key-arrow" d={arrowPath(end.x, end.y, route.targetSide)} fill="var(--key-stroke)" />
+      {active && playing && visible && !reducedMotion && (
         <g className="edge-pulse">
           <circle r={3.5} fill="var(--accent-pulse)">
             <animateMotion dur={`${1.4 / speed}s`} repeatCount="indefinite" path={path} />
@@ -126,7 +82,7 @@ function FKEdgeInner({
           </circle>
         </g>
       )}
-    </>
+    </g>
   );
 }
 

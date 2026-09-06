@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
-import { useAppStore, useCurrentStep } from '@/store/useAppStore';
+import { useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
 import { TopBar } from '@/components/TopBar';
 import { PlaybackDock } from '@/components/PlaybackDock';
@@ -98,7 +98,7 @@ export default function Home() {
   const dbReady = useAppStore((s) => s.dbReady);
   const dbError = useAppStore((s) => s.dbError);
   const init = useAppStore((s) => s.init);
-  const step = useCurrentStep();
+  const rowCount = useAppStore((s) => s.trace?.[s.currentStep]?.partialResult?.rows.length);
   const [lessonsOpen, setLessonsOpen] = useState(false);
   const [schemaOpen, setSchemaOpen] = useState(false);
   const [queryOpen, setQueryOpen] = useState(true);
@@ -190,7 +190,7 @@ export default function Home() {
                   ) : (
                     <RestoreBar
                       label="RESULTS"
-                      badge={step?.partialResult?.rows.length}
+                      badge={rowCount}
                       icon={<TableIcon size={12} />}
                       onClick={() => setResultsOpen(true)}
                     />
@@ -211,7 +211,7 @@ export default function Home() {
                   key="results-tab"
                   offsetClass="top-36"
                   label="RESULTS"
-                  badge={step?.partialResult?.rows.length}
+                  badge={rowCount}
                   icon={<TableIcon size={13} />}
                   onClick={() => setResultsOpen(true)}
                 />

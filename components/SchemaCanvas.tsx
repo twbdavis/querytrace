@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -65,7 +65,7 @@ function StateLegend() {
               <path d="M13 1.5 19 5l-6 3.5Z" fill="var(--accent-active)" />
             </svg>
             <span className="text-ink-dim">
-              key wire: runs from the PK column into the matching FK column; pulses during a join
+              key wire: square at the PK, arrow into the FK; enters at the column’s top or bottom
             </span>
           </div>
           <div className="flex items-center gap-2 pt-0.5">
@@ -98,7 +98,7 @@ function TracePin() {
   ) : null;
 }
 
-export function SchemaCanvas() {
+export const SchemaCanvas = memo(function SchemaCanvas() {
   // On wide screens the floating panels cover the canvas edges, so the
   // initial fit targets the visible middle instead of the full viewport.
   const isWide = useMediaQuery('(min-width: 1024px)');
@@ -124,15 +124,26 @@ export function SchemaCanvas() {
   );
 
   const edges = useMemo<Edge[]>(
-    () =>
-      fkEdges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        sourceHandle: e.sourceHandle,
-        target: e.target,
-        targetHandle: e.targetHandle,
-        type: 'fk' as const,
-      })),
+    () => {
+      const sourceLanes = new Map<string, number>();
+      const targetLanes = new Map<string, number>();
+      return fkEdges.map((e) => {
+        const sourceLane = sourceLanes.get(e.source) ?? 0;
+        const targetLane = targetLanes.get(e.target) ?? 0;
+        sourceLanes.set(e.source, sourceLane + 1);
+        targetLanes.set(e.target, targetLane + 1);
+        return {
+          id: e.id,
+          source: e.source,
+          sourceHandle: e.sourceHandle,
+          target: e.target,
+          targetHandle: e.targetHandle,
+          type: 'fk' as const,
+          data: { lane: Math.max(sourceLane, targetLane) },
+          ariaLabel: `${e.source}.${e.sourceHandle} primary key to ${e.target}.${e.targetHandle} foreign key`,
+        };
+      });
+    },
     [fkEdges]
   );
 
@@ -187,4 +198,4 @@ export function SchemaCanvas() {
       </Panel>
     </ReactFlow>
   );
-}
+});

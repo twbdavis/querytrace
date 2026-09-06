@@ -2,7 +2,7 @@
 
 import { memo, useMemo } from 'react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
-import { useAppStore, useCurrentStep, useHighlight } from '@/store/useAppStore';
+import { useAppStore, useCurrentStep, useHighlight, type Selection } from '@/store/useAppStore';
 import type { TableMeta } from '@/lib/schemas';
 import { accents, rowStates, surfaces } from '@/styles/theme';
 import type { Stage } from '@/lib/traceEngine';
@@ -44,6 +44,65 @@ function fmt(v: unknown): string {
   return String(v);
 }
 
+// A hover should update the affected row styles, not rebuild every data cell.
+const TableRow = memo(function TableRow({
+  row, ri, rid, table, kind, color, isPinned, inHighlight, traceActive,
+  pkIndices, selectRow, setHoveredRow,
+}: {
+  row: unknown[];
+  ri: number;
+  rid: number;
+  table: string;
+  kind: RowKind;
+  color?: string;
+  isPinned: boolean;
+  inHighlight: boolean;
+  traceActive: boolean;
+  pkIndices: Set<number>;
+  selectRow: (selection: Selection | null) => void;
+  setHoveredRow: (selection: Selection | null) => void;
+}) {
+  const dimmed = kind === 'dimmed';
+  const inspecting = isPinned || inHighlight;
+  const bg = inspecting ? rowStates.inspectBg
+    : kind === 'group' && color ? hexToRgba(color, 0.15)
+    : kind === 'lit' || kind === 'nullext' ? rowStates.litBg
+    : ri % 2 === 1 ? surfaces.rowAlt : TRANSPARENT;
+  const leftBorder = inspecting ? accents.result
+    : kind === 'group' && color ? color
+    : kind === 'nullext' ? rowStates.nullBorder
+    : kind === 'lit' ? rowStates.litBorder : TRANSPARENT;
+
+  return (
+    <div
+      onClick={() => { if (!dimmed) selectRow({ table, rid }); }}
+      onMouseEnter={() => { if (!dimmed && traceActive) setHoveredRow({ table, rid }); }}
+      title={dimmed ? 'Eliminated at this stage' : 'Click to trace this row everywhere it contributes'}
+      className={`col-span-full my-px grid grid-cols-subgrid rounded-sm border-l-2 transition-[background-color,opacity,border-color] duration-150 ${dimmed ? 'cursor-default' : 'cursor-pointer'}`}
+      style={{
+        backgroundColor: dimmed ? TRANSPARENT : bg,
+        opacity: dimmed ? 0.3 : 1,
+        borderLeftColor: dimmed ? TRANSPARENT : leftBorder,
+        borderLeftStyle: kind === 'nullext' ? 'dashed' : 'solid',
+        outline: isPinned ? `1px solid ${accents.result}` : undefined,
+        outlineOffset: isPinned ? '-1px' : undefined,
+      }}
+    >
+      {row.map((v, ci) => (
+        <div
+          key={ci}
+          className={`whitespace-nowrap border-r border-r-[rgba(255,255,255,0.04)] px-1.5 py-[1px] last:border-r-0 ${
+            dimmed ? 'text-ink-mute line-through decoration-ink-mute/60'
+              : pkIndices.has(ci) ? 'text-ink-dim' : 'text-ink'
+          }`}
+        >
+          {fmt(v)}
+        </div>
+      ))}
+    </div>
+  );
+});
+
 function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
   const { meta, columns, rows, rids } = data;
   const step = useCurrentStep();
@@ -82,8 +141,8 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
 
   return (
     <div
-      className={`rounded-md bg-node font-data text-[11px] leading-tight transition-colors duration-300 ${
-        isActiveTable ? 'border-[1.5px] border-accent-active' : 'border border-line-strong'
+      className={`rounded-md border-[1.5px] bg-node font-data text-[11px] leading-tight transition-colors duration-200 ${
+        isActiveTable ? 'border-accent-active' : 'border-line-strong'
       }`}
       style={{ minWidth: 180 }}
     >
@@ -118,6 +177,7 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
           {meta.columns.map((c) => (
             <div
               key={c.name}
+              data-column={c.name}
               className={`relative flex items-center gap-1 whitespace-nowrap border-b-2 px-1.5 py-1 font-bold ${
                 activeCols.has(c.name) ? colAccent : 'border-b-transparent text-ink-dim'
               }`}
@@ -129,8 +189,8 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
                     : `${c.name}${c.type ? ` ${c.type}` : ''}${c.notNull ? ' - NOT NULL' : ' - NULL allowed'}${c.defaultValue !== null && c.defaultValue !== undefined ? ` - default ${c.defaultValue}` : ''}`
               }
             >
-              {/* Key arrows anchor at the attribute cells: tail at the parent's
-                  primary key, arrowhead landing on the dependent foreign key. */}
+              {/* Invisible handles measure each key column's horizontal center.
+                  The wire projects that center to the table's top/bottom border. */}
               {c.pk && (
                 <Handle
                   id={c.name}
@@ -198,68 +258,26 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
         {rows.map((row, ri) => {
           const rid = rids[ri];
           const { kind, color } = rowState(rid);
-          const dimmed = kind === 'dimmed';
           const inHighlight = highlight?.rows[table]?.has(rid) ?? false;
           const isPinned =
             (selection?.table === table && selection.rid === rid) ||
             (inHighlight && (highlight?.pinned ?? false));
-          const inspecting = isPinned || inHighlight;
-          const zebra = ri % 2 === 1 ? surfaces.rowAlt : TRANSPARENT;
-
-          const bg = inspecting
-            ? rowStates.inspectBg
-            : kind === 'group' && color
-              ? hexToRgba(color, 0.15)
-              : kind === 'lit' || kind === 'nullext'
-                ? rowStates.litBg
-                : zebra;
-          const leftBorder = inspecting
-            ? accents.result
-            : kind === 'group' && color
-              ? color
-              : kind === 'nullext'
-                ? rowStates.nullBorder
-                : kind === 'lit'
-                  ? rowStates.litBorder
-                  : TRANSPARENT;
-
           return (
-            <div
+            <TableRow
               key={rid}
-              onClick={() => {
-                if (!dimmed) selectRow({ table, rid });
-              }}
-              onMouseEnter={() => {
-                if (!dimmed && step) setHoveredRow({ table, rid });
-              }}
-              title={dimmed ? 'Eliminated at this stage' : 'Click to trace this row everywhere it contributes'}
-              className={`col-span-full my-px grid grid-cols-subgrid rounded-sm border-l-2 transition-[background-color,opacity,border-color] duration-300 ${
-                dimmed ? 'cursor-default' : 'cursor-pointer'
-              }`}
-              style={{
-                backgroundColor: dimmed ? TRANSPARENT : bg,
-                opacity: dimmed ? 0.3 : 1,
-                borderLeftColor: dimmed ? TRANSPARENT : leftBorder,
-                borderLeftStyle: kind === 'nullext' ? 'dashed' : 'solid',
-                outline: isPinned ? `1px solid ${accents.result}` : undefined,
-                outlineOffset: isPinned ? '-1px' : undefined,
-              }}
-            >
-              {row.map((v, ci) => (
-                <div
-                  key={ci}
-                  className={`whitespace-nowrap border-r border-r-[rgba(255,255,255,0.04)] px-1.5 py-[1px] last:border-r-0 ${
-                    dimmed
-                      ? 'text-ink-mute line-through decoration-ink-mute/60'
-                      : pkIndices.has(ci)
-                        ? 'text-ink-dim'
-                        : 'text-ink'
-                  }`}
-                >
-                  {fmt(v)}
-                </div>
-              ))}
-            </div>
+              row={row}
+              ri={ri}
+              rid={rid}
+              table={table}
+              kind={kind}
+              color={color}
+              inHighlight={inHighlight}
+              isPinned={isPinned}
+              traceActive={!!step}
+              pkIndices={pkIndices}
+              selectRow={selectRow}
+              setHoveredRow={setHoveredRow}
+            />
           );
         })}
       </div>

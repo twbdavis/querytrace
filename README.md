@@ -15,6 +15,11 @@ third-party classroom exercises or answer sets.
 - **GROUP BY / HAVING** - rows are color-coded by group; eliminated groups fade as units
 - **SELECT / ORDER / LIMIT** - projected columns highlight and the result panel fills row by row
 
+Key connections use straight horizontal/vertical segments with square bends.
+A square marks the primary-key end and an arrow points into the foreign-key
+column at the table's top or bottom edge. Wires choose short routes around table
+interiors and update when tables move; hover a wire for the full table/column names.
+
 Click any lit row to highlight everywhere it contributes (join partners + result rows).
 Playback: play / pause / step / reset, labeled stage scrubber, 0.5×/1×/2× speed, and a
 plain-language narration of what each stage is doing.
@@ -35,6 +40,18 @@ npm run dev        # http://localhost:3000
 npm run test:trace # trace-engine tests against the seeded DB (node, no browser)
 npm run check      # type-check, trace tests, and production build
 ```
+
+Large result sets render a scroll window with a small row buffer; all rows remain
+reachable, with stable column widths and their original provenance indices.
+Hover highlights share a cached lookup, and unchanged table rows retain their
+rendered cells. Playback uses short, bounded entrance animations; join pulses
+stop on pause, respect reduced motion, and suspend while the page is hidden.
+Hidden pages also suspend stage advancement so returning students do not miss steps.
+
+After starting a production server on port 3100, `node scripts/profileBrowser.mjs`
+measures a 10,000-row result in Chromium, including mounted rows, render work,
+and ten hover interactions. Timing depends on the machine; the browser suite
+separately checks bounded row rendering, scrolling, provenance, and motion behavior.
 
 ## Deploy
 

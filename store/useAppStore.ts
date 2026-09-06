@@ -1,6 +1,5 @@
 'use client';
 
-import { useMemo } from 'react';
 import { create } from 'zustand';
 import type { TableData } from '@/lib/db';
 import {
@@ -260,25 +259,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { trace, currentStep } = get();
     if (!trace) return;
     // Restart from the top if the user hits play at the end.
-    if (currentStep >= trace.length - 1) set({ currentStep: 0, playing: true, finished: false });
+    if (currentStep >= trace.length - 1) set({ currentStep: 0, playing: true, finished: false, hoveredRow: null, hoveredResultRow: null });
     else set({ playing: true, finished: false });
   },
   pause: () => set({ playing: false }),
   stepForward: () => {
     const { trace, currentStep } = get();
     if (!trace) return;
-    set({ currentStep: Math.min(currentStep + 1, trace.length - 1), playing: false, finished: false });
+    set({ currentStep: Math.min(currentStep + 1, trace.length - 1), playing: false, finished: false, hoveredRow: null, hoveredResultRow: null });
   },
   stepBack: () => {
     const { trace, currentStep } = get();
     if (!trace) return;
-    set({ currentStep: Math.max(currentStep - 1, 0), playing: false, finished: false });
+    set({ currentStep: Math.max(currentStep - 1, 0), playing: false, finished: false, hoveredRow: null, hoveredResultRow: null });
   },
-  reset: () => set({ currentStep: 0, playing: false, finished: false, selection: null }),
+  reset: () => set({ currentStep: 0, playing: false, finished: false, selection: null, hoveredRow: null, hoveredResultRow: null }),
   gotoStep: (i) => {
     const { trace } = get();
     if (!trace) return;
-    set({ currentStep: Math.max(0, Math.min(i, trace.length - 1)), playing: false, finished: false });
+    set({ currentStep: Math.max(0, Math.min(i, trace.length - 1)), playing: false, finished: false, hoveredRow: null, hoveredResultRow: null });
   },
   setSpeed: (s) => set({ speed: s }),
   selectRow: (sel) => {
@@ -289,8 +288,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ selection: sel });
     }
   },
-  setHoveredRow: (sel) => set({ hoveredRow: sel }),
-  setHoveredResultRow: (i) => set({ hoveredResultRow: i }),
+  setHoveredRow: (sel) => set((state) =>
+    state.hoveredRow?.table === sel?.table && state.hoveredRow?.rid === sel?.rid
+      ? state : { hoveredRow: sel }
+  ),
+  setHoveredResultRow: (i) => set((state) =>
+    state.hoveredResultRow === i ? state : { hoveredResultRow: i }
+  ),
   markLessonRun: (id) => {
     set((state) => ({ ranLessons: { ...state.ranLessons, [id]: true } }));
     return persistCurrentState();
@@ -348,13 +352,17 @@ export interface Highlight {
  * The active provenance highlight, resolved with hover taking precedence
  * over a pinned selection so the user can always "probe" freely.
  */
-export function useHighlight(): Highlight | null {
-  const step = useCurrentStep();
-  const selection = useAppStore((s) => s.selection);
-  const hoveredRow = useAppStore((s) => s.hoveredRow);
-  const hoveredResultRow = useAppStore((s) => s.hoveredResultRow);
-
-  return useMemo(() => {
+// Every table and the result panel share one derived snapshot. Per-component
+// useMemo would repeat the same provenance lookup for every subscriber.
+let highlightInputs: readonly unknown[] = [];
+let cachedHighlight: Highlight | null = null;
+function selectHighlight(state: AppState): Highlight | null {
+  const step = state.trace?.[state.currentStep] ?? null;
+  const { selection, hoveredRow, hoveredResultRow } = state;
+  const inputs = [step, selection, hoveredRow, hoveredResultRow];
+  if (inputs.every((input, i) => input === highlightInputs[i])) return cachedHighlight;
+  highlightInputs = inputs;
+  cachedHighlight = (() => {
     if (!step) return null;
     if (hoveredResultRow !== null && step.resultRowSources?.[hoveredResultRow]) {
       const rows: Record<string, Set<number>> = {};
@@ -367,5 +375,10 @@ export function useHighlight(): Highlight | null {
     if (!sel) return null;
     const p = provenanceFor(step, sel.table, sel.rid);
     return { rows: p.rows, resultRows: p.resultRows, pinned: !hoveredRow && !!selection };
-  }, [step, selection, hoveredRow, hoveredResultRow]);
+  })();
+  return cachedHighlight;
+}
+
+export function useHighlight(): Highlight | null {
+  return useAppStore(selectHighlight);
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ComponentType } from 'react';
 import { useAppStore, useCurrentStep, type Speed } from '@/store/useAppStore';
+import { useDocumentVisible } from '@/lib/useDocumentVisible';
 import {
   ColumnsIcon,
   DatabaseIcon,
@@ -72,25 +73,32 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
   const currentStep = useAppStore((s) => s.currentStep);
   const playing = useAppStore((s) => s.playing);
   const speed = useAppStore((s) => s.speed);
-  const { play, pause, stepForward, stepBack, reset, gotoStep, setSpeed } = useAppStore();
+  const play = useAppStore((s) => s.play);
+  const pause = useAppStore((s) => s.pause);
+  const stepForward = useAppStore((s) => s.stepForward);
+  const stepBack = useAppStore((s) => s.stepBack);
+  const reset = useAppStore((s) => s.reset);
+  const gotoStep = useAppStore((s) => s.gotoStep);
+  const setSpeed = useAppStore((s) => s.setSpeed);
+  const visible = useDocumentVisible();
   const step = useCurrentStep();
   const [explain, setExplain] = useState(true);
 
   // Advance the step index on a timer while playing.
   useEffect(() => {
-    if (!playing || !trace) return;
+    if (!playing || !trace || !visible) return;
     const interval = setInterval(() => {
       const s = useAppStore.getState();
-      if (!s.trace) return;
+      if (!s.trace || !s.playing || document.hidden) return;
       if (s.currentStep >= s.trace.length - 1) {
         // Auto-play ran to the end: stop and clear the query-text highlight.
         useAppStore.setState({ playing: false, finished: true });
       } else {
-        useAppStore.setState({ currentStep: s.currentStep + 1 });
+        useAppStore.setState({ currentStep: s.currentStep + 1, hoveredRow: null, hoveredResultRow: null });
       }
     }, 2000 / speed);
     return () => clearInterval(interval);
-  }, [playing, speed, trace]);
+  }, [playing, speed, trace, visible]);
 
   // Transport keyboard shortcuts (ignored while typing SQL).
   useEffect(() => {
@@ -130,7 +138,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
 
   return (
     <div
-      className={`pointer-events-none absolute bottom-2 right-0 z-30 flex justify-center px-2 transition-[left] duration-200 max-sm:bottom-1.5 max-sm:px-1.5 sm:bottom-3 ${leftClass}`}
+      className={`pointer-events-none absolute bottom-2 right-0 z-30 flex justify-center px-2 max-sm:bottom-1.5 max-sm:px-1.5 sm:bottom-3 ${leftClass}`}
     >
       <div className="pointer-events-auto flex min-w-0 max-w-full flex-col rounded-md border border-line-strong bg-panel px-2 py-1.5 max-sm:w-full max-sm:px-1.5 sm:px-3 sm:py-2">
         <div className="flex min-w-0 items-center gap-1.5 max-sm:gap-1 sm:gap-2">
@@ -195,7 +203,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
                       aria-label={`Stage ${i + 1}: ${st.label}`}
                       onClick={() => gotoStep(i)}
                       title={st.label}
-                      className={`group flex shrink-0 cursor-pointer flex-col items-center gap-0.5 rounded-md border px-1.5 py-1 transition-all duration-200 max-sm:min-h-9 max-sm:min-w-8 max-sm:justify-center max-sm:px-1 sm:px-2 ${
+                      className={`group flex shrink-0 cursor-pointer flex-col items-center gap-0.5 rounded-md border px-1.5 py-1 transition-colors duration-200 max-sm:min-h-9 max-sm:min-w-8 max-sm:justify-center max-sm:px-1 sm:px-2 ${
                         current
                           ? 'border-accent-active bg-accent-active/10 text-accent-active'
                           : visited
@@ -224,9 +232,10 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
                           stroke={i < currentStep ? 'var(--border-strong)' : 'var(--border-default)'}
                           strokeWidth="2"
                         />
-                        {i < currentStep && (
+                        {i === currentStep - 1 && playing && visible && (
                           <line
                             className="bus-current animate-bus-flow"
+                            style={{ animationDuration: `${0.9 / speed}s` }}
                             x1="0"
                             y1="4"
                             x2="100"

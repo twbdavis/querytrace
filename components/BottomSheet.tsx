@@ -83,7 +83,7 @@ export function BottomSheet({ editor, results }: BottomSheetProps) {
       </div>
 
       <div
-        className={`overflow-hidden transition-[height] duration-200 ${
+        className={`overflow-hidden ${
           open ? 'h-[52dvh] sm:h-[46dvh]' : 'h-[52dvh] sm:h-0'
         }`}
       >

@@ -13,8 +13,9 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:trace": "tsx scripts/testTrace.ts",
+    "test:routes": "tsx scripts/testKeyRoutes.ts",
     "test:browsers": "playwright test",
-    "check": "npm run typecheck && npm run test:trace && npm run build"
+    "check": "npm run typecheck && npm run test:trace && npm run test:routes && npm run build"
   },
   "dependencies": {
     "@codemirror/lang-sql": "^6.10.0",
