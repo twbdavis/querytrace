@@ -28,7 +28,8 @@ function autoPosition(i: number): { x: number; y: number } {
 }
 
 const LEGEND: Array<{ swatch: string; name: string; desc: string }> = [
-  { swatch: 'border border-accent-active/50 bg-accent-active/20', name: 'alive', desc: 'still in the pipeline' },
+  { swatch: 'border border-l-4 border-accent-active/65 bg-accent-active/30', name: 'alive', desc: 'still in the pipeline' },
+  { swatch: 'border-2 border-l-4 border-accent-result bg-accent-result/30', name: 'highlighted', desc: 'checkmark + mint outline trace a row’s contributions' },
   { swatch: 'bg-node-header opacity-40', name: 'eliminated', desc: 'faded + struck through' },
   { swatch: 'border border-accent-group/60 bg-accent-group/20', name: 'grouped', desc: 'one color per bucket' },
   { swatch: 'border border-dashed border-accent-filter bg-accent-active/15', name: 'kept unmatched', desc: 'NULL-extended' },

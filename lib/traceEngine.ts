@@ -44,7 +44,7 @@ export interface TraceStep {
   tuples?: Array<Record<string, number | null>>;
   /** Alias (as written in FROM) -> canonical table name for every key in `tuples`. */
   tupleTables?: Record<string, string>;
-  /** For select/orderLimit steps: result row index -> contributing rowids per table. */
+  /** Displayed row index -> contributing rowids per table, at every traceable stage. */
   resultRowSources?: Array<Record<string, number[]>>;
   /** Character range of the clause in the original query text (for editor highlight). */
   queryRange?: { start: number; end: number };
@@ -186,22 +186,34 @@ function exec(ctx: EngineCtx, sql: string): { columns: string[]; rows: unknown[]
   return { columns: res[0].columns, rows: res[0].values };
 }
 
-/** Run the pipeline through join k (+ optional WHERE) selecting only rowids. */
-function execTuples(ctx: EngineCtx, k: number, where: string | null): Array<Record<string, number | null>> {
-  const cols = ctx.refs
-    .slice(0, k + 1)
+/** Read values and provenance together: separate SELECTs can use different scan orders. */
+function execPipeline(ctx: EngineCtx, k: number, where: string | null) {
+  const refs = ctx.refs.slice(0, k + 1);
+  const cols = refs
     .map((r, i) => `${quoteIdent(r.alias)}._rowid_ AS k${i}`)
     .join(', ');
-  const sql = `SELECT ${cols} FROM ${fromClause(ctx, k)}${where ? ` WHERE ${where}` : ''}`;
-  const { rows } = exec(ctx, sql);
-  return rows.map((row) => {
+  const sql = `SELECT *, ${cols} FROM ${fromClause(ctx, k)}${where ? ` WHERE ${where}` : ''}`;
+  const { columns, rows } = exec(ctx, sql);
+  const displayWidth = Math.max(0, columns.length - refs.length);
+  const sources: Array<Record<string, number[]>> = [];
+  const displayRows: unknown[][] = [];
+  const tuples = rows.map((row) => {
     const tuple: Record<string, number | null> = {};
+    const source: Record<string, number[]> = {};
     for (let i = 0; i <= k; i++) {
-      const v = row[i];
-      tuple[ctx.refs[i].alias] = v === null || v === undefined ? null : Number(v);
+      const v = row[displayWidth + i];
+      const rid = v === null || v === undefined ? null : Number(v);
+      tuple[refs[i].alias] = rid;
+      const rids = (source[refs[i].table] ??= []);
+      if (rid !== null && !rids.includes(rid)) rids.push(rid);
     }
+    sources.push(source);
+    displayRows.push(row.slice(0, displayWidth));
     return tuple;
   });
+  // The results UI windows large tables. Keeping the complete stage lets a
+  // pinned source row beyond the old 60-row preview remain reachable.
+  return { tuples, sources, result: { columns: columns.slice(0, displayWidth), rows: displayRows } };
 }
 
 function litFromTuples(ctx: EngineCtx, tuples: Array<Record<string, number | null>>): Record<string, Set<number>> {
@@ -321,16 +333,20 @@ function edgesForOn(ctx: EngineCtx, on: AstExpr): string[] {
 
 interface SelectItem {
   sql: string;
+  columns: ColumnRef[];
 }
 
 function buildSelectList(ctx: EngineCtx): SelectItem[] {
   const cols = ctx.ast.columns;
   const expandStar = (onlyAlias?: string): SelectItem[] =>
     ctx.refs
-      .filter((r) => !onlyAlias || r.alias === onlyAlias)
+      .filter((r) => !onlyAlias || r.alias.toLowerCase() === onlyAlias.toLowerCase())
       .flatMap((r) => {
         const meta = ctx.schema.find((t) => t.name === r.table);
-        return (meta?.columns ?? []).map((c) => ({ sql: qualified(r.alias, c.name) }));
+        return (meta?.columns ?? []).map((c) => ({
+          sql: qualified(r.alias, c.name),
+          columns: [{ table: r.table, column: c.name }],
+        }));
       });
 
   if (typeof cols === 'string') return expandStar();
@@ -343,7 +359,7 @@ function buildSelectList(ctx: EngineCtx): SelectItem[] {
       continue;
     }
     const base = exprSql(c.expr);
-    out.push({ sql: c.as ? `${base} AS \`${c.as}\`` : base });
+    out.push({ sql: c.as ? `${base} AS \`${c.as}\`` : base, columns: resolveColumnRefs(ctx, c.expr) });
   }
   return out;
 }
@@ -631,10 +647,9 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   const allTableNames = Array.from(new Set(refs.map((r) => r.table)));
 
   // ---- Stage: FROM -------------------------------------------------------
-  const basePks = allPks(ctx, refs[0].table);
-  let tuples: Array<Record<string, number | null>> = Array.from(basePks).map((pk) => ({
-    [refs[0].alias]: pk,
-  }));
+  const basePipeline = execPipeline(ctx, 0, null);
+  let tuples = basePipeline.tuples;
+  const basePks = new Set(tuples.map((tuple) => tuple[refs[0].alias]!));
   let lit: Record<string, Set<number>> = { [refs[0].table]: new Set(basePks) };
 
   steps.push({
@@ -647,7 +662,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     litRows: cloneSets(lit),
     dimmedRows: {},
     tuples,
-    partialResult: exec(ctx, `SELECT * FROM ${fmtRef(ctx, 0)}`),
+    partialResult: basePipeline.result,
+    resultRowSources: basePipeline.sources,
   });
 
   // ---- Stage: JOIN (one step per join) ----------------------------------
@@ -655,7 +671,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     const f = from[i];
     const joinType = f.join ? f.join.toUpperCase() : 'CROSS JOIN';
     const onSql = f.on ? exprSql(f.on) : null;
-    tuples = execTuples(ctx, i, null);
+    const pipeline = execPipeline(ctx, i, null);
+    tuples = pipeline.tuples;
     const nextLit = litFromTuples(ctx, tuples);
     const nullExt = nullExtendedFromTuples(ctx, tuples);
 
@@ -691,14 +708,16 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       dimmedRows: dimmed,
       nullExtendedRows: nullExt,
       tuples,
-      partialResult: limitPreview(exec(ctx, `SELECT * FROM ${fromClause(ctx, i)}`)),
+      partialResult: pipeline.result,
+      resultRowSources: pipeline.sources,
     });
     lit = nextLit;
   }
 
   // ---- Stage: WHERE ------------------------------------------------------
   if (ctx.whereSql) {
-    tuples = execTuples(ctx, nJoins, ctx.whereSql);
+    const pipeline = execPipeline(ctx, nJoins, ctx.whereSql);
+    tuples = pipeline.tuples;
     const nextLit = litFromTuples(ctx, tuples);
     const dimmed = diffSets(lit, nextLit);
     const cut = Object.values(dimmed).reduce((n, s) => n + s.size, 0);
@@ -715,9 +734,8 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       dimmedRows: dimmed,
       nullExtendedRows: nullExtendedFromTuples(ctx, tuples),
       tuples,
-      partialResult: limitPreview(
-        exec(ctx, `SELECT * FROM ${fromClause(ctx, nJoins)} WHERE ${ctx.whereSql}`)
-      ),
+      partialResult: pipeline.result,
+      resultRowSources: pipeline.sources,
     });
     lit = nextLit;
   }
@@ -787,6 +805,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       dimmedRows: {},
       groupColors,
       tuples,
+      resultRowSources: groups.map((group) => group.pksPerTable),
       partialResult: {
         columns: [...ctx.groupExprSqls, 'COUNT(*)'],
         rows: groups.map((g) => [...g.keyValues, g.count]),
@@ -825,6 +844,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
         dimmedRows: dimmed,
         groupColors: keptColors,
         tuples,
+        resultRowSources: survivors.map((group) => group.pksPerTable),
         partialResult: {
           columns: [...ctx.groupExprSqls, 'COUNT(*)'],
           rows: survivors.map((g) => [...g.keyValues, g.count]),
@@ -924,10 +944,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
           ? `Projection keeps the requested columns, then DISTINCT removes duplicate result rows while preserving their contributing sources.`
       : `Projection keeps only the requested columns. Each result row on the right traces back to the highlighted source rows; click a result row to see them.`,
     activeTables: allTableNames,
-    activeColumns: resolveColumnRefs(
-      ctx,
-      typeof ast.columns === 'string' ? null : ast.columns.map((c) => c.expr)
-    ),
+    activeColumns: selectItems.flatMap((item) => item.columns),
     activeEdges: [],
     litRows: cloneSets(projLit),
     dimmedRows: diffSets(lit, projLit),

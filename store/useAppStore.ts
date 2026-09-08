@@ -346,11 +346,31 @@ export interface Highlight {
   resultRows: Set<number>;
   /** True when the highlight comes from a pinned click, not a transient hover. */
   pinned: boolean;
+  /** Pinned contributors are kept separate from transient hover previews. */
+  pinnedRows: Record<string, Set<number>>;
+}
+
+type Provenance = ReturnType<typeof provenanceFor>;
+let pinnedStep: TraceStep | null = null;
+let pinnedSelection: Selection | null = null;
+let cachedPinned: Provenance | null = null;
+
+function selectPinnedHighlight(state: AppState): Provenance | null {
+  const step = state.trace?.[state.currentStep] ?? null;
+  if (step === pinnedStep && state.selection === pinnedSelection) return cachedPinned;
+  pinnedStep = step;
+  pinnedSelection = state.selection;
+  cachedPinned = step && state.selection ? provenanceFor(step, state.selection.table, state.selection.rid) : null;
+  return cachedPinned;
+}
+
+/** Stable across hover changes, also used to reveal a pin in a scroll window. */
+export function usePinnedHighlight(): Provenance | null {
+  return useAppStore(selectPinnedHighlight);
 }
 
 /**
- * The active provenance highlight, resolved with hover taking precedence
- * over a pinned selection so the user can always "probe" freely.
+ * Keep the pinned trace visible while allowing an additional hover preview.
  */
 // Every table and the result panel share one derived snapshot. Per-component
 // useMemo would repeat the same provenance lookup for every subscriber.
@@ -364,17 +384,28 @@ function selectHighlight(state: AppState): Highlight | null {
   highlightInputs = inputs;
   cachedHighlight = (() => {
     if (!step) return null;
+    const pinned = selectPinnedHighlight(state);
+    let preview: Provenance | null = null;
     if (hoveredResultRow !== null && step.resultRowSources?.[hoveredResultRow]) {
       const rows: Record<string, Set<number>> = {};
       for (const [table, rids] of Object.entries(step.resultRowSources[hoveredResultRow])) {
         if (rids.length) rows[table] = new Set(rids);
       }
-      return { rows, resultRows: new Set([hoveredResultRow]), pinned: false };
+      preview = { rows, resultRows: new Set([hoveredResultRow]) };
+    } else if (hoveredRow) {
+      preview = provenanceFor(step, hoveredRow.table, hoveredRow.rid);
     }
-    const sel = hoveredRow ?? selection;
-    if (!sel) return null;
-    const p = provenanceFor(step, sel.table, sel.rid);
-    return { rows: p.rows, resultRows: p.resultRows, pinned: !hoveredRow && !!selection };
+    const base = pinned ?? preview;
+    if (!base) return null;
+    const rows = { ...base.rows };
+    const resultRows = new Set(base.resultRows);
+    if (pinned && preview) {
+      for (const [table, rids] of Object.entries(preview.rows)) {
+        rows[table] = new Set([...(rows[table] ?? []), ...rids]);
+      }
+      for (const index of preview.resultRows) resultRows.add(index);
+    }
+    return { rows, resultRows, pinned: !!pinned, pinnedRows: pinned?.rows ?? {} };
   })();
   return cachedHighlight;
 }

@@ -40,10 +40,10 @@ export const accents = {
 
 /** Pre-mixed row-state tints (never computed at runtime). */
 export const rowStates = {
-  litBg: 'rgba(139, 152, 255, 0.20)',
+  litBg: 'rgba(139, 152, 255, 0.30)',
   litBorder: accents.active,
   nullBorder: accents.filter, // rendered dashed
-  inspectBg: 'rgba(94, 234, 212, 0.20)',
+  inspectBg: 'rgba(94, 234, 212, 0.32)',
 } as const;
 
 /** Drafting-paper grid lines: just perceptible, never louder than idle edges. */

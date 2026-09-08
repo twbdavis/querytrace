@@ -6,6 +6,7 @@ import { useAppStore, useCurrentStep, useHighlight, type Selection } from '@/sto
 import type { TableMeta } from '@/lib/schemas';
 import { accents, rowStates, surfaces } from '@/styles/theme';
 import type { Stage } from '@/lib/traceEngine';
+import { CheckIcon } from './Icons';
 
 export interface TableNodeData extends Record<string, unknown> {
   meta: TableMeta;
@@ -33,6 +34,18 @@ const STAGE_COL_ACCENT: Record<Stage, string> = {
   orderLimit: 'border-b-ink-dim text-ink-dim',
 };
 
+const STAGE_CELL_ACCENT: Record<Stage, string> = {
+  from: 'bg-accent-active/20',
+  join: 'bg-accent-active/20',
+  where: 'bg-accent-filter/20',
+  groupBy: 'bg-accent-group/20',
+  having: 'bg-accent-filter/20',
+  subquery: 'bg-accent-group/20',
+  union: 'bg-accent-result/20',
+  select: 'bg-accent-result/20',
+  orderLimit: 'bg-ink-dim/20',
+};
+
 function hexToRgba(hex: string, alpha: number): string {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
@@ -47,7 +60,7 @@ function fmt(v: unknown): string {
 // A hover should update the affected row styles, not rebuild every data cell.
 const TableRow = memo(function TableRow({
   row, ri, rid, table, kind, color, isPinned, inHighlight, traceActive,
-  pkIndices, selectRow, setHoveredRow,
+  pkIndices, activeColumnIndices, cellAccent, selectRow, setHoveredRow,
 }: {
   row: unknown[];
   ri: number;
@@ -59,43 +72,56 @@ const TableRow = memo(function TableRow({
   inHighlight: boolean;
   traceActive: boolean;
   pkIndices: Set<number>;
+  activeColumnIndices: Set<number>;
+  cellAccent: string;
   selectRow: (selection: Selection | null) => void;
   setHoveredRow: (selection: Selection | null) => void;
 }) {
   const dimmed = kind === 'dimmed';
   const inspecting = isPinned || inHighlight;
   const bg = inspecting ? rowStates.inspectBg
-    : kind === 'group' && color ? hexToRgba(color, 0.15)
+    : kind === 'group' && color ? hexToRgba(color, 0.22)
     : kind === 'lit' || kind === 'nullext' ? rowStates.litBg
     : ri % 2 === 1 ? surfaces.rowAlt : TRANSPARENT;
   const leftBorder = inspecting ? accents.result
     : kind === 'group' && color ? color
     : kind === 'nullext' ? rowStates.nullBorder
     : kind === 'lit' ? rowStates.litBorder : TRANSPARENT;
+  const outlined = !dimmed && (inspecting || kind !== 'neutral');
 
   return (
     <div
+      data-table-row={rid}
       onClick={() => { if (!dimmed) selectRow({ table, rid }); }}
       onMouseEnter={() => { if (!dimmed && traceActive) setHoveredRow({ table, rid }); }}
       title={dimmed ? 'Eliminated at this stage' : 'Click to trace this row everywhere it contributes'}
-      className={`col-span-full my-px grid grid-cols-subgrid rounded-sm border-l-2 transition-[background-color,opacity,border-color] duration-150 ${dimmed ? 'cursor-default' : 'cursor-pointer'}`}
+      className={`col-span-full my-px grid grid-cols-subgrid rounded-sm border-l-4 transition-[background-color,opacity,border-color] duration-150 ${dimmed ? 'cursor-default' : 'cursor-pointer'}`}
       style={{
         backgroundColor: dimmed ? TRANSPARENT : bg,
         opacity: dimmed ? 0.3 : 1,
         borderLeftColor: dimmed ? TRANSPARENT : leftBorder,
-        borderLeftStyle: kind === 'nullext' ? 'dashed' : 'solid',
-        outline: isPinned ? `1px solid ${accents.result}` : undefined,
-        outlineOffset: isPinned ? '-1px' : undefined,
+        borderLeftStyle: kind === 'nullext' && !inspecting ? 'dashed' : 'solid',
+        outline: outlined
+          ? inspecting ? `2px solid ${accents.result}`
+            : `1px ${kind === 'nullext' ? 'dashed' : 'solid'} ${hexToRgba(leftBorder, 0.65)}`
+          : undefined,
+        outlineOffset: inspecting ? '-2px' : '-1px',
       }}
     >
       {row.map((v, ci) => (
         <div
           key={ci}
-          className={`whitespace-nowrap border-r border-r-[rgba(255,255,255,0.04)] px-1.5 py-[1px] last:border-r-0 ${
+          data-column-active={activeColumnIndices.has(ci) && !dimmed && kind !== 'neutral' || undefined}
+          className={`relative whitespace-nowrap border-r border-r-[rgba(255,255,255,0.04)] px-1.5 py-[1px] last:border-r-0 ${ci === 0 ? 'pl-5' : ''} ${
+            activeColumnIndices.has(ci) && !dimmed && kind !== 'neutral' ? cellAccent : ''
+          } ${
             dimmed ? 'text-ink-mute line-through decoration-ink-mute/60'
-              : pkIndices.has(ci) ? 'text-ink-dim' : 'text-ink'
+              : inspecting ? 'text-ink' : pkIndices.has(ci) ? 'text-ink-dim' : 'text-ink'
           }`}
         >
+          {ci === 0 && inspecting && !dimmed && (
+            <CheckIcon size={11} strokeWidth={3} className="absolute left-1 top-1/2 -translate-y-1/2 text-accent-result" />
+          )}
           {fmt(v)}
         </div>
       ))}
@@ -128,6 +154,11 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
     [step, table]
   );
   const colAccent = step ? STAGE_COL_ACCENT[step.stage] : STAGE_COL_ACCENT.from;
+  const cellAccent = step ? STAGE_CELL_ACCENT[step.stage] : STAGE_CELL_ACCENT.from;
+  const activeColumnIndices = useMemo(
+    () => new Set(columns.flatMap((column, index) => activeCols.has(column) ? [index] : [])),
+    [columns, activeCols]
+  );
 
   const rowState = (rid: number): { kind: RowKind; color?: string } => {
     if (!step) return { kind: 'neutral' };
@@ -174,11 +205,11 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
         onMouseLeave={() => setHoveredRow(null)}
       >
         <div className="col-span-full grid grid-cols-subgrid border-b border-line bg-node-header/50">
-          {meta.columns.map((c) => (
+          {meta.columns.map((c, ci) => (
             <div
               key={c.name}
               data-column={c.name}
-              className={`relative flex items-center gap-1 whitespace-nowrap border-b-2 px-1.5 py-1 font-bold ${
+              className={`relative flex items-center gap-1 whitespace-nowrap border-b-2 px-1.5 py-1 font-bold ${ci === 0 ? 'pl-6' : ''} ${
                 activeCols.has(c.name) ? colAccent : 'border-b-transparent text-ink-dim'
               }`}
               title={
@@ -261,7 +292,7 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
           const inHighlight = highlight?.rows[table]?.has(rid) ?? false;
           const isPinned =
             (selection?.table === table && selection.rid === rid) ||
-            (inHighlight && (highlight?.pinned ?? false));
+            (highlight?.pinnedRows[table]?.has(rid) ?? false);
           return (
             <TableRow
               key={rid}
@@ -275,6 +306,8 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
               isPinned={isPinned}
               traceActive={!!step}
               pkIndices={pkIndices}
+              activeColumnIndices={activeColumnIndices}
+              cellAccent={cellAccent}
               selectRow={selectRow}
               setHoveredRow={setHoveredRow}
             />

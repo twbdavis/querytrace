@@ -453,6 +453,53 @@ async function main() {
     console.log('  alias-aware provenance: ok');
   }
   {
+    const { provenanceFor } = await import('../lib/provenance');
+    const database = new SQL.Database();
+    database.run(`
+      CREATE TABLE trace_parent (code TEXT PRIMARY KEY, category TEXT);
+      CREATE TABLE trace_child (parent_code TEXT, note TEXT);
+      INSERT INTO trace_parent VALUES ('beta', 'keep'), ('alpha', 'keep'), ('gone', 'drop'), ('empty', 'solo');
+      INSERT INTO trace_child VALUES ('beta', 'same'), ('beta', 'same'), ('alpha', 'same'), ('gone', 'same');
+      CREATE INDEX trace_category ON trace_parent(category, code);
+    `);
+    const schema = introspectSchema(database).schema;
+    const parsed = parseQuery(`SELECT p.category, COUNT(c.parent_code) AS n
+      FROM trace_parent p LEFT JOIN trace_child c ON p.code = c.parent_code
+      WHERE p.code <> 'gone' GROUP BY p.category HAVING COUNT(*) >= 2 ORDER BY COUNT(c.parent_code) DESC`);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const steps = buildTrace(parsed.ast, database, schema);
+    const expectedCounts = [1, 2, 2, 1, 1, 1, 1];
+    steps.forEach((step, i) => {
+      assert(step.resultRowSources?.length === step.partialResult?.rows.length, `${step.stage}: every intermediate row has aligned sources`);
+      assert(provenanceFor(step, 'trace_parent', 1).resultRows.size === expectedCounts[i], `${step.stage}: pin follows text-key row through duplicates and aggregation`);
+      if (['from', 'join', 'where'].includes(step.stage)) {
+        step.partialResult!.rows.forEach((row, index) => {
+          const source = step.resultRowSources![index];
+          const expectedRid = ['beta', 'alpha', 'gone', 'empty'].indexOf(String(row[0])) + 1;
+          assert(source.trace_parent?.[0] === expectedRid, `${step.stage}: source identity comes from the displayed row, not a separate scan order`);
+        });
+      }
+    });
+    const joined = steps.find((step) => step.stage === 'join')!;
+    const unmatched = [...provenanceFor(joined, 'trace_parent', 4).resultRows][0];
+    assert(joined.resultRowSources![unmatched].trace_child.length === 0, 'NULL-extended rows do not invent child provenance');
+    assert(provenanceFor(steps.find((step) => step.stage === 'where')!, 'trace_parent', 3).resultRows.size === 0, 'WHERE removes eliminated row highlights');
+    assert(provenanceFor(steps.find((step) => step.stage === 'having')!, 'trace_parent', 4).resultRows.size === 0, 'HAVING removes eliminated group highlights');
+
+    database.run(`CREATE TABLE trace_many (id INTEGER PRIMARY KEY);
+      INSERT INTO trace_many VALUES ${Array.from({ length: 120 }, (_, i) => `(${i + 1})`).join(',')};`);
+    const largeParsed = parseQuery('SELECT m.id FROM trace_many m CROSS JOIN trace_parent p WHERE m.id > 0');
+    if (!largeParsed.ok) throw new Error(largeParsed.error);
+    const largeSteps = buildTrace(largeParsed.ast, database, introspectSchema(database).schema);
+    for (const step of largeSteps) {
+      const matches = provenanceFor(step, 'trace_many', 120).resultRows;
+      assert(matches.size === (step.stage === 'from' ? 1 : 4), `${step.stage}: pin remains available beyond the former 60-row preview`);
+      assert([...matches].every((index) => step.partialResult!.rows[index][0] === 120), `${step.stage}: far-away pin points to its real displayed rows`);
+    }
+    database.close();
+    console.log('  intermediate row provenance and full previews: ok');
+  }
+  {
     const database = new SQL.Database();
     database.run('PRAGMA foreign_keys = ON');
     database.run(`
@@ -473,6 +520,9 @@ async function main() {
     assert(reserved.at(-1)?.partialResult?.rows.length === 2, 'reserved-word table and column names are quoted in generated SQL');
     const star = trace('SELECT * FROM "Order"');
     assert(JSON.stringify(star.at(-1)?.partialResult?.columns) === JSON.stringify(['Order Id', 'Group']), 'SELECT * keeps spaced column names');
+    assert(star.at(-1)?.activeColumns.map((c) => c.column).join(',') === 'Order Id,Group', 'SELECT * highlights every selected column');
+    const qualifiedStar = trace('SELECT O.* FROM "Order" o');
+    assert(qualifiedStar.at(-1)?.activeColumns.length === 2, 'qualified wildcard highlights its columns with case-insensitive aliases');
     const keyless = trace('SELECT label, COUNT(*) FROM staging_rows GROUP BY label');
     assert(keyless.at(-1)?.partialResult?.rows[0]?.[1] === 2, 'tables without a primary key are traced by rowid');
     console.log('  quoted identifiers + keyless tables: ok');

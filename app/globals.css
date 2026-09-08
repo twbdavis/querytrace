@@ -30,10 +30,10 @@
   --accent-error: #fb7185; /* rose: errors */
 
   /* Row state backgrounds (pre-mixed, don't compute at runtime) */
-  --row-lit-bg: rgba(139, 152, 255, 0.2);
+  --row-lit-bg: rgba(139, 152, 255, 0.3);
   --row-lit-border: #8b98ff;
   --row-null-border: #fcd34d; /* dashed */
-  --row-inspect-bg: rgba(94, 234, 212, 0.2);
+  --row-inspect-bg: rgba(94, 234, 212, 0.32);
   --motion-enter: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -131,6 +131,14 @@ body {
 
 /* Matches ResultTable's scroll window math; cells stay single-line. */
 .result-data-row { height: 24px; }
+
+/* Cell-level edges keep each highlighted row distinct, including adjacent rows. */
+.result-row-highlighted > td {
+  box-shadow: inset 0 1px var(--accent-result), inset 0 -1px var(--accent-result);
+}
+.result-row-highlighted > td:last-child {
+  box-shadow: inset 0 1px var(--accent-result), inset 0 -1px var(--accent-result), inset -1px 0 var(--accent-result);
+}
 
 .key-connection:hover,
 .react-flow__edge:focus .key-connection {

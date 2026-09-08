@@ -1,5 +1,5 @@
 'use client';
-import { useAppStore, useCurrentStep } from '@/store/useAppStore';
+import { useAppStore, useCurrentStep, useHighlight, usePinnedHighlight } from '@/store/useAppStore';
 import { ResultTable } from './ResultTable';
 import { StepBackIcon } from './Icons';
 
@@ -9,6 +9,8 @@ interface ResultPanelProps {
 
 export function ResultPanel({ onCollapse }: ResultPanelProps) {
   const step = useCurrentStep();
+  const highlight = useHighlight();
+  const pinned = usePinnedHighlight();
   const currentStep = useAppStore((s) => s.currentStep);
   const traceLength = useAppStore((s) => s.trace?.length ?? 0);
   const result = step?.partialResult;
@@ -21,7 +23,12 @@ export function ResultPanel({ onCollapse }: ResultPanelProps) {
         <span className="font-ui text-[10px] font-bold uppercase tracking-[0.2em] text-ink-dim">
           {isFinal ? 'result' : 'intermediate rows'}
         </span>
-        <span className="flex items-center gap-1.5">
+        <span className="flex min-h-6 items-center gap-1.5">
+          {!!highlight?.resultRows.size && (
+            <span className="rounded border border-accent-result/60 bg-accent-result/15 px-1.5 py-0.5 font-data text-[10px] tabular-nums text-accent-result">
+              {highlight.resultRows.size} highlighted
+            </span>
+          )}
           {result && (
             <span className="font-data text-[10px] tabular-nums text-ink-mute">
               {result.rows.length} {result.rows.length === 1 ? 'row' : 'rows'}
@@ -45,6 +52,11 @@ export function ResultPanel({ onCollapse }: ResultPanelProps) {
           <span className="hidden sm:inline">
             Hover a row to light up its source rows in the tables; click to pin the trace.
           </span>
+        </p>
+      )}
+      {pinned && pinned.resultRows.size === 0 && (
+        <p role="status" className="px-3 pb-2 text-[10px] leading-snug text-ink-dim max-sm:px-2.5">
+          {interactive ? 'The pinned row does not contribute to this stage’s results.' : 'Row tracing is unavailable for this stage.'}
         </p>
       )}
       {result ? (

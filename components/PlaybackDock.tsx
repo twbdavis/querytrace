@@ -3,6 +3,7 @@
 import { useEffect, useState, type ComponentType } from 'react';
 import { useAppStore, useCurrentStep, type Speed } from '@/store/useAppStore';
 import { useDocumentVisible } from '@/lib/useDocumentVisible';
+import PoweredByPlatmatics from './badge/PoweredByPlatmatics';
 import {
   ColumnsIcon,
   DatabaseIcon,
@@ -82,7 +83,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
   const setSpeed = useAppStore((s) => s.setSpeed);
   const visible = useDocumentVisible();
   const step = useCurrentStep();
-  const [explain, setExplain] = useState(true);
+  const [explain, setExplain] = useState(false);
 
   // Advance the step index on a timer while playing.
   useEffect(() => {
@@ -291,9 +292,11 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
           {trace && (
             <button
               onClick={() => setExplain(!explain)}
-              aria-pressed={explain}
+              aria-expanded={explain}
+              aria-controls="stage-explanation"
+              aria-label={explain ? 'Hide stage explanation' : 'Show stage explanation'}
               title={explain ? 'Hide stage explanation' : 'Show stage explanation'}
-              className={`hidden h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border transition-colors md:flex ${
+              className={`flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border transition-colors max-sm:h-9 max-sm:w-9 ${
                 explain
                   ? 'border-accent-active bg-accent-active/10 text-accent-active'
                   : 'border-line bg-panel text-ink-mute hover:text-ink-dim'
@@ -306,7 +309,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
 
         {/* Narration: what this stage is doing, in plain language */}
         {trace && explain && step && (
-          <div className="mt-1.5 hidden max-w-xl border-t border-line/60 pt-1.5 md:block xl:max-w-2xl">
+          <div id="stage-explanation" role="region" aria-label="Stage explanation" className="mt-1.5 max-h-[35dvh] max-w-xl overflow-y-auto border-t border-line/60 pt-1.5 xl:max-w-2xl">
             <div className="flex min-w-0 items-center gap-2">
               <span
                 className={`shrink-0 rounded-full border px-1.5 py-px font-data text-[9px] font-bold tracking-wider ${
@@ -320,11 +323,14 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
               </span>
             </div>
             <p
-              className="mt-1 line-clamp-2 font-ui text-[14px] leading-normal text-ink"
+              className="mt-1 font-ui text-[14px] leading-normal text-ink"
               title={step.narration}
             >
               {step.narration}
             </p>
+            <div className="mt-2 flex justify-end border-t border-line/60 pt-2 font-ui text-ink-dim">
+              <PoweredByPlatmatics site="querytrace.net" variant="inline" />
+            </div>
           </div>
         )}
       </div>
