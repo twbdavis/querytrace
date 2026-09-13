@@ -1,142 +1,59 @@
-# QueryTrace - Visual SQL Learning DBMS
+# QueryTrace
 
-Teaches SQL by animating how a query's answer is derived across live, interactable tables.
-The teaching DBMS runs client-side: SQLite compiled to WASM (sql.js), isolated in a Web Worker.
+[![CI](https://github.com/twbdavis/querytrace/actions/workflows/ci.yml/badge.svg)](https://github.com/twbdavis/querytrace/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Type a query (or pick a lesson) and QueryTrace decomposes execution into logical stages,
-replaying them like a debugger:
+**Learn SQL by watching a query transform your tables.**
 
-All bundled scenarios, records, names, prompts, and expected results are fictional
-examples created for QueryTrace. They teach general SQL concepts without reproducing
-third-party classroom exercises or answer sets.
+[Open QueryTrace](https://querytrace.net) · [Development guide](docs/development.md) · [Report a bug](https://github.com/twbdavis/querytrace/issues/new/choose)
 
-- **FROM / JOIN** - matched key pairs light up in both tables and pulses travel along the FK edge; outer-join rows kept without a match get a dashed border
-- **WHERE** - eliminated rows fade with a strikethrough
-- **GROUP BY / HAVING** - rows are color-coded by group; eliminated groups fade as units
-- **SELECT / ORDER / LIMIT** - projected columns highlight and the result panel fills row by row
+![QueryTrace showing interactive tables, a SQL query, and its results](docs/images/app.png)
 
-Key connections use straight horizontal/vertical segments with square bends.
-A square marks the primary-key end and an arrow points into the foreign-key
-column at the table's top or bottom edge. Wires choose short routes around table
-interiors and update when tables move; hover a wire for the full table/column names.
+QueryTrace is a visual SQL learning tool for students, instructors, and anyone
+who wants to understand where a query's result comes from. Choose a lesson or
+write a query, then step through joins, filters, grouping, and projection.
 
-Click any lit row to highlight everywhere it contributes (join partners + result rows).
-Playback: play / pause / step / reset, labeled stage scrubber, 0.5×/1×/2× speed, and a
-plain-language narration of what each stage is doing.
+- **Follow the rows:** see which source records contribute to each result.
+- **Learn at your pace:** pause, step, scrub backward, and change playback speed.
+- **Bring your own schema:** import supported SQL scripts into an in-browser database.
+- **Start without an account:** SQLite runs locally in a Web Worker. Lesson progress
+  and custom schemas are saved in browser storage when available.
 
-The UI is canvas-first and responsive: the schema owns the full viewport at every size.
-On laptops and desktops (≥1024px) the SQL editor and results float as collapsible
-panels that shrink to slim edge tabs; playback lives in a floating dock. On smaller
-screens the editor and intermediate results stay visible together in a split bottom
-sheet so students can watch the active SQL clause and its rows at the same time.
+## Try your first query
 
-## Run it
+1. Open [querytrace.net](https://querytrace.net).
+2. Choose a guided lesson and run its query.
+3. Step through the stages and select a highlighted row to follow its connections.
 
-Requires Node.js 24 or newer.
+All bundled lesson scenarios and records are fictional.
 
-```bash
+## Run locally
+
+Install **Node.js 24**, then:
+
+```sh
+git clone https://github.com/twbdavis/querytrace.git
+cd querytrace
 npm ci
-npm run dev        # http://localhost:3000
-npm run test:trace # trace-engine tests against the seeded DB (node, no browser)
-npm run check      # type-check, trace tests, and production build
+npm run dev
 ```
 
-Large result sets render a scroll window with a small row buffer; all rows remain
-reachable, with stable column widths and their original provenance indices.
-Hover highlights share a cached lookup, and unchanged table rows retain their
-rendered cells. Playback uses short, bounded entrance animations; join pulses
-stop on pause, respect reduced motion, and suspend while the page is hidden.
-Hidden pages also suspend stage advancement so returning students do not miss steps.
+Open **http://localhost:3000**. See the [development guide](docs/development.md)
+for tests, production builds, hosting, and troubleshooting.
 
-After starting a production server on port 3100, `node scripts/profileBrowser.mjs`
-measures a 10,000-row result in Chromium, including mounted rows, render work,
-and ten hover interactions. Timing depends on the machine; the browser suite
-separately checks bounded row rendering, scrolling, provenance, and motion behavior.
+## Scope and status
 
-## Deploy
+A personal learning project with automated tracing and browser checks. The app
+teaches logical query stages; it is not a display of SQLite's internal physical
+query plan. SQL dialect conversion supports a defined subset, and some complex
+queries show branch results plus the final SQLite result rather than a full trace.
+Browser storage is local to each browser profile and can be cleared by the browser.
 
-The whole app remains statically deployable; no server database is required for
-student SQL. SQLite and the trace compiler run off the UI thread in a dedicated
-Web Worker. Built-in course schemas are tiny and rebuild locally; custom schemas
-are exported as SQLite images and restored from IndexedDB. Lesson progress is
-stored there as well. Browsers that deny storage still get a complete in-memory
-session. Deploying is just hosting the build:
+## Built with
 
-1. Push the repo to GitHub (`node_modules`, `.next`, and generated WASM files are
-   gitignored; the `postinstall` script generates a content-hashed WASM asset).
-2. Import the repo on Vercel. Zero config - it detects Next.js, runs
-   `npm install` (which copies the sql.js WASM into `/public`) and `next build`.
+Next.js · TypeScript · React · SQLite/WASM · React Flow · CodeMirror · Playwright
 
-All application code, the CodeMirror editor, and SQLite WASM are self-hosted.
-The hashed WASM response is cached immutably for one year, so repeat visits do
-not download the runtime again.
+[How tracing works](docs/architecture.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-## How the trace works
+## License
 
-`lib/traceEngine.ts` never instruments SQLite internals. Inside the SQL worker it
-decomposes the parsed AST (node-sql-parser) into stages and runs intermediate
-PK-projection queries against sql.js to compute exact row provenance:
-
-- provenance uses each ordinary SQLite table's stable rowid, independent of
-  whether its learner-facing key is text, integer, or composite
-- each join step selects rowids from all tables joined so far (NULLs mark outer-join extension)
-- WHERE / HAVING are computed as diffs against the previous stage's rowid sets
-- GROUP BY and scalar aggregates use `GROUP_CONCAT(rowid)` so each result maps
-  back to every contributing source row
-- the final stage appends provenance columns to the user's own projection
-
-Each stage emits a `TraceStep`; the UI is derived purely from `trace[currentStep]`,
-so scrubbing backwards restores earlier states exactly.
-
-**Curriculum coverage:** SELECT/DISTINCT with comparisons, AND/OR/NOT,
-parentheses, LIKE, IN, BETWEEN, IS NULL, computed columns, CONCAT, field/table
-aliases, COUNT/SUM/AVG/MIN/MAX, GROUP BY, HAVING, mixed-direction ORDER BY,
-LIMIT, explicit inner/left/right/full outer joins, CROSS JOIN, comma-style joins,
-multi-table joins, self-joins, UNION/UNION ALL, and uncorrelated/correlated/derived-table
-subqueries. Column and table references are checked against the loaded schema before
-execution, so a misspelled name is reported instead of silently becoming a text literal.
-
-**Custom schemas:** the schema builder accepts `CREATE TABLE`, `INSERT`, `UPDATE`,
-`DELETE`/`TRUNCATE`, `CREATE INDEX` and `ALTER TABLE` scripts as exported by MySQL
-Workbench / phpMyAdmin, pgAdmin / pg_dump, SQL Server Management Studio or Oracle tools.
-Dialect syntax is translated to SQLite automatically: table options (`ENGINE=InnoDB`,
-`DEFAULT CHARSET`, `AUTO_INCREMENT=n`, `COMMENT`), column attributes (`UNSIGNED`,
-`ENUM(...)`, `SERIAL`, `IDENTITY(1,1)`, `DEFAULT nextval(...)`, `ON UPDATE
-CURRENT_TIMESTAMP`), inline `KEY`/`INDEX` lines, `ALTER TABLE ... ADD CONSTRAINT`
-(folded into the table's CREATE), `INSERT IGNORE`, `REPLACE INTO`, `INSERT ... SET`,
-`ON DUPLICATE KEY UPDATE`, MySQL `\'` string escapes and `#` comments, `N'...'` and
-`E'...'` literals, `::type` casts, `NOW()`/`GETDATE()`/`SYSDATE`, `TO_DATE` of ISO
-literals, typed literals (`DATE '...'`), `NVARCHAR(MAX)`, `VARCHAR2(n CHAR)`, `text[]`,
-`CLUSTERED`/`ON [PRIMARY]`, any `schema.` prefix in a table position, `GO` separators and
-psql meta-commands. Text pasted from Word or e-mail is repaired too (byte order mark,
-curly quotes, non-breaking spaces). A user column named `rowid` is fine: tracing uses
-SQLite's `_rowid_` alias. Session
-statements (`USE`, `SET`, `CREATE DATABASE`, `DROP ... IF EXISTS`, transactions,
-sequences, grants) are ignored. Statements run one at a time, so an error names the
-statement that failed (`CREATE TABLE equipment: duplicate column name: status`). Rows may
-be inserted before their parents, as dumps do: the script is accepted when the final
-state satisfies every foreign key, and the first orphan is reported with its values
-otherwise. Tables without a declared PRIMARY KEY (import/staging tables) load and are
-traced by SQLite rowid; the canvas marks them `NO PK`.
-The detailed row-provenance pipeline is used wherever the query can be safely
-decomposed; compound and derived-table queries expose their inner/branch results
-and exact SQLite final result.
-
-The schema builder intentionally accepts a safe construction subset:
-CREATE TABLE plus INSERT INTO ... VALUES. Data-changing DML and destructive DDL
-are not executed in visual query mode.
-
-## Stack
-
-Next.js 16 (App Router, TS strict) · React 18 · sql.js · @xyflow/react ·
-node-sql-parser · Zustand · CodeMirror 6 · Tailwind CSS · Playwright
-
-## Repository checks
-
-Every push and pull request runs type checking, all trace-engine tests, a
-production build, and the browser suite in Chromium, Firefox, and WebKit through
-GitHub Actions.
-
-## AI disclosure
-
-This README was generated with AI assistance from OpenAI Codex (GPT-5).
+[MIT](LICENSE) © 2026 Thomas Davis.

@@ -42,6 +42,9 @@ jobs:
       - name: Test SQL tracing
         run: npm run test:trace
 
+      - name: Test key routes
+        run: npm run test:routes
+
       - name: Build production application
         run: npm run build
 

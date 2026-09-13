@@ -38,3 +38,13 @@ desktop.ini
 *.swp
 
 .vercel
+
+# Local build products and private data
+**/bin/
+**/obj/
+*.user
+artifacts/
+TestResults/
+
+AGENTS.md
+CLAUDE.md
