@@ -76,7 +76,8 @@ export function computeClauseRanges(sql: string): ClauseRanges {
   const havingStart = at('HAVING');
   const groupTok = tokens.find((t, i) => t.text === 'GROUP' && tokens[i + 1]?.text === 'BY');
   const orderTok = tokens.find((t, i) => t.text === 'ORDER' && tokens[i + 1]?.text === 'BY');
-  const limitStart = at('LIMIT');
+  // LIMIT, or the dialect spellings that were translated into it.
+  const limitStart = at('LIMIT') ?? at('FETCH') ?? at('OFFSET') ?? at('TOP');
 
   // Each JOIN keyword, extended left over INNER/LEFT/RIGHT/FULL/CROSS/OUTER modifiers.
   const joinStarts: number[] = [];
@@ -136,6 +137,8 @@ export function assignQueryRanges(steps: TraceStep[], sql: string): void {
   const ranges = computeClauseRanges(sql);
   let joinIdx = 0;
   for (const step of steps) {
+    // Statement kinds with their own layout (data changes) set ranges themselves.
+    if (step.queryRange) continue;
     switch (step.stage) {
       case 'select':
         step.queryRange = ranges.select;
@@ -157,6 +160,7 @@ export function assignQueryRanges(steps: TraceStep[], sql: string): void {
         break;
       case 'subquery':
       case 'union':
+      case 'modify':
         step.queryRange = { start: 0, end: sql.length };
         break;
       case 'orderLimit':

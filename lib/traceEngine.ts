@@ -1,9 +1,10 @@
 // Deep import: sqlite-only build, see lib/parser.ts.
 import { Parser } from 'node-sql-parser/build/sqlite';
-import type { AstExpr, FromItem, SelectAst } from './parser';
-import { groupByExprs, hasNestedSelect, queryTableNames } from './parser';
+import type { AstExpr, FromItem, MutationAst, ParseOutcome, SelectAst } from './parser';
+import { cteItems, cteNames, containsAggregate, groupByExprs, hasNestedSelect, queryTableNames } from './parser';
+import { tidyWindowSql } from './dialect';
 import type { TableMeta } from './schemas';
-import { quoteIdent } from './sqlText';
+import { maskSql, quoteIdent } from './sqlText';
 import { GROUP_PALETTE } from '../styles/theme';
 
 /** Minimal executor interface so the engine is pure and unit-testable. */
@@ -20,7 +21,8 @@ export type Stage =
   | 'subquery'
   | 'union'
   | 'select'
-  | 'orderLimit';
+  | 'orderLimit'
+  | 'modify';
 
 export interface ColumnRef {
   table: string;
@@ -48,6 +50,42 @@ export interface TraceStep {
   resultRowSources?: Array<Record<string, number[]>>;
   /** Character range of the clause in the original query text (for editor highlight). */
   queryRange?: { start: number; end: number };
+  /**
+   * Table contents to display while this step is shown, when they differ from
+   * the live tables: the state before a data-changing statement ran.
+   */
+  tableSnapshots?: Record<string, TableSnapshot>;
+}
+
+/** A table's rows at one moment, shaped exactly like the live table data the canvas draws. */
+export interface TableSnapshot {
+  columns: string[];
+  rows: unknown[][];
+  /** SQLite rowid per row; the canvas and provenance are keyed by it. */
+  rids: number[];
+}
+
+/** What a data-changing statement did, so the app can refresh tables and storage. */
+export interface MutationResult {
+  /** Every table's rows after the statement (cascades can touch several tables). */
+  tableData: Record<string, TableSnapshot>;
+  /** Tables whose rows differ from before. */
+  changedTables: string[];
+}
+
+export interface StatementTrace {
+  steps: TraceStep[];
+  mutation?: MutationResult;
+}
+
+export interface TraceOptions {
+  /**
+   * Called after a data-changing statement ran but before it is kept; throw to
+   * reject the change (the statement is rolled back and the message shown).
+   */
+  enforce?: () => void;
+  /** Whether the change outlives the session (custom schemas are saved; bundled ones reset on reload). */
+  persistent?: boolean;
 }
 
 export class TraceError extends Error {}
@@ -75,7 +113,12 @@ function exprSql(expr: AstExpr): string {
     limit: null,
   };
   const sql = sqlifyParser.sqlify(dummy as never, SQLIFY_OPT);
-  return sql.replace(/^SELECT\s+/i, '');
+  return tidyWindowSql(sql.replace(/^SELECT\s+/i, ''));
+}
+
+/** Render a whole SELECT (with any CTEs) back to SQLite text. */
+function selectSql(ast: SelectAst): string {
+  return tidyWindowSql(sqlifyParser.sqlify(ast as never, SQLIFY_OPT));
 }
 
 /** Collect every column_ref in an expression tree. Table is alias-or-null here. */
@@ -385,14 +428,6 @@ function parsePkList(v: unknown): number[] {
   return Array.from(new Set(String(v).split(',').map(Number).filter((n) => !Number.isNaN(n))));
 }
 
-function astContainsType(node: unknown, type: string): boolean {
-  if (node === null || typeof node !== 'object') return false;
-  if (Array.isArray(node)) return node.some((child) => astContainsType(child, type));
-  const obj = node as Record<string, unknown>;
-  if (obj.type === 'select') return false;
-  return obj.type === type || Object.values(obj).some((child) => astContainsType(child, type));
-}
-
 function resultKey(row: unknown[]): string {
   return JSON.stringify(row.map((value) => [value === null ? 'null' : typeof value, value]));
 }
@@ -423,6 +458,45 @@ function collectNestedSelects(node: unknown, out: SelectAst[] = []): SelectAst[]
   return out;
 }
 
+/**
+ * One step per CTE, in declaration order: each is run with the CTEs declared
+ * before it, so a CTE that builds on another shows its own rows.
+ */
+function buildCtePrelude(ast: SelectAst, db: SqlExec, schema: TableMeta[]): TraceStep[] {
+  const items = cteItems(ast);
+  return items.map((cte, index) => {
+    const probe = {
+      with: items.slice(0, index + 1),
+      type: 'select',
+      options: null,
+      distinct: null,
+      columns: [{ expr: { type: 'star', value: '*' }, as: null }],
+      from: [{ db: null, table: cte.name.value, as: null }],
+      where: null,
+      groupby: null,
+      having: null,
+      orderby: null,
+      limit: null,
+    };
+    const partialResult = limitPreview(directExec(db, selectSql(probe as unknown as SelectAst)));
+    const earlier = new Set(items.slice(0, index).map((item) => item.name.value.toLowerCase()));
+    const activeTables = Array.from(new Set(queryTableNames(cte.stmt.ast)))
+      .filter((name) => !earlier.has(name.toLowerCase()))
+      .map((name) => resolveTable(schema, name).name);
+    return {
+      stage: 'subquery' as const,
+      label: `WITH ${cte.name.value} - ${rowCountLabel(partialResult.rows.length)}`,
+      narration: `The common table expression ${cte.name.value} is evaluated first and behaves like a temporary table for the rest of the statement${index > 0 ? ', including any CTE declared after it' : ''}.`,
+      activeTables,
+      activeColumns: [],
+      activeEdges: [],
+      litRows: {},
+      dimmedRows: {},
+      partialResult,
+    };
+  });
+}
+
 function buildSubqueryPrelude(ast: SelectAst, db: SqlExec, schema: TableMeta[]): TraceStep[] {
   const nested = collectNestedSelects([
     ast.columns,
@@ -432,15 +506,18 @@ function buildSubqueryPrelude(ast: SelectAst, db: SqlExec, schema: TableMeta[]):
     ast.having,
     ast.orderby,
   ]);
+  const ctes = cteNames(ast);
   return nested.map((child, index) => {
-    const childSql = sqlifyParser.sqlify(child as never, SQLIFY_OPT);
-    const activeTables = Array.from(new Set(queryTableNames(child))).map(
-      (name) => resolveTable(schema, name).name
-    );
+    const childSql = selectSql(child);
+    const activeTables = Array.from(new Set(queryTableNames(child)))
+      .filter((name) => !ctes.has(name.toLowerCase()))
+      .map((name) => resolveTable(schema, name).name);
     let partialResult: { columns: string[]; rows: unknown[][] } | undefined;
     let correlated = false;
     try {
-      partialResult = limitPreview(directExec(db, childSql));
+      // A subquery over a CTE needs the WITH clause in front of it to run alone.
+      const standalone = ctes.size ? selectSql({ ...child, with: cteItems(ast) }) : childSql;
+      partialResult = limitPreview(directExec(db, standalone));
     } catch {
       correlated = true;
     }
@@ -478,14 +555,15 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
     dimmedRows: {} as Record<string, Set<number>>,
   };
 
+  steps.push(...buildCtePrelude(ast, db, schema));
   steps.push(...buildSubqueryPrelude(ast, db, schema));
 
   if (ast._next) {
     let branch: SelectAst | null | undefined = ast;
     let branchIndex = 1;
     while (branch) {
-      const isolated = { ...branch, _next: null, set_op: null };
-      const branchSql = sqlifyParser.sqlify(isolated as never, SQLIFY_OPT);
+      const isolated = { ...branch, _next: null, set_op: null, with: cteItems(ast) };
+      const branchSql = selectSql(isolated as unknown as SelectAst);
       const partialResult = limitPreview(directExec(db, branchSql));
       steps.push({
         stage: 'union',
@@ -499,26 +577,480 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
     }
   }
 
-  const sql = sqlifyParser.sqlify(ast as never, SQLIFY_OPT);
+  const sql = selectSql(ast);
   const result = directExec(db, sql);
+  const hasCte = cteItems(ast).length > 0;
   steps.push({
     stage: ast._next ? 'union' : 'select',
     label: `${ast._next ? String(ast.set_op ?? 'UNION').toUpperCase() : 'SELECT'} - final ${rowCountLabel(result.rows.length)}`,
     narration: ast._next
       ? 'The branch rows are combined now. Corresponding columns must be compatible, and the final ORDER BY, if present, uses names from the first SELECT.'
-      : 'The outer query consumes the subquery result and produces the final rows. The displayed result is executed directly by SQLite.',
+      : hasCte
+        ? 'The main SELECT reads the CTE results as if they were tables and produces the final rows. The displayed result is executed directly by SQLite.'
+        : 'The outer query consumes the subquery result and produces the final rows. The displayed result is executed directly by SQLite.',
     ...base,
     partialResult: result,
   });
   return steps;
 }
 
+/** INTERSECT / EXCEPT (and mixed) compounds: SQLite runs the whole statement; each branch is previewed first. */
+function buildCompoundTrace(
+  branches: SelectAst[],
+  operators: string[],
+  sql: string,
+  db: SqlExec,
+  schema: TableMeta[]
+): TraceStep[] {
+  const physicalTables = Array.from(
+    new Set(branches.flatMap((branch) => queryTableNames(branch).map((name) => resolveTable(schema, name).name)))
+  );
+  const base = {
+    activeTables: physicalTables,
+    activeColumns: [] as ColumnRef[],
+    activeEdges: [] as string[],
+    litRows: {} as Record<string, Set<number>>,
+    dimmedRows: {} as Record<string, Set<number>>,
+  };
+  const steps: TraceStep[] = branches.map((branch, index) => {
+    // ORDER BY / LIMIT written after the last branch apply to the whole compound.
+    const isolated = index === branches.length - 1 ? { ...branch, orderby: null, limit: null } : branch;
+    const partialResult = limitPreview(directExec(db, selectSql(isolated)));
+    const operator = index === 0 ? null : operators[index - 1];
+    return {
+      stage: 'union' as const,
+      label: `${operator ? `${operator} ` : ''}BRANCH ${index + 1} - ${rowCountLabel(partialResult.rows.length)}`,
+      narration:
+        index === 0
+          ? 'This SELECT produces the first branch. Each branch must return the same number of columns.'
+          : operator === 'INTERSECT'
+            ? 'INTERSECT keeps only rows that appear in both branches (duplicates removed).'
+            : operator === 'EXCEPT'
+              ? 'EXCEPT keeps rows of the earlier result that do not appear in this branch (duplicates removed).'
+              : 'UNION stacks this branch onto the earlier rows; UNION ALL keeps duplicates.',
+      ...base,
+      partialResult,
+    };
+  });
+  const result = directExec(db, sql);
+  const distinctOps = Array.from(new Set(operators)).join(' / ');
+  steps.push({
+    stage: 'union',
+    label: `${distinctOps} - final ${rowCountLabel(result.rows.length)}`,
+    narration: `The set operation${operators.length > 1 ? 's are' : ' is'} applied left to right, then any final ORDER BY and LIMIT. The displayed result is executed directly by SQLite.`,
+    ...base,
+    partialResult: result,
+  });
+  return steps;
+}
+
+/** A SELECT with no FROM clause (SELECT 1 + 1, SELECT NOW()): one stage, evaluated directly. */
+function buildScalarTrace(ast: SelectAst, db: SqlExec): TraceStep[] {
+  const result = directExec(db, selectSql(ast));
+  return [
+    {
+      stage: 'select',
+      label: `SELECT - ${rowCountLabel(result.rows.length)}`,
+      narration: 'Without a FROM clause there are no source rows: each expression is evaluated once and returned as a single result row.',
+      activeTables: [],
+      activeColumns: [],
+      activeEdges: [],
+      litRows: {},
+      dimmedRows: {},
+      partialResult: result,
+    },
+  ];
+}
+
+/* ------------------------------------------------------------------------ */
+/* Data-changing statements                                                  */
+/* ------------------------------------------------------------------------ */
+
+function snapshotTable(db: SqlExec, table: string): TableSnapshot {
+  const res = directExec(db, `SELECT _rowid_ AS __rid, * FROM ${quoteIdent(table)} ORDER BY _rowid_`);
+  return {
+    columns: res.columns.slice(1),
+    rows: res.rows.map((row) => row.slice(1)),
+    rids: res.rows.map((row) => Number(row[0])),
+  };
+}
+
+function snapshotAll(db: SqlExec, schema: TableMeta[]): Record<string, TableSnapshot> {
+  return Object.fromEntries(schema.map((table) => [table.name, snapshotTable(db, table.name)]));
+}
+
+function sameRow(a: unknown[], b: unknown[]): boolean {
+  return a.length === b.length && a.every((value, index) => Object.is(value, b[index]) || (value === null && b[index] === null));
+}
+
+interface TableDiff {
+  inserted: number[];
+  deleted: number[];
+  modified: number[];
+}
+
+function diffSnapshots(before: TableSnapshot, after: TableSnapshot): TableDiff {
+  const beforeRows = new Map(before.rids.map((rid, index) => [rid, before.rows[index]]));
+  const afterRows = new Map(after.rids.map((rid, index) => [rid, after.rows[index]]));
+  const diff: TableDiff = { inserted: [], deleted: [], modified: [] };
+  for (const [rid, row] of afterRows) {
+    const previous = beforeRows.get(rid);
+    if (!previous) diff.inserted.push(rid);
+    else if (!sameRow(previous, row)) diff.modified.push(rid);
+  }
+  for (const rid of beforeRows.keys()) if (!afterRows.has(rid)) diff.deleted.push(rid);
+  return diff;
+}
+
+/** Turn SQLite's constraint messages into a sentence a learner can act on. */
+function explainMutationError(message: string, statement: string, table: string): string {
+  const verb = statement.toUpperCase();
+  if (/FOREIGN KEY constraint failed/i.test(message)) {
+    return statement === 'delete'
+      ? `The ${verb} was rejected: other rows still refer to the ${table} rows you tried to remove (FOREIGN KEY constraint). Delete or update the dependent rows first, or declare ON DELETE CASCADE in the schema. No rows were changed.`
+      : `The ${verb} was rejected: a foreign-key value does not match any row in the parent table (FOREIGN KEY constraint failed). Insert the parent row first or use an existing key. No rows were changed.`;
+  }
+  if (/UNIQUE constraint failed: ([\w."]+)/i.test(message)) {
+    const column = message.match(/UNIQUE constraint failed: ([\w."]+)/i)![1];
+    return `The ${verb} was rejected: ${column} already holds that value and must stay unique (primary keys and UNIQUE columns cannot repeat). No rows were changed.`;
+  }
+  if (/NOT NULL constraint failed: ([\w."]+)/i.test(message)) {
+    const column = message.match(/NOT NULL constraint failed: ([\w."]+)/i)![1];
+    return `The ${verb} was rejected: ${column} is declared NOT NULL, so it needs a value. No rows were changed.`;
+  }
+  if (/CHECK constraint failed/i.test(message)) {
+    return `The ${verb} was rejected by a CHECK constraint on ${table}. No rows were changed.`;
+  }
+  if (/has (\d+) columns but (\d+) values were supplied/i.test(message)) {
+    return `${message}. List the columns explicitly, INSERT INTO ${table} (col1, col2, ...) VALUES (...), or supply one value per column. No rows were changed.`;
+  }
+  return `${message.replace(/\.\s*$/, '')}. No rows were changed.`;
+}
+
+/** Character range of the statement head: the verb up to and including the table name. */
+function headRange(sql: string): { start: number; end: number } | undefined {
+  const match = maskSql(sql).match(/^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+)(?:\s*\.\s*(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+))?/i);
+  if (!match) return undefined;
+  const start = match[0].length - match[0].trimStart().length;
+  return { start, end: match[0].length };
+}
+
+/**
+ * Trace INSERT / UPDATE / DELETE: the table before the change, the rows the
+ * WHERE clause selects, then the applied change with every affected table.
+ * The statement runs inside a savepoint and is rolled back when SQLite (or the
+ * custom-schema limits) reject it, so a failed attempt never leaves partial data.
+ */
+function buildMutationTrace(
+  statement: 'insert' | 'update' | 'delete',
+  tableName: string,
+  ast: MutationAst | null,
+  sql: string,
+  originalSql: string,
+  db: SqlExec,
+  schema: TableMeta[],
+  options: TraceOptions
+): StatementTrace {
+  const table = resolveTable(schema, tableName).name;
+  const meta = schema.find((t) => t.name === table)!;
+  const verb = statement === 'insert' ? `INSERT INTO ${table}` : statement === 'update' ? `UPDATE ${table}` : `DELETE FROM ${table}`;
+
+  // Column checks give the same friendly messages as SELECT gets.
+  if (ast) {
+    const fakeSelect: SelectAst = {
+      type: 'select',
+      columns: [
+        ...(ast.set ?? []).map((assignment) => ({ expr: { type: 'column_ref', table: null, column: assignment.column }, as: null })),
+        ...(ast.set ?? []).map((assignment) => ({ expr: assignment.value, as: null })),
+      ],
+      from: [{ db: null, table, as: ast.table?.[0]?.as ?? null }],
+      where: ast.where ?? null,
+      groupby: null,
+      having: null,
+      orderby: null,
+      limit: null,
+    };
+    if (statement === 'insert' && Array.isArray(ast.columns)) {
+      for (const column of ast.columns) {
+        if (!meta.columns.some((c) => c.name.toLowerCase() === String(column).toLowerCase())) {
+          throw new TraceError(`Unknown column "${column}" in ${table}. Its columns are: ${meta.columns.map((c) => c.name).join(', ')}.`);
+        }
+      }
+    }
+    validateColumnReferences(fakeSelect, schema);
+    for (const child of collectNestedSelects(ast)) {
+      for (const name of queryTableNames(child)) resolveTable(schema, name);
+    }
+  }
+
+  const before = snapshotAll(db, schema);
+  const tableBefore = before[table];
+  const allRids = new Set(tableBefore.rids);
+  const steps: TraceStep[] = [];
+  const tupleTables = { [table]: table };
+  const tuplesFor = (rids: number[]) => rids.map((rid) => ({ [table]: rid }));
+  const rowsFor = (snapshot: TableSnapshot, rids: number[]) => {
+    const index = new Map(snapshot.rids.map((rid, i) => [rid, i]));
+    return rids.map((rid) => snapshot.rows[index.get(rid)!]).filter((row) => row !== undefined);
+  };
+  const sourcesFor = (rids: number[]) => rids.map((rid) => ({ [table]: [rid] }));
+
+  steps.push({
+    stage: 'from',
+    label: `${verb} - ${rowCountLabel(tableBefore.rids.length)} before`,
+    narration:
+      statement === 'insert'
+        ? `The ${table} table holds ${rowCountLabel(tableBefore.rids.length)} before the statement runs. New rows will be appended and must satisfy its keys and constraints.`
+        : `${statement === 'update' ? 'UPDATE' : 'DELETE'} starts from every row of ${table}: all ${rowCountLabel(tableBefore.rids.length)} are candidates until the WHERE clause narrows them.`,
+    activeTables: [table],
+    activeColumns: [],
+    activeEdges: [],
+    litRows: statement === 'insert' ? {} : { [table]: new Set(allRids) },
+    dimmedRows: {},
+    tuples: statement === 'insert' ? undefined : tuplesFor(tableBefore.rids),
+    tupleTables,
+    partialResult: { columns: tableBefore.columns, rows: tableBefore.rows },
+    resultRowSources: sourcesFor(tableBefore.rids),
+    tableSnapshots: before,
+    queryRange: headRange(originalSql),
+  });
+
+  // INSERT ... SELECT shows the rows it reads first.
+  const source = maskSql(sql).match(/^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+\S+(?:\s*\([^)]*\))?\s+(?=(?:SELECT|WITH)\b)/i);
+  if (statement === 'insert' && source) {
+    const partialResult = limitPreview(directExec(db, sql.slice(source[0].length)));
+    steps.push({
+      stage: 'subquery',
+      label: `SOURCE SELECT - ${rowCountLabel(partialResult.rows.length)}`,
+      narration: 'INSERT ... SELECT reads its rows from another query first; each result row becomes one new row.',
+      activeTables: Array.from(new Set(collectNestedSelects(ast).flatMap((child) => queryTableNames(child)).map((name) => resolveTable(schema, name).name))),
+      activeColumns: [],
+      activeEdges: [],
+      litRows: {},
+      dimmedRows: {},
+      partialResult,
+      tableSnapshots: before,
+    });
+  }
+
+  let matched: number[] = tableBefore.rids;
+  if (statement !== 'insert') {
+    const whereSql = ast?.where ? exprSql(ast.where) : null;
+    if (whereSql) {
+      const alias = ast?.table?.[0]?.as;
+      const fromSql = alias ? `${quoteIdent(table)} AS ${quoteIdent(alias)}` : quoteIdent(table);
+      matched = exec({ db } as EngineCtx, `SELECT _rowid_ FROM ${fromSql} WHERE ${whereSql}`).rows.map((row) => Number(row[0]));
+      const kept = new Set(matched);
+      const dimmed = new Set([...allRids].filter((rid) => !kept.has(rid)));
+      steps.push({
+        stage: 'where',
+        label: `WHERE ${whereSql} - ${rowCountLabel(matched.length)} ${matched.length === 1 ? 'matches' : 'match'}`,
+        narration: `The condition ${whereSql} picks the rows the ${statement.toUpperCase()} will touch: ${rowCountLabel(matched.length)} ${matched.length === 1 ? 'matches' : 'match'}, ${dimmed.size} ${dimmed.size === 1 ? 'is' : 'are'} left alone.`,
+        activeTables: [table],
+        activeColumns: resolveColumnRefs(
+          { schema, refs: [{ table, alias: alias ?? table }], aliasToTable: { [table.toLowerCase()]: table, ...(alias ? { [alias.toLowerCase()]: table } : {}) } } as EngineCtx,
+          ast!.where
+        ),
+        activeEdges: [],
+        litRows: { [table]: kept },
+        dimmedRows: dimmed.size ? { [table]: dimmed } : {},
+        tuples: tuplesFor(matched),
+        tupleTables,
+        partialResult: { columns: tableBefore.columns, rows: rowsFor(tableBefore, matched) },
+        resultRowSources: sourcesFor(matched),
+        tableSnapshots: before,
+      });
+    } else {
+      steps.push({
+        stage: 'where',
+        label: `(no WHERE) - all ${rowCountLabel(matched.length)} selected`,
+        narration: `There is no WHERE clause, so every row of ${table} is affected. Add WHERE key = value to change only specific rows.`,
+        activeTables: [table],
+        activeColumns: [],
+        activeEdges: [],
+        litRows: { [table]: new Set(allRids) },
+        dimmedRows: {},
+        tuples: tuplesFor(matched),
+        tupleTables,
+        partialResult: { columns: tableBefore.columns, rows: tableBefore.rows },
+        resultRowSources: sourcesFor(matched),
+        tableSnapshots: before,
+      });
+    }
+  }
+
+  // Apply inside a savepoint so a rejected statement leaves nothing behind.
+  directExec(db, 'SAVEPOINT qt_mutation');
+  try {
+    directExec(db, sql);
+    options.enforce?.();
+  } catch (error) {
+    directExec(db, 'ROLLBACK TO qt_mutation; RELEASE qt_mutation');
+    // SQLite's own messages keep their "SQL error" prefix unless a friendlier
+    // explanation applies; a limit rejection is already worded for the learner.
+    const fromSqlite = error instanceof TraceError;
+    const message = error instanceof Error ? error.message.replace(/^SQL error: /, '') : String(error);
+    const explained = explainMutationError(message, statement, table);
+    throw new TraceError(fromSqlite && explained.startsWith(message.replace(/\.\s*$/, '')) ? `SQL error: ${explained}` : explained);
+  }
+  directExec(db, 'RELEASE qt_mutation');
+
+  const after = snapshotAll(db, schema);
+  const diffs = Object.fromEntries(schema.map((t) => [t.name, diffSnapshots(before[t.name], after[t.name])]));
+  const changedTables = schema.map((t) => t.name).filter((name) => {
+    const diff = diffs[name];
+    return diff.inserted.length + diff.deleted.length + diff.modified.length > 0;
+  });
+  const main = diffs[table];
+  const lit: Record<string, Set<number>> = {};
+  for (const name of changedTables) {
+    const touched = [...diffs[name].inserted, ...diffs[name].modified];
+    if (touched.length) lit[name] = new Set(touched);
+  }
+
+  const describe = (name: string, diff: TableDiff): string => {
+    const parts: string[] = [];
+    if (diff.inserted.length) parts.push(`${rowCountLabel(diff.inserted.length)} added`);
+    if (diff.modified.length) parts.push(`${rowCountLabel(diff.modified.length)} changed`);
+    if (diff.deleted.length) parts.push(`${rowCountLabel(diff.deleted.length)} removed`);
+    return `${name}: ${parts.join(', ') || 'no change'}`;
+  };
+  const cascades = changedTables.filter((name) => name !== table);
+  const summary =
+    statement === 'insert'
+      ? `${rowCountLabel(main.inserted.length)} added${main.modified.length ? `, ${rowCountLabel(main.modified.length)} replaced` : ''}`
+      : statement === 'update'
+        ? `${rowCountLabel(main.modified.length)} changed`
+        : `${rowCountLabel(main.deleted.length)} removed`;
+  const unchangedNote =
+    statement === 'update' && matched.length > main.modified.length
+      ? ` ${matched.length - main.modified.length} matched ${matched.length - main.modified.length === 1 ? 'row' : 'rows'} already held the new values.`
+      : '';
+  const cascadeNote = cascades.length
+    ? ` Foreign-key rules also changed ${cascades.map((name) => describe(name, diffs[name])).join('; ')}.`
+    : '';
+  const persistence = options.persistent
+    ? ' The change is saved with your custom schema.'
+    : ' The change lives in this session: choose the schema again under SCHEMA to restore the original rows.';
+
+  const shown = statement === 'delete' ? main.deleted : [...main.inserted, ...main.modified];
+  const shownSnapshot = statement === 'delete' ? tableBefore : after[table];
+  steps.push({
+    stage: 'modify',
+    label: `${verb} - ${summary}`,
+    narration:
+      (statement === 'insert'
+        ? `SQLite appends the new ${main.inserted.length === 1 ? 'row' : 'rows'} after checking keys, NOT NULL and foreign-key constraints.`
+        : statement === 'update'
+          ? `The SET clause rewrites the matched rows in place; keys and constraints are checked on the new values.`
+          : `The matched rows are removed from ${table}.`) +
+      unchangedNote +
+      cascadeNote +
+      persistence,
+    activeTables: changedTables.length ? changedTables : [table],
+    activeColumns: statement === 'update' && ast?.set ? ast.set.map((assignment) => ({ table, column: meta.columns.find((c) => c.name.toLowerCase() === assignment.column.toLowerCase())?.name ?? assignment.column })) : [],
+    activeEdges: [],
+    litRows: lit,
+    dimmedRows: {},
+    tuples: statement === 'delete' ? undefined : tuplesFor(shown),
+    tupleTables,
+    partialResult: { columns: shownSnapshot.columns, rows: rowsFor(shownSnapshot, shown) },
+    resultRowSources: statement === 'delete' ? undefined : sourcesFor(shown),
+    queryRange: { start: 0, end: originalSql.length },
+  });
+
+  return { steps, mutation: { tableData: after, changedTables } };
+}
+
+/**
+ * Trace any parsed statement. SELECTs get the stage-by-stage pipeline;
+ * compounds and data changes get their own step sequences.
+ */
+export function traceStatement(
+  parsed: Exclude<ParseOutcome, { ok: false }>,
+  originalSql: string,
+  db: SqlExec,
+  schema: TableMeta[],
+  options: TraceOptions = {}
+): StatementTrace {
+  if (parsed.kind === 'mutation') {
+    return buildMutationTrace(parsed.statement, parsed.table, parsed.ast, parsed.sql, originalSql, db, schema, options);
+  }
+  if (parsed.kind === 'compound') {
+    for (const branch of parsed.branches) {
+      for (const name of queryTableNames(branch)) resolveTable(schema, name);
+      validateColumnReferences(branch, schema);
+    }
+    return { steps: buildCompoundTrace(parsed.branches, parsed.operators, parsed.sql, db, schema) };
+  }
+  return { steps: buildTrace(parsed.ast, db, schema) };
+}
+
 interface Scope {
   /** alias (lowercase) -> canonical table name, for physical tables in this SELECT. */
   tables: Map<string, string>;
-  /** Derived-table aliases (lowercase); their columns are not checked. */
-  derived: Set<string>;
+  /** Derived-table and CTE aliases (lowercase) -> their output columns, or null when they cannot be predicted. */
+  derived: Map<string, string[] | null>;
   parent: Scope | null;
+}
+
+/**
+ * The column names a SELECT produces, as SQLite would name them: an alias,
+ * the column's own name, or the expression text. Null when a wildcard expands
+ * a source whose columns are unknown.
+ */
+function outputColumns(
+  select: SelectAst,
+  columnsOfTable: (table: string) => string[] | null,
+  scope: Scope
+): string[] | null {
+  const sourceColumns = (alias: string): string[] | null => {
+    for (let s: Scope | null = scope; s; s = s.parent) {
+      if (s.derived.has(alias)) return s.derived.get(alias) ?? null;
+      const table = s.tables.get(alias);
+      if (table) return columnsOfTable(table);
+    }
+    return null;
+  };
+  const fromAliases = (select.from ?? []).map((item) => (item.as ?? item.table ?? '').toLowerCase());
+  const expandAll = (): string[] | null => {
+    const out: string[] = [];
+    for (const alias of fromAliases) {
+      const columns = sourceColumns(alias);
+      if (!columns) return null;
+      out.push(...columns);
+    }
+    return out;
+  };
+  if (typeof select.columns === 'string') return expandAll();
+  const out: string[] = [];
+  for (const column of select.columns) {
+    if (isStarColumn(column.expr)) {
+      const qualifier = (column.expr as Record<string, unknown>).table;
+      const expanded = typeof qualifier === 'string' ? sourceColumns(qualifier.toLowerCase()) : expandAll();
+      if (!expanded) return null;
+      out.push(...expanded);
+      continue;
+    }
+    if (column.as) {
+      out.push(column.as);
+      continue;
+    }
+    if (column.expr.type === 'column_ref') {
+      const name = columnName(column.expr.column);
+      if (!name) return null;
+      const qualifier = typeof column.expr.table === 'string' ? column.expr.table.toLowerCase() : null;
+      const owners = qualifier ? [qualifier] : fromAliases;
+      // Canonical spelling from the source when it is known.
+      const canonical = owners
+        .map((alias) => sourceColumns(alias)?.find((candidate) => candidate.toLowerCase() === name.toLowerCase()))
+        .find((candidate) => !!candidate);
+      out.push(canonical ?? name);
+      continue;
+    }
+    out.push(exprSql(column.expr));
+  }
+  return out;
 }
 
 /**
@@ -533,12 +1065,35 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
   const hasColumn = (table: string, column: string) =>
     columnsOf(table).some((name) => name.toLowerCase() === column.toLowerCase());
 
-  const check = (select: SelectAst, parent: Scope | null) => {
-    const scope: Scope = { tables: new Map(), derived: new Set(), parent };
+  const lookupColumns = (table: string) => (tableByName.has(table.toLowerCase()) ? columnsOf(table) : null);
+  const derivedHas = (columns: string[] | null | undefined, column: string) =>
+    !!columns?.some((name) => name.toLowerCase() === column.toLowerCase());
+
+  const check = (select: SelectAst, parent: Scope | null): Scope => {
+    // CTE names act like derived tables for the whole statement; each CTE body
+    // may itself read the CTEs declared before it.
+    const ctes = cteItems(select);
+    let outer = parent;
+    if (ctes.length) {
+      const cteScope: Scope = { tables: new Map(), derived: new Map(), parent };
+      for (const cte of ctes) {
+        const bodyScope = check(cte.stmt.ast, cteScope);
+        cteScope.derived.set(cte.name.value.toLowerCase(), outputColumns(cte.stmt.ast, lookupColumns, bodyScope));
+      }
+      outer = cteScope;
+    }
+    const scope: Scope = { tables: new Map(), derived: new Map(), parent: outer };
     for (const item of select.from ?? []) {
       const alias = (item.as ?? item.table ?? '').toLowerCase();
-      if (item.expr) scope.derived.add(alias);
-      else if (item.table) {
+      if (item.expr?.ast) {
+        const innerScope = check(item.expr.ast, scope);
+        scope.derived.set(alias, outputColumns(item.expr.ast, lookupColumns, innerScope));
+      } else if (item.table) {
+        const cteColumns = outer?.derived.get(item.table.toLowerCase());
+        if (outer?.derived.has(item.table.toLowerCase())) {
+          scope.derived.set(alias, cteColumns ?? null);
+          continue;
+        }
         const meta = tableByName.get(item.table.toLowerCase());
         if (meta) scope.tables.set(alias, meta.name);
       }
@@ -561,15 +1116,25 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
       }
       Object.values(obj).forEach(visible);
     };
-    visible([select.columns, select.from, select.where, select.groupby, select.having, select.orderby]);
+    // Derived tables in FROM were checked above; only their ON conditions remain.
+    visible([select.columns, select.from?.map((item) => item.on), select.where, select.groupby, select.having, select.orderby]);
     if (select._next) check(select._next, parent);
+    return scope;
   };
 
   const verify = (qualifier: string | null, column: string, scope: Scope) => {
     if (qualifier) {
       const key = qualifier.toLowerCase();
       for (let s: Scope | null = scope; s; s = s.parent) {
-        if (s.derived.has(key)) return;
+        if (s.derived.has(key)) {
+          const columns = s.derived.get(key);
+          if (columns && !derivedHas(columns, column)) {
+            throw new TraceError(
+              `Unknown column "${column}" in ${qualifier}. That subquery provides: ${columns.join(', ')}.`
+            );
+          }
+          return;
+        }
         const table = s.tables.get(key);
         if (table) {
           if (!hasColumn(table, column)) {
@@ -584,23 +1149,45 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
         `"${qualifier}" is not a table or alias in this query's FROM clause, so ${qualifier}.${column} cannot be resolved.`
       );
     }
-    // Unqualified: some table in an enclosing scope must have the column. A
-    // derived table in scope may supply it, so only report when none can.
-    const candidates: string[] = [];
+    // Unqualified: the nearest scope that has the column wins. Within one
+    // scope, two tables offering the same name is an ambiguity SQLite would
+    // refuse; explain which qualifier to add instead of echoing its error.
+    const candidates: Array<{ name: string; columns: string[] }> = [];
     for (let s: Scope | null = scope; s; s = s.parent) {
-      if (s.derived.size) return;
-      for (const table of s.tables.values()) {
-        if (hasColumn(table, column)) return;
-        candidates.push(table);
+      const derivedOwners = [...s.derived.entries()].filter(([, columns]) => derivedHas(columns, column));
+      if (derivedOwners.length) return;
+      // A subquery with unpredictable columns may supply the name; stay quiet.
+      if ([...s.derived.values()].some((columns) => columns === null)) return;
+      const owners = [...s.tables.entries()].filter(([, table]) => hasColumn(table, column));
+      if (owners.length > 1) {
+        const choices = owners.map(([alias, table]) => {
+          const spelled = alias === table.toLowerCase() ? table : alias;
+          return `${spelled}.${columnsOf(table).find((name) => name.toLowerCase() === column.toLowerCase()) ?? column}`;
+        });
+        throw new TraceError(
+          `Column "${column}" exists in ${owners.map(([, table]) => table).join(' and ')}, so SQLite cannot tell which one you mean. Write ${choices.join(' or ')}.`
+        );
       }
+      if (owners.length) return;
+      for (const table of s.tables.values()) candidates.push({ name: table, columns: columnsOf(table) });
+      for (const [alias, columns] of s.derived) candidates.push({ name: `${alias} (subquery)`, columns: columns ?? [] });
     }
-    const unique = Array.from(new Set(candidates));
+    if (column.toUpperCase() === 'ROWNUM') {
+      throw new TraceError('ROWNUM is Oracle-specific. Use ORDER BY ... LIMIT n to keep the first n rows.');
+    }
+    const unique = candidates.filter((candidate, index) => candidates.findIndex((other) => other.name === candidate.name) === index);
+    const names = unique.map((candidate) => candidate.name);
+    const elsewhere = schema.filter((table) => !names.includes(table.name) && hasColumn(table.name, column)).map((table) => table.name);
+    const hint = elsewhere.length ? ` ${elsewhere.join(' and ')} ${elsewhere.length === 1 ? 'has' : 'have'} a column with that name, but ${elsewhere.length === 1 ? 'it is' : 'they are'} not in this query's FROM clause.` : '';
+    if (unique.length === 0) {
+      throw new TraceError(`Unknown column "${column}": the query has no FROM clause, so there is no table to read it from.${hint}`);
+    }
     throw new TraceError(
       `Unknown column "${column}". ${
         unique.length === 1
-          ? `${unique[0]} has: ${columnsOf(unique[0]).join(', ')}.`
-          : `None of ${unique.join(', ')} has a column with that name.`
-      }`
+          ? `${unique[0].name} has: ${unique[0].columns.join(', ')}.`
+          : `None of ${names.join(', ')} has a column with that name.`
+      }${hint}`
     );
   };
 
@@ -614,8 +1201,12 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
 export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): TraceStep[] {
   for (const name of queryTableNames(ast)) resolveTable(schema, name);
   validateColumnReferences(ast, schema);
+  if (!ast.from || ast.from.length === 0) {
+    if (ast._next) return buildAdvancedTrace(ast, db, schema);
+    return buildScalarTrace(ast, db);
+  }
   const hasDerivedTable = (ast.from ?? []).some((item) => !!item.expr);
-  if (ast._next || hasDerivedTable) return buildAdvancedTrace(ast, db, schema);
+  if (ast._next || hasDerivedTable || cteItems(ast).length) return buildAdvancedTrace(ast, db, schema);
 
   const from = (ast.from ?? []) as FromItem[];
   const refs: TableRef[] = from.map((f) => ({
@@ -859,10 +1450,11 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   // ---- Stage: SELECT (projection) ---------------------------------------
   const selectItems = buildSelectList(ctx);
   const nSel = selectItems.length;
+  // Window functions (COUNT(*) OVER ...) are per-row values, not aggregates.
   const scalarAggregate =
     !ctx.groupExprSqls &&
     typeof ast.columns !== 'string' &&
-    ast.columns.some((column) => astContainsType(column.expr, 'aggr_func'));
+    ast.columns.some((column) => containsAggregate(column.expr));
   const groupedProvenance = !!ctx.groupExprSqls || scalarAggregate;
   const provCols = groupedProvenance
     ? refs.map((r, i) => `GROUP_CONCAT(${quoteIdent(r.alias)}._rowid_) AS __prov${i}`)

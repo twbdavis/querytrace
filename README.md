@@ -44,9 +44,13 @@ for tests, production builds, hosting, and troubleshooting.
 
 A personal learning project with automated tracing and browser checks. The app
 teaches logical query stages; it is not a display of SQLite's internal physical
-query plan. SQL dialect conversion supports a defined subset, and some complex
-queries show branch results plus the final SQLite result rather than a full trace.
-Browser storage is local to each browser profile and can be cleared by the browser.
+query plan. Queries written in MySQL / MariaDB, PostgreSQL, SQL Server or Oracle
+spelling are translated to SQLite and the rewrite is shown beside the result;
+the translation covers a defined subset, and some complex queries (CTEs, set
+operations, derived tables) show branch results plus the final SQLite result
+rather than a full trace. INSERT, UPDATE and DELETE run against the loaded
+schema and show the rows before and after the change. Browser storage is local
+to each browser profile and can be cleared by the browser.
 
 ## Built with
 

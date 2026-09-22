@@ -20,6 +20,8 @@ const SHORTCUTS: Array<[string, string]> = [
 
 const TIPS = [
   'Point to a row in a table or in the results to light up where it came from; click or tap to pin the trace.',
+  'Queries written the MySQL, PostgreSQL, SQL Server or Oracle way are translated to SQLite; the rewrite appears under the editor.',
+  'INSERT, UPDATE and DELETE run against the loaded tables and show the rows before and after the change.',
   'Drag tables to rearrange the schema; pinch or scroll to zoom the canvas.',
   'On larger screens, collapse the query and result panels to give the schema more room.',
 ];

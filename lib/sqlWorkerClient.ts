@@ -1,9 +1,15 @@
 'use client';
 
 import type { SchemaDef } from './schemas';
-import type { LoadedSchema } from './sqlRuntime';
+import type { LoadedSchema, QueryRun } from './sqlRuntime';
 import type { SqlWorkerRequest, SqlWorkerResponse } from './sqlWorkerProtocol';
-import type { TraceStep } from './traceEngine';
+
+/** A worker failure; schema builds may name the statement that failed. */
+export class WorkerRequestError extends Error {
+  constructor(message: string, readonly statement?: string) {
+    super(message);
+  }
+}
 
 let worker: Worker | null = null;
 let nextId = 1;
@@ -12,7 +18,7 @@ type SqlWorkerPayload =
   | { operation: 'runQuery'; sql: string };
 const pending = new Map<
   number,
-  { resolve: (value: LoadedSchema | TraceStep[]) => void; reject: (error: Error) => void }
+  { resolve: (value: LoadedSchema | QueryRun) => void; reject: (error: Error) => void }
 >();
 
 function getWorker(): Worker {
@@ -27,7 +33,7 @@ function getWorker(): Worker {
     if (!request) return;
     pending.delete(response.id);
     if (response.ok) request.resolve(response.result);
-    else request.reject(new Error(response.error));
+    else request.reject(new WorkerRequestError(response.error, response.statement));
   };
   worker.onerror = (event) => {
     const error = new Error(event.message || 'The SQL worker stopped unexpectedly.');
@@ -39,7 +45,7 @@ function getWorker(): Worker {
   return worker;
 }
 
-function request<T extends LoadedSchema | TraceStep[]>(
+function request<T extends LoadedSchema | QueryRun>(
   payload: SqlWorkerPayload
 ): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -56,6 +62,6 @@ export function loadSchemaInWorker(def: SchemaDef, savedBytes?: Uint8Array): Pro
   return request<LoadedSchema>({ operation: 'loadSchema', def, savedBytes });
 }
 
-export function runQueryInWorker(sql: string): Promise<TraceStep[]> {
-  return request<TraceStep[]>({ operation: 'runQuery', sql });
+export function runQueryInWorker(sql: string): Promise<QueryRun> {
+  return request<QueryRun>({ operation: 'runQuery', sql });
 }

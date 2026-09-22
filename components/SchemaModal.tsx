@@ -16,9 +16,11 @@ const DDL_TEMPLATE = `-- Define tables with CREATE TABLE, mark keys, then INSERT
 --   PRIMARY KEY (col1, col2) for a composite identifier
 --   AUTO_INCREMENT is accepted for an INTEGER PRIMARY KEY
 --   CONSTRAINT name FOREIGN KEY (col) REFERENCES parent (col) [ON DELETE CASCADE]
--- MySQL / PostgreSQL / SQL Server exports paste in as-is: ENGINE=, CHARSET,
--- SERIAL, IDENTITY, inline KEY/INDEX lines and ALTER TABLE ... ADD CONSTRAINT
--- are translated for you. UPDATE and DELETE statements may shape the data too.
+-- MySQL / MariaDB, PostgreSQL, SQL Server and Oracle exports paste in as-is:
+-- ENGINE=, CHARSET, SERIAL, IDENTITY, inline KEY/INDEX lines and
+-- ALTER TABLE ... ADD CONSTRAINT are translated for you. UPDATE and DELETE
+-- statements may shape the data too. If a statement fails, it is selected
+-- here so you can fix it in place; your text is kept until it builds.
 
 CREATE TABLE GARDEN (
   GARDEN_ID INTEGER PRIMARY KEY,
@@ -46,6 +48,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
   const [ddlError, setDdlError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const errorRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Where the current press started; a click only closes the dialog when the
   // press began on the backdrop itself. Dragging a text selection out of the
   // SQL box and releasing over the backdrop must never throw the draft away.
@@ -104,7 +107,28 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
       // Keep the SQL exactly as typed so the message can be acted on in place.
       void persistCustomDdlDraft();
       setDdlError(res.error ?? 'Failed to build the schema.');
+      if (res.statement) selectStatement(res.statement);
     }
+  };
+
+  /** Select the failing statement in the editor so the fix can start right there. */
+  const selectStatement = (statement: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const text = textarea.value;
+    const needle = statement.trim();
+    let start = text.indexOf(needle);
+    // Word-processor repairs (smart quotes, non-breaking spaces) can shift the
+    // text; the first line of the statement is usually still intact.
+    if (start === -1) start = text.indexOf(needle.split('\n')[0].trim());
+    if (start === -1) return;
+    const end = Math.min(text.length, start + needle.length);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(start, end);
+    // Scroll the selection into view: the textarea only scrolls to the caret on input.
+    const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 16;
+    const line = text.slice(0, start).split('\n').length - 1;
+    textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 3);
   };
 
   const onBackdropMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
@@ -206,6 +230,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
                 position. Your SQL is kept here until it builds, even if this window is closed.
               </p>
               <textarea
+                ref={textareaRef}
                 value={ddl}
                 onChange={(e) => setCustomDdlDraft(e.target.value)}
                 spellCheck={false}

@@ -18,6 +18,7 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
   const runQuery = useAppStore((s) => s.runQuery);
   const loadSchema = useAppStore((s) => s.loadSchema);
   const schemaDef = useAppStore((s) => s.schemaDef);
+  const dataModified = useAppStore((s) => s.dataModified);
   const ranLessons = useAppStore((s) => s.ranLessons);
   const markLessonRun = useAppStore((s) => s.markLessonRun);
   const done = Object.values(ranLessons).filter(Boolean).length;
@@ -32,9 +33,12 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
-  /** Make sure the lesson's schema is loaded, then put its query in place. */
+  /**
+   * Make sure the lesson's schema is loaded with its original rows (an
+   * INSERT / UPDATE / DELETE may have changed them), then put its query in place.
+   */
   const prepare = async (lesson: Lesson): Promise<boolean> => {
-    if (schemaDef.id !== lesson.schemaId) {
+    if (schemaDef.id !== lesson.schemaId || dataModified) {
       const def = schemaById(lesson.schemaId);
       if (!def) return false;
       const res = await loadSchema(def);

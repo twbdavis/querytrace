@@ -1,12 +1,13 @@
 'use client';
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
   Controls,
   Panel,
   ReactFlow,
+  useReactFlow,
   type Edge,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -81,6 +82,25 @@ function StateLegend() {
   );
 }
 
+/**
+ * React Flow is uncontrolled here (defaultNodes keeps the user's drag
+ * positions), so refreshed table rows (a data change, or a "before" snapshot
+ * while scrubbing a data-changing trace) are pushed into the flow's own state.
+ */
+function NodeDataSync({ nodes }: { nodes: TableFlowNode[] }) {
+  const { setNodes } = useReactFlow<TableFlowNode>();
+  useEffect(() => {
+    const byId = new Map(nodes.map((node) => [node.id, node.data]));
+    setNodes((current) =>
+      current.map((node) => {
+        const data = byId.get(node.id);
+        return data && data !== node.data ? { ...node, data } : node;
+      })
+    );
+  }, [nodes, setNodes]);
+  return null;
+}
+
 function TracePin() {
   const selection = useAppStore((s) => s.selection);
   const selectRow = useAppStore((s) => s.selectRow);
@@ -106,22 +126,28 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
   const schema = useAppStore((s) => s.schema);
   const schemaDef = useAppStore((s) => s.schemaDef);
   const fkEdges = useAppStore((s) => s.fkEdges);
-  const tableData = useAppStore((s) => s.tableData);
+  const liveTableData = useAppStore((s) => s.tableData);
+  // A data-changing statement's early stages show the tables as they were
+  // before it ran. The selector is stable (undefined) for every other trace.
+  const snapshots = useAppStore((s) => s.trace?.[s.currentStep]?.tableSnapshots);
 
   const nodes = useMemo<TableFlowNode[]>(
     () =>
-      schema.map((meta, i) => ({
-        id: meta.name,
-        type: 'table' as const,
-        position: schemaDef.positions?.[meta.name] ?? autoPosition(i),
-        data: {
-          meta,
-          columns: tableData[meta.name]?.columns ?? meta.columns.map((c) => c.name),
-          rows: tableData[meta.name]?.rows ?? [],
-          rids: tableData[meta.name]?.rids ?? [],
-        },
-      })),
-    [schema, schemaDef, tableData]
+      schema.map((meta, i) => {
+        const tableData = snapshots?.[meta.name] ?? liveTableData[meta.name];
+        return {
+          id: meta.name,
+          type: 'table' as const,
+          position: schemaDef.positions?.[meta.name] ?? autoPosition(i),
+          data: {
+            meta,
+            columns: tableData?.columns ?? meta.columns.map((c) => c.name),
+            rows: tableData?.rows ?? [],
+            rids: tableData?.rids ?? [],
+          },
+        };
+      }),
+    [schema, schemaDef, liveTableData, snapshots]
   );
 
   const edges = useMemo<Edge[]>(
@@ -190,6 +216,7 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
         showInteractive={false}
         className="!hidden !border-line-strong !bg-panel lg:!block [&>button]:!border-line [&>button]:!bg-panel [&>button]:!fill-ink-dim [&>button:hover]:!bg-white/5"
       />
+      <NodeDataSync nodes={nodes} />
       <Panel position="top-center">
         <TracePin />
       </Panel>

@@ -95,6 +95,8 @@ export function SqlEditor({ bare = false, onCollapse }: SqlEditorProps) {
   const dbReady = useAppStore((s) => s.dbReady);
   const runQuery = useAppStore((s) => s.runQuery);
   const error = useAppStore((s) => s.error);
+  const notes = useAppStore((s) => s.notes);
+  const trace = useAppStore((s) => s.trace);
 
   useEffect(() => {
     const query = window.matchMedia('(min-width: 640px)');
@@ -147,6 +149,24 @@ export function SqlEditor({ bare = false, onCollapse }: SqlEditorProps) {
           className="border-l-2 border-t border-accent-error border-t-line bg-accent-error/[0.08] px-3 py-2 font-data text-[11px] leading-relaxed text-accent-error"
         >
           {error}
+        </div>
+      )}
+      {!error && trace && notes.length > 0 && (
+        <div
+          role="note"
+          aria-label="Rewritten for SQLite"
+          className="max-h-24 overflow-y-auto border-l-2 border-t border-accent-active/60 border-t-line bg-accent-active/[0.06] px-3 py-1.5 text-[10px] leading-relaxed text-ink-dim"
+        >
+          <span className="font-ui font-bold uppercase tracking-[0.15em] text-accent-active">Rewritten for SQLite</span>
+          <ul className="mt-0.5 space-y-0.5">
+            {notes.map((note) => (
+              <li key={`${note.from}→${note.to}`} className="font-data">
+                <span className="text-ink">{note.from}</span>
+                <span className="mx-1 text-ink-mute" aria-hidden="true">→</span>
+                <span>{note.to}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

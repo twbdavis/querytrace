@@ -193,6 +193,13 @@ export const TerminalIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const EditIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 20h4l10.5-10.5a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16v4Z" />
+    <path d="m13.5 6.5 4 4" />
+  </Svg>
+);
+
 export const TableIcon = (p: IconProps) => (
   <Svg {...p}>
     <rect x={3} y={4} width={18} height={16} rx={2} />

@@ -168,7 +168,7 @@ export const LESSONS: Lesson[] = [
       'This query links three tables, keeps Saturday screenings, totals reserved seats by venue, and orders the finished summaries.',
     query:
       "SELECT V.VENUE_NAME, SUM(R.SEATS) AS 'Saturday Seats'\nFROM VENUE V JOIN SCREENING S ON V.VENUE_ID = S.VENUE_ID\nJOIN RESERVATION R ON S.SCREENING_ID = R.SCREENING_ID\nWHERE S.SCREENING_DAY = 'Saturday'\nGROUP BY V.VENUE_NAME\nORDER BY SUM(R.SEATS) DESC;",
-    tryIt: 'Group by S.GENRE instead to compare Saturday demand by film genre.',
+    tryIt: 'Select S.GENRE in place of V.VENUE_NAME and group by it to compare Saturday demand by film genre.',
   },
   {
     id: 'multi-join',

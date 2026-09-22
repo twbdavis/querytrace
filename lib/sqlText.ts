@@ -322,3 +322,167 @@ export function unquoteIdent(name: string): string {
   if (open === '[' && trimmed.endsWith(']')) return trimmed.slice(1, -1);
   return trimmed;
 }
+
+/* ------------------------------------------------------------------------ */
+/* Structural scanning helpers for dialect translation                       */
+/* ------------------------------------------------------------------------ */
+
+/** SQL Server [bracketed] names become standard "double-quoted" identifiers. */
+export function convertBracketIdentifiers(sql: string): string {
+  return rewriteSql(
+    sql,
+    {},
+    (text) => text,
+    (text, terminated) =>
+      text[0] === '[' && terminated ? quoteIdent(text.slice(1, -1)) : text
+  );
+}
+
+/** MySQL `# comment` lines become standard `-- comment` lines. */
+export function convertHashComments(sql: string): string {
+  return rewriteSql(
+    sql,
+    {},
+    (text) => (text[0] === '#' ? `--${text.slice(1)}` : text),
+    (text) => text
+  );
+}
+
+/** Index of the parenthesis that closes the one at `open` in masked text, or -1. */
+export function matchingParen(masked: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === '(') depth++;
+    else if (masked[i] === ')' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+const OPERAND_CHAR = /[\w.$]/;
+
+/**
+ * Start index of the operand that ends just before `end` (exclusive) in
+ * masked text: a literal, a parenthesized group with an optional function
+ * name, or a dotted identifier / number. Returns `end` when nothing qualifies.
+ */
+export function operandStart(masked: string, end: number): number {
+  let i = end;
+  while (i > 0 && /\s/.test(masked[i - 1])) i--;
+  if (i === 0) return end;
+  const last = masked[i - 1];
+  if (last === ')') {
+    let depth = 0;
+    let j = i - 1;
+    for (; j >= 0; j--) {
+      if (masked[j] === ')') depth++;
+      else if (masked[j] === '(' && --depth === 0) break;
+    }
+    if (j < 0) return end;
+    // A function call owns the parentheses that follow its name.
+    let k = j;
+    while (k > 0 && /\s/.test(masked[k - 1])) k--;
+    let nameStart = k;
+    while (nameStart > 0 && /[\w.]/.test(masked[nameStart - 1])) nameStart--;
+    return nameStart < k && /[A-Za-z_]/.test(masked[nameStart]) ? nameStart : j;
+  }
+  if (last === "'" || last === '"' || last === '`') {
+    const open = masked.lastIndexOf(last, i - 2);
+    return open === -1 ? end : open;
+  }
+  let j = i;
+  while (j > 0 && OPERAND_CHAR.test(masked[j - 1])) j--;
+  return j < i ? j : end;
+}
+
+/**
+ * End index (exclusive) of the operand that starts at or after `start` in
+ * masked text: a literal, a parenthesized group, or an identifier / number
+ * optionally followed by a call's argument list. Returns `start` when nothing qualifies.
+ */
+export function operandEnd(masked: string, start: number): number {
+  let i = start;
+  while (i < masked.length && /\s/.test(masked[i])) i++;
+  if (i >= masked.length) return start;
+  const first = masked[i];
+  if (first === '(') {
+    const close = matchingParen(masked, i);
+    return close === -1 ? start : close + 1;
+  }
+  if (first === "'" || first === '"' || first === '`') {
+    const close = masked.indexOf(first, i + 1);
+    return close === -1 ? start : close + 1;
+  }
+  if (first === '-' || first === '+') i++;
+  let j = i;
+  while (j < masked.length && OPERAND_CHAR.test(masked[j])) j++;
+  if (j === i) return start;
+  let k = j;
+  while (k < masked.length && /\s/.test(masked[k])) k++;
+  if (masked[k] === '(') {
+    const close = matchingParen(masked, k);
+    return close === -1 ? j : close + 1;
+  }
+  return j;
+}
+
+export interface CallSite {
+  /** Function name exactly as written. */
+  name: string;
+  /** Top-level arguments, trimmed, in original text. */
+  args: string[];
+  /** Raw text between the parentheses. */
+  inner: string;
+  /** The whole call as written. */
+  text: string;
+}
+
+/**
+ * Rewrite every call to one of `names` (case-insensitive, outside literals and
+ * comments). Innermost calls are processed first so nested calls compose.
+ * `replace` returns the replacement text, or null to keep the call as written.
+ */
+export function rewriteCalls(
+  sql: string,
+  names: string[],
+  replace: (call: CallSite) => string | null
+): string {
+  const alternatives = names.join('|');
+  const pattern = new RegExp(String.raw`(?<![\w.` + '`' + String.raw`"\]])(${alternatives})\s*\(`, 'gi');
+  const head = new RegExp(String.raw`^(${alternatives})\s*\(`, 'i');
+  const starts = [...maskSql(sql).matchAll(pattern)].map((match) => match.index ?? 0).reverse();
+  let text = sql;
+  for (const start of starts) {
+    const masked = maskSql(text);
+    const match = masked.slice(start).match(head);
+    if (!match) continue;
+    const open = start + match[0].length - 1;
+    const close = matchingParen(masked, open);
+    if (close === -1) continue;
+    const inner = text.slice(open + 1, close);
+    const replacement = replace({
+      name: match[1],
+      args: splitTopLevel(inner),
+      inner,
+      text: text.slice(start, close + 1),
+    });
+    if (replacement !== null) text = text.slice(0, start) + replacement + text.slice(close + 1);
+  }
+  return text;
+}
+
+/** Locate a keyword at parenthesis depth 0 of masked text. Returns every match index. */
+export function topLevelMatches(masked: string, pattern: RegExp): RegExpMatchArray[] {
+  const global = pattern.global ? pattern : new RegExp(pattern.source, `${pattern.flags}g`);
+  const out: RegExpMatchArray[] = [];
+  const depthAt: number[] = new Array(masked.length);
+  let depth = 0;
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] === '(') depth++;
+    depthAt[i] = depth;
+    if (masked[i] === ')') depth = Math.max(0, depth - 1);
+  }
+  for (const match of masked.matchAll(global)) {
+    if (depthAt[match.index ?? 0] === 0) out.push(match);
+  }
+  return out;
+}

@@ -32,6 +32,7 @@ const STAGE_COL_ACCENT: Record<Stage, string> = {
   union: 'border-b-accent-result text-accent-result',
   select: 'border-b-accent-result text-accent-result',
   orderLimit: 'border-b-ink-dim text-ink-dim',
+  modify: 'border-b-accent-result text-accent-result',
 };
 
 const STAGE_CELL_ACCENT: Record<Stage, string> = {
@@ -44,6 +45,7 @@ const STAGE_CELL_ACCENT: Record<Stage, string> = {
   union: 'bg-accent-result/20',
   select: 'bg-accent-result/20',
   orderLimit: 'bg-ink-dim/20',
+  modify: 'bg-accent-result/20',
 };
 
 function hexToRgba(hex: string, alpha: number): string {

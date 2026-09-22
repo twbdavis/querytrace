@@ -7,6 +7,7 @@ import PoweredByPlatmatics from './badge/PoweredByPlatmatics';
 import {
   ColumnsIcon,
   DatabaseIcon,
+  EditIcon,
   FilterIcon,
   GroupIcon,
   HavingIcon,
@@ -30,6 +31,7 @@ const STAGE_META: Record<string, { short: string; Icon: ComponentType<{ size?: n
   union: { short: 'UNION', Icon: JoinIcon },
   select: { short: 'SELECT', Icon: ColumnsIcon },
   orderLimit: { short: 'ORDER', Icon: SortIcon },
+  modify: { short: 'APPLY', Icon: EditIcon },
 };
 
 /** Narration stage badge, tinted by the stage's role accent. */
@@ -43,6 +45,7 @@ const STAGE_BADGE: Record<string, string> = {
   union: 'border-accent-result text-accent-result',
   select: 'border-accent-result text-accent-result',
   orderLimit: 'border-line-strong text-ink-dim',
+  modify: 'border-accent-result text-accent-result',
 };
 
 const SPEEDS: Speed[] = [0.5, 1, 2];

@@ -15,9 +15,17 @@ import {
   unquoteIdent,
   type SqlStatement,
 } from './sqlText';
+import { registerCompatFunctions } from './compatFunctions';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
 
 export { quoteIdent, splitSqlStatements } from './sqlText';
+
+/** A custom-schema build failure that can name the statement responsible. */
+export class SchemaBuildError extends Error {
+  constructor(message: string, readonly statement?: string) {
+    super(message);
+  }
+}
 
 let sqlJs: Promise<SqlJsStatic> | null = null;
 
@@ -291,6 +299,8 @@ export interface PreparedStatement {
   sql: string;
   /** What the statement does and to which table, for error messages. */
   summary: string;
+  /** The statement as the author wrote it, so an error can point at it. */
+  source: string;
 }
 
 interface Classified extends PreparedStatement {
@@ -319,68 +329,71 @@ function captured(sql: string, match: RegExpMatchArray, group: number): string {
   return sql.slice(end - match[group].length, end);
 }
 
-function classify(sql: string): Classified {
+function classify(sql: string, source: string): Classified {
   const masked = maskSql(sql);
   const compact = sql.replace(/\s+/g, ' ').trim();
   const preview = compact.length > 60 ? `${compact.slice(0, 60)}…` : compact;
+  const reject = (message: string): never => {
+    throw new SchemaBuildError(message, source);
+  };
   if (/\b(?:ATTACH|DETACH|PRAGMA)\b/i.test(masked)) {
-    throw new Error(`Custom schemas cannot use ATTACH, DETACH or PRAGMA. Remove: ${preview}`);
+    reject(`Custom schemas cannot use ATTACH, DETACH or PRAGMA. Remove: ${preview}`);
   }
   if (/\bRECURSIVE\b/i.test(masked)) {
-    throw new Error(`Recursive queries are not allowed in a schema script. Remove: ${preview}`);
+    reject(`Recursive queries are not allowed in a schema script. Remove: ${preview}`);
   }
 
   let match = masked.match(CREATE_TABLE_HEAD);
   if (match) {
     const table = captured(sql, match, 1);
     if (/\bAS\s+SELECT\b/i.test(masked)) {
-      throw new Error(`CREATE TABLE ... AS SELECT is not supported here. Declare the columns of ${table} explicitly.`);
+      reject(`CREATE TABLE ... AS SELECT is not supported here. Declare the columns of ${table} explicitly.`);
     }
     if (/\bLIKE\b/i.test(masked) && !/\(/.test(masked)) {
-      throw new Error(`CREATE TABLE ... LIKE is not supported here. Declare the columns of ${table} explicitly.`);
+      reject(`CREATE TABLE ... LIKE is not supported here. Declare the columns of ${table} explicitly.`);
     }
-    return { sql, summary: `CREATE TABLE ${table}`, kind: 'create', table };
+    return { sql, source, summary: `CREATE TABLE ${table}`, kind: 'create', table };
   }
   if ((match = masked.match(INSERT_HEAD))) {
     const table = captured(sql, match, 1);
     const values = masked.search(/\bVALUES\b/i);
     if (values !== -1 && /\bDEFAULT\b/i.test(masked.slice(values))) {
-      throw new Error(
+      reject(
         `INSERT INTO ${table}: SQLite has no DEFAULT keyword inside VALUES. Leave that column out of the column list and it receives its default.`
       );
     }
-    return { sql, summary: `INSERT INTO ${table}`, kind: 'insert', table };
+    return { sql, source, summary: `INSERT INTO ${table}`, kind: 'insert', table };
   }
   if ((match = masked.match(UPDATE_HEAD))) {
     const table = captured(sql, match, 1);
-    return { sql, summary: `UPDATE ${table}`, kind: 'update', table };
+    return { sql, source, summary: `UPDATE ${table}`, kind: 'update', table };
   }
   if ((match = masked.match(DELETE_HEAD))) {
     const table = captured(sql, match, 1);
-    return { sql, summary: `DELETE FROM ${table}`, kind: 'delete', table };
+    return { sql, source, summary: `DELETE FROM ${table}`, kind: 'delete', table };
   }
   if ((match = masked.match(INDEX_HEAD))) {
     const table = captured(sql, match, 2);
-    return { sql, summary: `CREATE INDEX ON ${table}`, kind: 'index', table };
+    return { sql, source, summary: `CREATE INDEX ON ${table}`, kind: 'index', table };
   }
   if ((match = masked.match(ALTER_HEAD))) {
     const table = captured(sql, match, 1);
-    return { sql, summary: `ALTER TABLE ${table}`, kind: 'alter', table };
+    return { sql, source, summary: `ALTER TABLE ${table}`, kind: 'alter', table };
   }
 
   if (/^SELECT\b/i.test(masked)) {
-    throw new Error(`Run SELECT queries from the query editor; the schema script only sets up data. Remove: ${preview}`);
+    reject(`Run SELECT queries from the query editor; the schema script only sets up data. Remove: ${preview}`);
   }
   if (/^COPY\b/i.test(masked)) {
-    throw new Error(`COPY ... FROM stdin (PostgreSQL) cannot be imported. Export the rows as INSERT statements instead: ${preview}`);
+    reject(`COPY ... FROM stdin (PostgreSQL) cannot be imported. Export the rows as INSERT statements instead: ${preview}`);
   }
   if (/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:VIEW|TRIGGER|PROCEDURE|FUNCTION|MATERIALIZED)\b/i.test(masked)) {
-    throw new Error(`Views, triggers, procedures and functions are not part of a QueryTrace schema. Remove: ${preview}`);
+    reject(`Views, triggers, procedures and functions are not part of a QueryTrace schema. Remove: ${preview}`);
   }
   if (/^(?:DROP|RENAME)\b/i.test(masked)) {
-    throw new Error(`A schema script builds a fresh database, so ${preview} has nothing to act on. Remove it.`);
+    reject(`A schema script builds a fresh database, so ${preview} has nothing to act on. Remove it.`);
   }
-  throw new Error(
+  return reject(
     `Custom schemas may contain only CREATE TABLE, INSERT, UPDATE, DELETE, CREATE INDEX and ALTER TABLE statements. Remove or rewrite: ${preview}`
   );
 }
@@ -408,8 +421,9 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
       );
       if (constraint) {
         if (!create) {
-          throw new Error(
-            `${statement.summary} adds a constraint, but ${statement.table} is not created in this script.`
+          throw new SchemaBuildError(
+            `${statement.summary} adds a constraint, but ${statement.table} is not created in this script.`,
+            statement.source
           );
         }
         let clause = action.replace(/^ADD\s+/i, '');
@@ -427,8 +441,9 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
         continue;
       }
       if (/^(?:MODIFY|CHANGE|ALTER\s+COLUMN)\b/i.test(masked)) {
-        throw new Error(
-          `${statement.summary}: SQLite cannot change a column's definition afterwards. Put the final definition in CREATE TABLE ${statement.table} instead.`
+        throw new SchemaBuildError(
+          `${statement.summary}: SQLite cannot change a column's definition afterwards. Put the final definition in CREATE TABLE ${statement.table} instead.`,
+          statement.source
         );
       }
       // ADD COLUMN, DROP COLUMN, RENAME: SQLite runs these natively, one action per statement.
@@ -487,16 +502,17 @@ export function prepareCustomDdl(ddl: string): PreparedStatement[] {
   const classified = statements.map((statement) => {
     const normalized = normalizeStatement(statement);
     // Drop leading whitespace so the first keyword is at index 0.
-    return classify(normalized.slice(maskSql(normalized).match(/^\s*/)![0].length));
+    return classify(normalized.slice(maskSql(normalized).match(/^\s*/)![0].length), statement.text);
   });
-  return foldAlterStatements(classified).map(({ sql, summary }) => ({ sql, summary }));
+  return foldAlterStatements(classified).map(({ sql, summary, source }) => ({ sql, summary, source }));
 }
 
 /* ------------------------------------------------------------------------ */
 /* Building and restoring databases                                          */
 /* ------------------------------------------------------------------------ */
 
-function enforceCustomSchemaLimits(db: Database, schema: TableMeta[]): void {
+/** Apply every size and integrity limit to a custom database; throws on the first violation. */
+export function enforceCustomSchemaLimits(db: Exec, schema: TableMeta[]): void {
   if (schema.length > MAX_CUSTOM_TABLES) {
     throw new Error(`Custom schemas are limited to ${MAX_CUSTOM_TABLES} tables.`);
   }
@@ -547,7 +563,7 @@ function runStatements(db: Database, statements: PreparedStatement[]): void {
       db.run(statement.sql);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`${statement.summary}: ${message}`);
+      throw new SchemaBuildError(`${statement.summary}: ${message}`, statement.source);
     }
   }
 }
@@ -572,11 +588,28 @@ function describeForeignKeyViolation(db: Database): string | null {
   return `FOREIGN KEY constraint failed: ${table} has a row with ${pairs.join(', ')}, but no ${parent} row has that value in ${toColumns.join(', ')}.`;
 }
 
+/** Per-connection settings: the memory bound, referential integrity, and the dialect function library. */
+function applyConnectionSettings(db: Database, foreignKeys: boolean): void {
+  db.run(`PRAGMA max_page_count = 16384; PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'};`);
+  registerCompatFunctions(db);
+}
+
 /** Keep accidental or hostile custom schemas from exhausting browser memory. */
 function openBoundedDatabase(SQL: SqlJsStatic, foreignKeys: boolean): Database {
   const db = new SQL.Database();
-  db.run(`PRAGMA max_page_count = 16384; PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'};`);
+  applyConnectionSettings(db, foreignKeys);
   return db;
+}
+
+/**
+ * Serialize a database for storage. sql.js implements export() by closing and
+ * reopening the connection, which silently resets PRAGMAs and drops every
+ * registered function, so the connection settings are restored afterwards.
+ */
+export function exportDatabase(db: Database): Uint8Array {
+  const bytes = db.export();
+  applyConnectionSettings(db, true);
+  return bytes;
 }
 
 /** Execute a prepared custom-schema script into a new database and apply every limit. */
@@ -629,7 +662,7 @@ export async function restoreDatabase(bytes: Uint8Array, validateAsCustom = fals
   const SQL = await getSqlJs();
   const db = new SQL.Database(bytes);
   try {
-    db.run('PRAGMA max_page_count = 16384; PRAGMA foreign_keys = ON;');
+    applyConnectionSettings(db, true);
     const integrity = queryAll(db, 'PRAGMA quick_check').rows[0]?.[0];
     if (integrity !== 'ok') throw new Error('The saved SQLite database failed its integrity check.');
     if (validateAsCustom) {

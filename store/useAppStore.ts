@@ -2,6 +2,7 @@
 
 import { create } from 'zustand';
 import type { TableData } from '@/lib/db';
+import type { DialectNote } from '@/lib/dialect';
 import {
   loadPersistedAppState,
   requestDurableStorage,
@@ -11,7 +12,7 @@ import { provenanceFor } from '@/lib/provenance';
 import { quoteIdentIfNeeded } from '@/lib/sqlText';
 import type { TraceStep } from '@/lib/traceEngine';
 import { PRELOADED_SCHEMAS, schemaById, type FkEdgeDef, type SchemaDef, type TableMeta } from '@/lib/schemas';
-import { loadSchemaInWorker, runQueryInWorker } from '@/lib/sqlWorkerClient';
+import { loadSchemaInWorker, runQueryInWorker, WorkerRequestError } from '@/lib/sqlWorkerClient';
 
 const MAX_QUERY_CHARS = 20_000;
 let schemaLoadGeneration = 0;
@@ -28,6 +29,8 @@ export interface Selection {
 export interface LoadResult {
   ok: boolean;
   error?: string;
+  /** Original text of the schema statement that failed, when one is to blame. */
+  statement?: string;
   cancelled?: boolean;
 }
 
@@ -46,6 +49,13 @@ interface AppState {
 
   sql: string;
   error: string | null;
+  /** How the last run's dialect was rewritten for SQLite (empty for plain SQLite). */
+  notes: DialectNote[];
+  /**
+   * True once an INSERT / UPDATE / DELETE changed a bundled schema's rows in
+   * this session; lessons reload the schema first so their results stay right.
+   */
+  dataModified: boolean;
 
   trace: TraceStep[] | null;
   /** The exact SQL text the current trace was built from. */
@@ -104,6 +114,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   sql: PRELOADED_SCHEMAS[0].starterQuery,
   error: null,
+  notes: [],
+  dataModified: false,
 
   trace: null,
   tracedSql: null,
@@ -175,6 +187,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         playing: false,
         finished: false,
         error: null,
+        notes: [],
+        dataModified: false,
         selection: null,
         hoveredRow: null,
         hoveredResultRow: null,
@@ -195,7 +209,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { ok: true };
     } catch (err) {
       if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        statement: err instanceof WorkerRequestError ? err.statement : undefined,
+      };
     }
   },
 
@@ -212,6 +230,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             playing: false,
             finished: false,
             error: null,
+            notes: [],
             selection: null,
             hoveredRow: null,
             hoveredResultRow: null,
@@ -235,10 +254,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ playing: false });
     try {
-      const trace = await runQueryInWorker(sql);
+      const { trace, notes, mutation } = await runQueryInWorker(sql);
       if (generation !== queryRunGeneration) return;
+      const isCustom = get().schemaDef.id === 'custom';
       set({
         trace,
+        notes,
         tracedSql: sql,
         currentStep: 0,
         playing: true,
@@ -247,7 +268,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         selection: null,
         hoveredRow: null,
         hoveredResultRow: null,
+        ...(mutation
+          ? {
+              tableData: mutation.tableData,
+              dataModified: !isCustom,
+              // A custom schema keeps its edits: the saved database now holds them.
+              ...(isCustom && mutation.databaseBytes ? { savedCustomDatabase: mutation.databaseBytes } : {}),
+            }
+          : {}),
       });
+      if (mutation && isCustom) await persistCurrentState();
     } catch (err) {
       if (generation !== queryRunGeneration) return;
       const msg = err instanceof Error ? err.message : `Trace failed: ${String(err)}`;
@@ -324,9 +354,10 @@ export function useCurrentStep(): TraceStep | null {
 
 /** Human label for a row: its full primary key if the table has one, else #rowid. */
 export function displayRowLabel(table: string, rid: number): string {
-  const { schema, tableData } = useAppStore.getState();
+  const { schema, tableData, trace, currentStep } = useAppStore.getState();
   const meta = schema.find((t) => t.name === table);
-  const data = tableData[table];
+  // While a data change shows the "before" state, label rows from that snapshot.
+  const data = trace?.[currentStep]?.tableSnapshots?.[table] ?? tableData[table];
   const pkIndices = meta
     ? meta.columns.map((column, index) => (column.pk ? index : -1)).filter((index) => index >= 0)
     : [];
