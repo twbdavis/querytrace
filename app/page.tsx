@@ -9,6 +9,7 @@ import { PlaybackDock } from '@/components/PlaybackDock';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ResultPanel } from '@/components/ResultPanel';
 import { SqlEditor } from '@/components/SqlEditor';
+import { HelpModal } from '@/components/HelpModal';
 import { LessonsModal } from '@/components/LessonsModal';
 import { SchemaModal } from '@/components/SchemaModal';
 import { TableIcon, TerminalIcon } from '@/components/Icons';
@@ -101,6 +102,7 @@ export default function Home() {
   const rowCount = useAppStore((s) => s.trace?.[s.currentStep]?.partialResult?.rows.length);
   const [lessonsOpen, setLessonsOpen] = useState(false);
   const [schemaOpen, setSchemaOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [queryOpen, setQueryOpen] = useState(true);
   const [resultsOpen, setResultsOpen] = useState(true);
   // Two UIs: a floating left column (query stacked over results) beside a
@@ -141,6 +143,7 @@ export default function Home() {
         <TopBar
           onOpenSchema={() => setSchemaOpen(true)}
           onOpenLessons={() => setLessonsOpen(true)}
+          onOpenHelp={() => setHelpOpen(true)}
           // The query panel carries its own RUN; offer one up here while it is collapsed.
           showRun={isWide && !queryOpen}
         />
@@ -231,6 +234,18 @@ export default function Home() {
 
         <LessonsModal open={lessonsOpen} onClose={() => setLessonsOpen(false)} />
         <SchemaModal open={schemaOpen} onClose={() => setSchemaOpen(false)} />
+        <HelpModal
+          open={helpOpen}
+          onClose={() => setHelpOpen(false)}
+          onOpenLessons={() => {
+            setHelpOpen(false);
+            setLessonsOpen(true);
+          }}
+          onOpenSchema={() => {
+            setHelpOpen(false);
+            setSchemaOpen(true);
+          }}
+        />
       </main>
     </>
   );

@@ -226,7 +226,14 @@ function exec(ctx: EngineCtx, sql: string): { columns: string[]; rows: unknown[]
     throw new TraceError(`SQL error: ${msg}`);
   }
   if (res.length === 0) return { columns: [], rows: [] };
-  return { columns: res[0].columns, rows: res[0].values };
+  // A blob is shown by its size: the bytes mean nothing in a table cell and
+  // a large one would be copied to the page for nothing.
+  const rows = res[0].values.map((row) =>
+    row.some((value) => value instanceof Uint8Array)
+      ? row.map((value) => (value instanceof Uint8Array ? `BLOB(${value.length} bytes)` : value))
+      : row
+  );
+  return { columns: res[0].columns, rows };
 }
 
 /** Read values and provenance together: separate SELECTs can use different scan orders. */
@@ -710,13 +717,15 @@ function explainMutationError(message: string, statement: string, table: string)
       ? `The ${verb} was rejected: other rows still refer to the ${table} rows you tried to remove (FOREIGN KEY constraint). Delete or update the dependent rows first, or declare ON DELETE CASCADE in the schema. No rows were changed.`
       : `The ${verb} was rejected: a foreign-key value does not match any row in the parent table (FOREIGN KEY constraint failed). Insert the parent row first or use an existing key. No rows were changed.`;
   }
-  if (/UNIQUE constraint failed: ([\w."]+)/i.test(message)) {
-    const column = message.match(/UNIQUE constraint failed: ([\w."]+)/i)![1];
-    return `The ${verb} was rejected: ${column} already holds that value and must stay unique (primary keys and UNIQUE columns cannot repeat). No rows were changed.`;
+  const unique = message.match(/UNIQUE constraint failed: (.+?)\s*$/i);
+  if (unique) {
+    const columns = unique[1].split(/,\s*/);
+    const subject = columns.length > 1 ? `the combination of ${columns.join(' and ')}` : columns[0];
+    return `The ${verb} was rejected: ${subject} already holds that value and must stay unique (primary keys and UNIQUE columns cannot repeat). No rows were changed.`;
   }
-  if (/NOT NULL constraint failed: ([\w."]+)/i.test(message)) {
-    const column = message.match(/NOT NULL constraint failed: ([\w."]+)/i)![1];
-    return `The ${verb} was rejected: ${column} is declared NOT NULL, so it needs a value. No rows were changed.`;
+  const notNull = message.match(/NOT NULL constraint failed: (.+?)\s*$/i);
+  if (notNull) {
+    return `The ${verb} was rejected: ${notNull[1]} is declared NOT NULL, so it needs a value. No rows were changed.`;
   }
   if (/CHECK constraint failed/i.test(message)) {
     return `The ${verb} was rejected by a CHECK constraint on ${table}. No rows were changed.`;
@@ -1036,6 +1045,12 @@ function outputColumns(
       out.push(column.as);
       continue;
     }
+    // The grammar reads "Sku Code" and `sku code` as quoted strings; SQLite
+    // resolves them as identifiers, so the output column is the bare name.
+    if ((column.expr.type === 'double_quote_string' || column.expr.type === 'backticks_quote_string') && typeof column.expr.value === 'string') {
+      out.push(column.expr.value);
+      continue;
+    }
     if (column.expr.type === 'column_ref') {
       const name = columnName(column.expr.column);
       if (!name) return null;
@@ -1066,6 +1081,8 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
     columnsOf(table).some((name) => name.toLowerCase() === column.toLowerCase());
 
   const lookupColumns = (table: string) => (tableByName.has(table.toLowerCase()) ? columnsOf(table) : null);
+  // SQLite exposes every ordinary table's row number under these names.
+  const isRowidName = (column: string) => /^(?:rowid|_rowid_|oid)$/i.test(column);
   const derivedHas = (columns: string[] | null | undefined, column: string) =>
     !!columns?.some((name) => name.toLowerCase() === column.toLowerCase());
 
@@ -1078,7 +1095,12 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
       const cteScope: Scope = { tables: new Map(), derived: new Map(), parent };
       for (const cte of ctes) {
         const bodyScope = check(cte.stmt.ast, cteScope);
-        cteScope.derived.set(cte.name.value.toLowerCase(), outputColumns(cte.stmt.ast, lookupColumns, bodyScope));
+        // WITH name(a, b) AS (...) renames the body's columns.
+        const declared = Array.isArray(cte.columns)
+          ? cte.columns.map((entry) => columnName((entry as { column?: unknown } | null)?.column ?? entry))
+          : null;
+        const usable = declared && declared.every((name): name is string => name !== null) ? declared : null;
+        cteScope.derived.set(cte.name.value.toLowerCase(), usable ?? outputColumns(cte.stmt.ast, lookupColumns, bodyScope));
       }
       outer = cteScope;
     }
@@ -1098,10 +1120,10 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
         if (meta) scope.tables.set(alias, meta.name);
       }
     }
-    const visible = (node: unknown) => {
+    const visible = (node: unknown, outputAliases?: Set<string>) => {
       if (node === null || typeof node !== 'object') return;
       if (Array.isArray(node)) {
-        node.forEach(visible);
+        node.forEach((child) => visible(child, outputAliases));
         return;
       }
       const obj = node as Record<string, unknown>;
@@ -1112,12 +1134,20 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
       if (obj.type === 'column_ref') {
         const column = columnName(obj.column);
         const qualifier = typeof obj.table === 'string' ? obj.table : null;
-        if (column && column !== '*') verify(qualifier, column, scope);
+        const isAlias = !qualifier && !!column && outputAliases?.has(column.toLowerCase());
+        if (column && column !== '*' && !isAlias) verify(qualifier, column, scope);
       }
-      Object.values(obj).forEach(visible);
+      Object.values(obj).forEach((child) => visible(child, outputAliases));
     };
     // Derived tables in FROM were checked above; only their ON conditions remain.
-    visible([select.columns, select.from?.map((item) => item.on), select.where, select.groupby, select.having, select.orderby]);
+    visible([select.columns, select.from?.map((item) => item.on), select.where, select.groupby, select.having]);
+    // ORDER BY may name an output column by its alias.
+    const outputAliases = new Set(
+      (typeof select.columns === 'string' ? [] : select.columns)
+        .map((column) => column.as?.toLowerCase())
+        .filter((alias): alias is string => !!alias)
+    );
+    visible(select.orderby, outputAliases);
     if (select._next) check(select._next, parent);
     return scope;
   };
@@ -1137,7 +1167,7 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
         }
         const table = s.tables.get(key);
         if (table) {
-          if (!hasColumn(table, column)) {
+          if (!hasColumn(table, column) && !isRowidName(column)) {
             throw new TraceError(
               `Unknown column "${column}" in ${table}. Its columns are: ${columnsOf(table).join(', ')}.`
             );
@@ -1172,6 +1202,7 @@ export function validateColumnReferences(ast: SelectAst, schema: TableMeta[]): v
       for (const table of s.tables.values()) candidates.push({ name: table, columns: columnsOf(table) });
       for (const [alias, columns] of s.derived) candidates.push({ name: `${alias} (subquery)`, columns: columns ?? [] });
     }
+    if (isRowidName(column) && candidates.some((candidate) => !candidate.name.endsWith('(subquery)'))) return;
     if (column.toUpperCase() === 'ROWNUM') {
       throw new TraceError('ROWNUM is Oracle-specific. Use ORDER BY ... LIMIT n to keep the first n rows.');
     }

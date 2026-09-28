@@ -207,6 +207,17 @@ export function translateQuery(input: string): Translation {
   if (rewrite(/^(\s*)INSERT\s+IGNORE\s+INTO\b/i, (_, match) => `${match[1]}INSERT OR IGNORE INTO`)) note('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO');
   if (rewrite(/^(\s*)REPLACE\s+INTO\b/i, (_, match) => `${match[1]}INSERT OR REPLACE INTO`)) note('REPLACE INTO', 'INSERT OR REPLACE INTO');
   if (rewrite(/^(\s*)INSERT\s+(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY)\s+INTO\b/i, (_, match) => `${match[1]}INSERT INTO`)) note('INSERT LOW_PRIORITY INTO', 'INSERT INTO');
+  // SQL Server lets INTO be omitted: INSERT dbo.t (...) VALUES (...).
+  if (rewrite(/^(\s*)INSERT\s+(?!INTO\b|OR\s|IGNORE\b|LOW_PRIORITY\b|DELAYED\b|HIGH_PRIORITY\b)/i, (_, match) => `${match[1]}INSERT INTO `)) note('INSERT table', 'INSERT INTO table');
+  // A schema prefix on the changed table (public.book, dbo.Employee): SQLite has one schema.
+  if (
+    rewrite(
+      /^(\s*(?:INSERT\s+(?:OR\s+\w+\s+|IGNORE\s+)?INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+)(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+)\s*\.\s*(?=[\w"`[])/i,
+      (_, match) => match[1]
+    )
+  ) {
+    note('schema.table', 'table (SQLite has a single schema)');
+  }
   if (/^\s*INSERT\b[\s\S]*\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/i.test(maskSql(sql))) {
     const upsert = maskSql(sql).match(/\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/i)!;
     const after = replaceOutsideLiterals(sql.slice(upsert.index! + upsert[0].length), /\bVALUES\s*\(\s*(`[^`]*`|"[^"]*"|\w+)\s*\)/gi, (_, match) => `excluded.${match[1]}`);
@@ -274,6 +285,20 @@ export function translateQuery(input: string): Translation {
     const right = sql.slice(div.index + div[0].length, rightEnd).trim();
     sql = `${sql.slice(0, leftStart)}CAST(${left} / ${right} AS INTEGER)${sql.slice(rightEnd)}`;
     note('a DIV b', 'CAST(a / b AS INTEGER)');
+  }
+
+  // a MOD b (MySQL / Oracle spelling of the remainder operator)
+  for (;;) {
+    const masked = maskSql(sql);
+    const mod = masked.match(/\s+MOD\s+(?!\()/i);
+    if (!mod || mod.index === undefined) break;
+    const leftStart = operandStart(masked, mod.index);
+    const rightEnd = operandEnd(masked, mod.index + mod[0].length);
+    if (leftStart === mod.index || rightEnd === mod.index + mod[0].length) fail('a MOD b could not be translated; write a % b instead.');
+    const left = sql.slice(leftStart, mod.index).trim();
+    const right = sql.slice(mod.index + mod[0].length, rightEnd).trim();
+    sql = `${sql.slice(0, leftStart)}(${left} % ${right})${sql.slice(rightEnd)}`;
+    note('a MOD b', 'a % b');
   }
 
   // PostgreSQL casts: expr::type
@@ -452,26 +477,40 @@ export function translateQuery(input: string): Translation {
   });
 
   // --- NULLS FIRST / LAST ---------------------------------------------------------------
+  // Works at any depth: a subquery's ORDER BY or a window's OVER (ORDER BY ...).
   for (;;) {
     const masked = maskSql(sql);
-    const nulls = topLevelMatches(masked, /\s+NULLS\s+(FIRST|LAST)\b/i)[0];
-    if (!nulls || nulls.index === undefined) {
-      if (/\bNULLS\s+(?:FIRST|LAST)\b/i.test(masked)) fail('NULLS FIRST / LAST inside a subquery is not supported here; sort the outer query instead.');
-      break;
+    const nullsAt = masked.search(/\s+NULLS\s+(?:FIRST|LAST)\b/i);
+    if (nullsAt === -1) break;
+    const nulls = masked.slice(nullsAt).match(/^\s+NULLS\s+(FIRST|LAST)\b/i)!;
+    // The expression this applies to starts after the nearest ORDER BY or
+    // comma at the same parenthesis depth.
+    let depth = 0;
+    let enclosingStart = 0;
+    for (let i = nullsAt - 1; i >= 0; i--) {
+      const ch = masked[i];
+      if (ch === ')') depth++;
+      else if (ch === '(') {
+        if (depth === 0) {
+          enclosingStart = i + 1;
+          break;
+        }
+        depth--;
+      }
     }
-    const before = masked.slice(0, nulls.index);
-    const clauseStart = Math.max(before.search(/\bORDER\s+BY\s+(?![\s\S]*\bORDER\s+BY\b)/i), 0);
-    const orderBy = before.slice(clauseStart).match(/^ORDER\s+BY\s+/i);
-    if (!orderBy) fail('NULLS FIRST / LAST is only understood inside ORDER BY.');
-    const itemsStart = clauseStart + orderBy[0].length;
-    const itemStart = Math.max(itemsStart, ...topLevelMatches(before.slice(itemsStart), /,/g).map((m) => itemsStart + (m.index ?? 0) + 1));
-    let item = sql.slice(itemStart, nulls.index).trim();
+    const segment = masked.slice(enclosingStart, nullsAt);
+    const orderBy = topLevelMatches(segment, /\bORDER\s+BY\s+/gi).at(-1);
+    if (!orderBy || orderBy.index === undefined) fail('NULLS FIRST / LAST is only understood inside ORDER BY.');
+    const itemsStart = enclosingStart + orderBy.index + orderBy[0].length;
+    const lastComma = topLevelMatches(masked.slice(itemsStart, nullsAt), /,/g).at(-1);
+    const itemStart = lastComma && lastComma.index !== undefined ? itemsStart + lastComma.index + 1 : itemsStart;
+    let item = sql.slice(itemStart, nullsAt).trim();
     const direction = item.match(/\s+(ASC|DESC)$/i);
     if (direction) item = item.slice(0, -direction[0].length).trim();
     const last = nulls[1].toUpperCase() === 'LAST';
     const replacement = `(${item} IS NULL) ${last ? 'ASC' : 'DESC'}, ${item}${direction ? ` ${direction[1].toUpperCase()}` : ''}`;
     const spacer = sql[itemStart - 1] === ',' ? ' ' : '';
-    sql = `${sql.slice(0, itemStart)}${spacer}${replacement}${sql.slice(nulls.index + nulls[0].length)}`;
+    sql = `${sql.slice(0, itemStart)}${spacer}${replacement}${sql.slice(nullsAt + nulls[0].length)}`;
     note(`ORDER BY x NULLS ${last ? 'LAST' : 'FIRST'}`, `ORDER BY (x IS NULL) ${last ? 'ASC' : 'DESC'}, x`);
   }
 

@@ -4,6 +4,34 @@ import { Parser } from 'node-sql-parser/build/sqlite';
 import { COMPAT_FUNCTION_NAMES, COMPAT_FUNCTION_NOTES } from './compatFunctions';
 import { DialectError, splitCompound, statementKind, translateQuery, type DialectNote } from './dialect';
 import { maskSql, splitSqlStatements, unquoteIdent } from './sqlText';
+import type { TableMeta } from './schemas';
+
+/** The loaded schema, when the caller shares it, for checks that need keys and columns. */
+let schemaHint: TableMeta[] | null = null;
+
+function tableMeta(name: string): TableMeta | undefined {
+  return schemaHint?.find((table) => table.name.toLowerCase() === name.toLowerCase());
+}
+
+function isStarExpr(expr: AstExpr): boolean {
+  if (expr.type === 'star') return true;
+  if (expr.type !== 'column_ref') return false;
+  const column = expr.column as unknown;
+  return column === '*' || (column as { expr?: { value?: unknown } } | null)?.expr?.value === '*';
+}
+
+/** Name from a USING (...) item or a CTE column list entry, whichever shape the grammar emits. */
+function plainName(node: unknown): string | null {
+  if (typeof node === 'string') return node;
+  if (node && typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    if (typeof obj.value === 'string') return obj.value;
+    if (typeof obj.column === 'string') return obj.column;
+    if (obj.column) return plainName(obj.column);
+    if (obj.expr) return plainName(obj.expr);
+  }
+  return null;
+}
 
 /** Loose structural types for the slice of the node-sql-parser AST we support. */
 export interface AstExpr {
@@ -265,12 +293,8 @@ function findQuotedAlias(node: unknown, aliases: Set<string>): string | null {
     return null;
   }
   const obj = node as Record<string, unknown>;
-  if (
-    typeof obj.type === 'string' &&
-    obj.type.endsWith('_quote_string') &&
-    typeof obj.value === 'string' &&
-    aliases.has(obj.value.toLowerCase())
-  ) {
+  // "Name" and [Name] are identifiers; only 'Name' is a constant.
+  if (obj.type === 'single_quote_string' && typeof obj.value === 'string' && aliases.has(obj.value.toLowerCase())) {
     return obj.value;
   }
   for (const child of Object.values(obj)) {
@@ -293,8 +317,9 @@ function isOrdinal(expr: AstExpr): number | null {
  */
 function resolveOrdinals(ast: SelectAst): string | null {
   const columns = typeof ast.columns === 'string' ? null : ast.columns;
+  const hasStar = !!columns?.some((column) => isStarExpr(column.expr));
   const check = (position: number, clause: string): string | null => {
-    if (position < 1 || (columns && position > columns.length)) {
+    if (position < 1 || (columns && !hasStar && position > columns.length)) {
       return `${clause} ${position} refers to a select-list position, but the SELECT list has ${columns?.length ?? 0} ${columns?.length === 1 ? 'item' : 'items'}.`;
     }
     return null;
@@ -316,6 +341,96 @@ function resolveOrdinals(ast: SelectAst): string | null {
     const error = check(position, 'ORDER BY');
     if (error) return error;
   }
+  substituteAliases(ast);
+  return null;
+}
+
+/**
+ * GROUP BY total / HAVING n > 1 name a select-list alias. MySQL, PostgreSQL
+ * and SQLite accept that; the trace replaces the alias with its expression so
+ * the grouping key is the real expression and the SQL stays portable.
+ * ORDER BY keeps the alias: sorting by an output column is standard SQL.
+ */
+function substituteAliases(ast: SelectAst): void {
+  if (typeof ast.columns === 'string') return;
+  const byAlias = new Map<string, AstExpr>();
+  for (const column of ast.columns) {
+    if (column.as && !isStarExpr(column.expr)) byAlias.set(column.as.toLowerCase(), column.expr);
+  }
+  if (byAlias.size === 0) return;
+  const clone = (expr: AstExpr): AstExpr => JSON.parse(JSON.stringify(expr)) as AstExpr;
+  const substitute = (node: unknown): unknown => {
+    if (node === null || typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map(substitute);
+    const obj = node as AstExpr;
+    if (obj.type === 'select') return obj;
+    if (obj.type === 'column_ref' && typeof obj.table !== 'string') {
+      const name = typeof obj.column === 'string' ? obj.column : plainName(obj.column);
+      const target = name ? byAlias.get(name.toLowerCase()) : undefined;
+      if (target) return clone(target);
+    }
+    return Object.fromEntries(Object.entries(obj).map(([key, value]) => [key, substitute(value)]));
+  };
+  const groupExprs = groupByExprs(ast);
+  if (groupExprs) for (let i = 0; i < groupExprs.length; i++) groupExprs[i] = substitute(groupExprs[i]) as AstExpr;
+  if (ast.having) ast.having = substitute(ast.having) as AstExpr;
+}
+
+/**
+ * A column of a table whose whole primary key is grouped is determined by the
+ * group (PostgreSQL's functional-dependency rule), so it may be selected bare.
+ */
+function dependsOnGroupedKey(ref: string, ast: SelectAst, groupColumns: Set<string>): boolean {
+  if (!schemaHint) return false;
+  const dot = ref.lastIndexOf('.');
+  const qualifier = dot === -1 ? null : ref.slice(0, dot);
+  const column = dot === -1 ? ref : ref.slice(dot + 1);
+  const physical = (ast.from ?? []).filter((item) => item.table && !item.expr);
+  const owners = physical.filter((item) => {
+    const alias = (item.as ?? item.table ?? '').toLowerCase();
+    if (qualifier) return alias === qualifier;
+    return tableMeta(item.table!)?.columns.some((c) => c.name.toLowerCase() === column) ?? false;
+  });
+  if (owners.length !== 1) return false;
+  const owner = owners[0];
+  const meta = tableMeta(owner.table!);
+  const keys = meta?.columns.filter((c) => c.pk) ?? [];
+  if (!meta || keys.length === 0) return false;
+  const alias = (owner.as ?? owner.table ?? '').toLowerCase();
+  const grouped = [...groupColumns];
+  return keys.every((key) => {
+    const name = key.name.toLowerCase();
+    return grouped.some((g) => g === name || g === `${alias}.${name}` || g === `${meta.name.toLowerCase()}.${name}`);
+  });
+}
+
+/** Rewrite JOIN ... USING (a, b) into the ON condition it stands for. */
+function convertUsing(ast: SelectAst, index: number): string | null {
+  const item = ast.from![index];
+  const spellOut = `${UNSUPPORTED} JOIN ... USING is not covered; spell the condition out with ON table1.column = table2.column.`;
+  if (typeof ast.columns === 'string' || ast.columns.some((column) => isStarExpr(column.expr))) {
+    return `${UNSUPPORTED} JOIN ... USING with SELECT * is not covered (the shared column would appear once). List the columns you want, or spell the condition out with ON table1.column = table2.column.`;
+  }
+  const names = (Array.isArray(item.using) ? item.using : [item.using]).map(plainName);
+  if (!schemaHint || !item.table || item.expr || names.some((name) => name === null)) return spellOut;
+  const rightMeta = tableMeta(item.table);
+  if (!rightMeta) return spellOut;
+  const rightAlias = item.as ?? item.table;
+  const conditions: AstExpr[] = [];
+  for (const name of names as string[]) {
+    const has = (table: string) => tableMeta(table)?.columns.some((c) => c.name.toLowerCase() === name.toLowerCase()) ?? false;
+    if (!has(item.table)) return `JOIN ... USING (${name}): ${item.table} has no column ${name}.`;
+    const left = ast.from!.slice(0, index).reverse().find((prior) => prior.table && !prior.expr && has(prior.table));
+    if (!left) return `JOIN ... USING (${name}): no table before ${item.table} has a column ${name}.`;
+    conditions.push({
+      type: 'binary_expr',
+      operator: '=',
+      left: { type: 'column_ref', table: left.as ?? left.table, column: name },
+      right: { type: 'column_ref', table: rightAlias, column: name },
+    });
+  }
+  item.on = conditions.reduce((acc, condition) => ({ type: 'binary_expr', operator: 'AND', left: acc, right: condition }));
+  delete item.using;
   return null;
 }
 
@@ -351,31 +466,35 @@ function validateCourseSemantics(ast: SelectAst): string | null {
       const missing = [...refs].find(
         (ref) => ![...groupColumns].some((groupColumn) => sameColumn(ref, groupColumn))
       );
-      if (missing) {
+      if (missing && !dependsOnGroupedKey(missing, ast, groupColumns)) {
         return `The non-aggregate column ${missing} must appear in the GROUP BY clause.`;
       }
     }
   }
 
-  // QueryTrace treats a result alias as an output label, not as an input to
-  // another clause. SQLite is more permissive, so normalize that distinction.
+  // WHERE runs before the select list exists, so an alias cannot be filtered
+  // on there (SQLite alone allows it). GROUP BY and HAVING aliases were
+  // replaced by their expressions above; ORDER BY may name an output column.
   const aliases = new Set(
     columns
       .map((column) => column.as?.toLowerCase())
       .filter((alias): alias is string => !!alias)
   );
-  const laterColumns = collectColumnsOutsideAggregates([
-    ast.where,
-    ast.groupby,
-    ast.having,
-    ast.orderby,
-  ]);
-  const reusedAlias = [...laterColumns].find(
-    (ref) => !ref.includes('.') && aliases.has(ref)
-  );
+  // An alias that repeats a real column's name (SELECT city AS city, or a
+  // table that has that column) is the column when WHERE names it.
+  const physicalTables = (ast.from ?? []).filter((item) => item.table && !item.expr);
+  const namesRealColumn = (name: string) =>
+    columns.some((column) => column.as?.toLowerCase() === name && column.expr.type === 'column_ref' && (typeof column.expr.column === 'string' ? column.expr.column : plainName(column.expr.column) ?? '').toLowerCase() === name) ||
+    physicalTables.some((item) => tableMeta(item.table!)?.columns.some((c) => c.name.toLowerCase() === name));
+  const whereColumns = collectColumnsOutsideAggregates(ast.where);
+  const reusedAlias = [...whereColumns].find((ref) => !ref.includes('.') && aliases.has(ref) && !namesRealColumn(ref));
+  if (reusedAlias) {
+    return `Field alias "${reusedAlias}" cannot be used in WHERE: the filter runs before the SELECT list is computed. Repeat its expression instead.`;
+  }
   const quotedOrderAlias = findQuotedAlias(ast.orderby, aliases);
-  if (reusedAlias || quotedOrderAlias) {
-    return `Field alias "${quotedOrderAlias ?? reusedAlias}" cannot be referenced elsewhere in the query; repeat its expression instead.`;
+  if (quotedOrderAlias) {
+    const bare = /^\w+$/.test(quotedOrderAlias) ? quotedOrderAlias : `"${quotedOrderAlias}"`;
+    return `ORDER BY '${quotedOrderAlias}' sorts by the constant text '${quotedOrderAlias}', not by that column. Write ORDER BY ${bare} instead.`;
   }
 
   if (ast.having) {
@@ -438,7 +557,8 @@ function validateSelect(ast: SelectAst, nested = false): string | null {
         return `${UNSUPPORTED} Only JOIN, LEFT/RIGHT/FULL OUTER JOIN and CROSS JOIN are visualized (got "${item.join}").`;
       }
       if (item.using) {
-        return `${UNSUPPORTED} JOIN ... USING is not covered; spell the condition out with ON table1.column = table2.column.`;
+        const error = convertUsing(ast, i);
+        if (error) return error;
       }
       if (join === 'CROSS JOIN') {
         if (item.on) return 'A CROSS JOIN pairs every row with every row and takes no ON condition; use JOIN ... ON to match keys.';
@@ -578,7 +698,21 @@ function unwrapParens(sql: string): string {
   return trimmed;
 }
 
-export function parseQuery(input: string): ParseOutcome {
+export interface ParseOptions {
+  /** The loaded tables: enables key-aware checks such as GROUP BY on a primary key and JOIN ... USING. */
+  schema?: TableMeta[];
+}
+
+export function parseQuery(input: string, options: ParseOptions = {}): ParseOutcome {
+  schemaHint = options.schema ?? null;
+  try {
+    return parseQueryInner(input);
+  } finally {
+    schemaHint = null;
+  }
+}
+
+function parseQueryInner(input: string): ParseOutcome {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, error: 'Type a query to get started.' };
 

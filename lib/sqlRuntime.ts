@@ -16,7 +16,8 @@ import type { FkEdgeDef, SchemaDef, TableMeta } from './schemas';
 import { traceStatement, TraceError, type TraceStep } from './traceEngine';
 
 const MAX_QUERY_CHARS = 20_000;
-const MAX_JOIN_CANDIDATES = 250_000;
+/** Row combinations a trace may materialize: every intermediate join stage is kept for scrubbing. */
+const MAX_JOIN_CANDIDATES = 50_000;
 
 export interface LoadedSchema {
   schema: TableMeta[];
@@ -90,7 +91,7 @@ export class SqlRuntime {
       throw new Error(`Queries are limited to ${MAX_QUERY_CHARS.toLocaleString()} characters.`);
     }
 
-    const parsed = parseQuery(sql);
+    const parsed = parseQuery(sql, { schema: this.schema });
     if (!parsed.ok) throw new TraceError(parsed.error);
 
     const selects = parsed.kind === 'select' ? [parsed.ast] : parsed.kind === 'compound' ? parsed.branches : [];
@@ -103,7 +104,7 @@ export class SqlRuntime {
         candidateRows *= Math.max(table?.rows.length ?? 1, 1);
         if (candidateRows > MAX_JOIN_CANDIDATES) {
           throw new TraceError(
-            'This join could examine too many row combinations for an interactive browser trace. Add a narrower schema or fewer joins.'
+            `This join could examine ${candidateRows.toLocaleString()} row combinations, more than the ${MAX_JOIN_CANDIDATES.toLocaleString()} an interactive browser trace can hold. Join fewer tables at once, or add the ON conditions that match the keys.`
           );
         }
       }

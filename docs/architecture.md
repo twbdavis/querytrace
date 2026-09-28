@@ -22,10 +22,18 @@ mixed-direction ORDER BY, LIMIT, explicit inner/left/right/full outer joins, CRO
 comma-style joins, multi-table joins, self-joins, UNION/UNION ALL/INTERSECT/EXCEPT,
 uncorrelated/correlated/derived-table subqueries, non-recursive CTEs (`WITH`), and
 window functions (`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`, windowed
-aggregates). Column and table references, including those read from a CTE or derived
+aggregates). `ORDER BY` may name a select-list alias (standard SQL); an alias in
+`GROUP BY` or `HAVING` is replaced by its expression, as MySQL and PostgreSQL read it;
+an alias in `WHERE` is refused with the reason. When every primary-key column of a table
+is grouped, its other columns may be selected bare (PostgreSQL's functional-dependency
+rule). `JOIN ... USING (a, b)` is rewritten to the `ON` condition it stands for when the
+select list is explicit. A `WITH name(a, b) AS (...)` column list renames the CTE's
+output. Column and table references, including those read from a CTE or derived
 table, are checked against the loaded schema before execution, so a misspelled name is
 reported instead of silently becoming a text literal, and a name that exists in two
-joined tables is reported with the qualifiers to use.
+joined tables is reported with the qualifiers to use. A join whose tables could form
+more than 50,000 row combinations is refused before it runs, because every intermediate
+stage is kept for scrubbing.
 
 **Query dialects:** `lib/dialect.ts` rewrites the query spellings of MySQL / MariaDB
 (first), PostgreSQL, SQL Server and Oracle into SQLite before parsing and records each
@@ -35,7 +43,8 @@ rewrite as a note shown beside the result ("Rewritten for SQLite: TOP 5 → LIMI
 `SUBSTRING(s FROM a FOR n)`, `TRIM(BOTH ... FROM s)`, `POSITION(a IN b)`,
 `GROUP_CONCAT(x SEPARATOR s)`, `LISTAGG`, `a DIV b`, `<=>`, `IS DISTINCT FROM`,
 `NULLS FIRST/LAST`, `INTERVAL` arithmetic, `MINUS`, `FROM DUAL`, `[bracketed]` names,
-`N'...'` and `DATE '...'` literals, MySQL `\'` escapes and `#` comments.
+`N'...'` and `DATE '...'` literals, `a MOD b`, `INSERT table` without `INTO` (SQL
+Server), a `schema.` prefix on a changed table, MySQL `\'` escapes and `#` comments.
 `lib/compatFunctions.ts` registers the functions SQLite lacks as JavaScript functions on
 every connection (`YEAR`, `MONTH`, `DATE_FORMAT`, `DATEDIFF`, `DATE_ADD`, `NOW`, `LEFT`,
 `RIGHT`, `LEN`, `LOCATE`, `LPAD`, `MOD`, `NVL`, `REGEXP`, `TO_CHAR`, `TO_DATE`, ...),
@@ -66,8 +75,13 @@ CURRENT_TIMESTAMP`), inline `KEY`/`INDEX` lines, `ALTER TABLE ... ADD CONSTRAINT
 `ON DUPLICATE KEY UPDATE`, MySQL `\'` string escapes and `#` comments, `N'...'` and
 `E'...'` literals, `::type` casts, `NOW()`/`GETDATE()`/`SYSDATE`, `TO_DATE` of ISO
 literals, typed literals (`DATE '...'`), `NVARCHAR(MAX)`, `VARCHAR2(n CHAR)`, `text[]`,
-`CLUSTERED`/`ON [PRIMARY]`, any `schema.` prefix in a table position, `GO` separators and
-psql meta-commands. Text pasted from Word or e-mail is repaired too (byte order mark,
+`CLUSTERED`/`ON [PRIMARY]`, any `schema.` prefix in a table position, `GO` separators,
+T-SQL batches that run several statements without semicolons, `INSERT` without `INTO`,
+`WITH CHECK ADD CONSTRAINT`, `CHECK CONSTRAINT` (ignored), `ADD CONSTRAINT ... DEFAULT
+(x) FOR col` (folded into the column), pg_dump `COPY ... FROM stdin` data blocks (turned
+into `INSERT` rows), `ALTER COLUMN ... SET DEFAULT` (folded; a `nextval()` default is
+dropped because `INTEGER PRIMARY KEY` already numbers rows), `SELECT pg_catalog.set_config`
+lines, and psql meta-commands. Text pasted from Word or e-mail is repaired too (byte order mark,
 curly quotes, non-breaking spaces). A user column named `rowid` is fine: tracing uses
 SQLite's `_rowid_` alias. Session
 statements (`USE`, `SET`, `CREATE DATABASE`, `DROP ... IF EXISTS`, transactions,
@@ -94,6 +108,8 @@ node-sql-parser · Zustand · CodeMirror 6 · Tailwind CSS · Playwright
 
 ## Repository checks
 
-Every push and pull request runs type checking, all trace-engine tests, a
-production build, and the browser suite in Chromium, Firefox, and WebKit through
-GitHub Actions.
+Every push and pull request runs type checking, all trace-engine tests, the
+differential fuzz battery (`scripts/fuzzTrace.ts`: every query traced through the
+worker's runtime and checked against SQLite's own result, the provenance invariants,
+database state after read-only statements, and a repeat run), a production build,
+and the browser suite in Chromium, Firefox, and WebKit through GitHub Actions.

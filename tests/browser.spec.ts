@@ -454,3 +454,29 @@ test('builds a pasted MySQL export and keeps the draft when the dialog closes', 
   await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
   await expect(page.getByText(/Unknown column "compny_name"/)).toBeVisible();
 });
+
+test('help dialog explains the app and links to lessons and the schema builder', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('SQL query editor')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open help' }).click();
+  const help = page.getByRole('dialog', { name: 'Help' });
+  await expect(help).toBeVisible();
+  await expect(help.getByRole('heading', { name: 'See where every row in a result comes from.' })).toBeVisible();
+
+  const nav = help.getByRole('navigation', { name: 'Help sections' });
+  await nav.getByRole('button', { name: 'Follow the rows' }).click();
+  await expect(help.getByRole('heading', { name: 'Follow the rows' })).toBeInViewport();
+  await expect(nav.getByRole('button', { name: 'Follow the rows' })).toHaveAttribute('aria-current', 'true');
+
+  await help.getByRole('button', { name: 'OPEN LESSONS' }).first().click();
+  await expect(help).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Lessons' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close lessons' }).click();
+
+  await page.getByRole('button', { name: 'Open help' }).click();
+  await help.getByRole('button', { name: 'LOAD A SCHEMA' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Schema' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toBeHidden();
+});

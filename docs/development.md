@@ -15,8 +15,14 @@ npx playwright install
 npm run test:browsers
 ```
 
-The check command runs TypeScript checks, tracing tests, key-route tests, and a
-production build. Playwright starts the production server on port 3100; stop any
+The check command runs TypeScript checks, tracing tests, key-route tests, the
+trace-engine fuzz battery, and a production build. The fuzz battery
+(`npm run test:fuzz`) runs about 2,500 generated and hand-written queries against
+the bundled schemas and four vendor-style custom schemas (MySQL Workbench, pg_dump,
+SQL Server Management Studio, and an edge-case SQLite script), compares every
+result with SQLite's own answer, and checks the provenance invariants the UI relies
+on. Pass `--verbose` to list every query or `--json <path>` to save a report; add
+queries in `scripts/fuzzQueries.ts` and schemas in `scripts/fuzzSchemas.ts`. Playwright starts the production server on port 3100; stop any
 unrelated server on that port first. CI also audits dependencies and tests browser
 behavior in Chromium, Firefox, WebKit, and mobile WebKit.
 

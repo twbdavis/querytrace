@@ -45,6 +45,9 @@ jobs:
       - name: Test key routes
         run: npm run test:routes
 
+      - name: Fuzz the trace engine against SQLite
+        run: npm run test:fuzz
+
       - name: Build production application
         run: npm run build
 

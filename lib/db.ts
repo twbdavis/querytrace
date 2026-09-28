@@ -38,11 +38,17 @@ const MAX_CUSTOM_ROWS_PER_TABLE = 500;
 const MAX_CUSTOM_TOTAL_ROWS = 3_000;
 const MAX_PERSISTED_DATABASE_BYTES = 16 * 1024 * 1024;
 
+/** True under Node (tests and scripts), where sql.js finds its own WASM file. */
+const runningInNode =
+  typeof process !== 'undefined' &&
+  !(process as { browser?: boolean }).browser &&
+  typeof process.versions?.node === 'string';
+
 /** Lazily initialize sql.js (the content-hashed WASM asset is served from /public). */
 function getSqlJs(): Promise<SqlJsStatic> {
   if (!sqlJs) {
     sqlJs = import('sql.js').then((m) =>
-      m.default({ locateFile: () => SQL_WASM_URL })
+      m.default(runningInNode ? {} : { locateFile: () => SQL_WASM_URL })
     );
   }
   return sqlJs;
@@ -62,6 +68,8 @@ const IGNORED_STATEMENT = new RegExp(
     [
       'USE\\b',
       'SET\\b',
+      // pg_dump session settings and sequence resets: SELECT pg_catalog.set_config(...), setval(...)
+      'SELECT\\s+pg_catalog\\.\\w+\\s*\\(',
       'CREATE\\s+(?:DATABASE|SCHEMA|SEQUENCE|EXTENSION|TYPE|USER|ROLE)\\b',
       'ALTER\\s+(?:DATABASE|SCHEMA|SEQUENCE|USER|ROLE)\\b',
       'DROP\\s+(?:TABLE|DATABASE|SCHEMA|INDEX|SEQUENCE|TYPE|VIEW|TRIGGER|PROCEDURE|FUNCTION)\\s+IF\\s+EXISTS\\b',
@@ -82,6 +90,8 @@ const IGNORED_STATEMENT = new RegExp(
       'PRINT\\b',
       'DELIMITER\\b',
       'SELECT\\s+(?:pg_catalog\\.)?setval\\b',
+      // SQL Server: ALTER TABLE t CHECK CONSTRAINT fk (enables a constraint that already exists)
+      'ALTER\\s+TABLE\\b[^;]*?\\s(?:WITH\\s+)?(?:NO)?CHECK\\s+CONSTRAINT\\b',
       'ALTER\\s+TABLE\\s+(?:ONLY\\s+)?(?:IF\\s+EXISTS\\s+)?\\S+\\s+(?:OWNER\\s+TO|ENGINE\\s*=|AUTO_INCREMENT\\s*=|(?:DEFAULT\\s+)?(?:CHARSET|CHARACTER\\s+SET|COLLATE)|ENABLE|DISABLE|CLUSTER|SET\\s+\\()',
       'GO$',
     ].join('|') +
@@ -141,6 +151,8 @@ function normalizeStatement(statement: SqlStatement): string {
   const head = (pattern: RegExp) => pattern.test(maskSql(text));
 
   // --- Every statement -----------------------------------------------------
+  // SQL Server scripts omit INTO: INSERT [dbo].[t] (...) VALUES (...).
+  text = text.replace(/^INSERT\s+(?!INTO\b|OR\s|IGNORE\b|LOW_PRIORITY\b|DELAYED\b|HIGH_PRIORITY\b)/i, 'INSERT INTO ');
   // Schema prefixes ("hr.employees", "[dbo].[course]", "public.staff") would
   // name an attached database in SQLite. Strip them where a table name is
   // expected; column references such as t.col are left alone.
@@ -414,8 +426,22 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
     const head = maskSql(statement.sql).match(ALTER_HEAD)!;
     const body = statement.sql.slice(head[0].length);
     const create = out.find((s) => s.kind === 'create' && sameTable(s.table, statement.table));
-    for (const action of splitTopLevel(body)) {
+    for (const rawAction of splitTopLevel(body)) {
+      // SQL Server: ALTER TABLE t WITH CHECK ADD CONSTRAINT ...
+      const action = rawAction.replace(/^WITH\s+(?:NO)?CHECK\s+/i, '');
       const masked = maskSql(action);
+      // SQL Server scripts a column default as its own constraint.
+      const defaultFor = masked.match(new RegExp(`^ADD\\s+(?:CONSTRAINT\\s+${QUOTED_OR_WORD}\\s+)?DEFAULT\\s+`, 'i'));
+      if (defaultFor) {
+        const rest = action.slice(defaultFor[0].length);
+        const forAt = maskSql(rest).search(/\s+FOR\s+/i);
+        if (create && forAt !== -1) {
+          const value = rest.slice(0, forAt).trim();
+          const column = unquoteIdent(rest.slice(forAt).replace(/^\s+FOR\s+/i, '').trim());
+          create.sql = addColumnDefault(create.sql, column, value);
+        }
+        continue;
+      }
       const constraint = masked.match(
         new RegExp(`^ADD\\s+(?:CONSTRAINT\\s+${QUOTED_OR_WORD}\\s+)?(FOREIGN\\s+KEY|PRIMARY\\s+KEY|UNIQUE(?:\\s+(?:KEY|INDEX))?|CHECK)\\b`, 'i')
       );
@@ -440,6 +466,20 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
       if (/^(?:ENGINE|AUTO_INCREMENT|(?:DEFAULT\s+)?(?:CHARSET|CHARACTER\s+SET|COLLATE)|COMMENT|ROW_FORMAT|OWNER\s+TO|ENABLE|DISABLE|CLUSTER|SET\s+\(|RESET\s+\()/i.test(masked)) {
         continue;
       }
+      // PostgreSQL column tweaks after CREATE: a serial's nextval() default is
+      // what INTEGER PRIMARY KEY already does; other defaults fold into the column.
+      const alterColumn = masked.match(new RegExp(`^ALTER\\s+COLUMN\\s+(${QUOTED_OR_WORD})\\s+`, 'i'));
+      if (alterColumn) {
+        const column = unquoteIdent(action.slice(alterColumn[0].length - alterColumn[1].length - alterColumn[0].match(/\s+$/)![0].length, alterColumn[0].length).trim());
+        const rest = action.slice(alterColumn[0].length);
+        const setDefault = maskSql(rest).match(/^SET\s+DEFAULT\s+/i);
+        if (setDefault && create) {
+          const value = rest.slice(setDefault[0].length).trim();
+          if (!/\bnextval\s*\(/i.test(value)) create.sql = addColumnDefault(create.sql, column, value);
+          continue;
+        }
+        if (/^(?:DROP\s+DEFAULT|SET\s+NOT\s+NULL|DROP\s+NOT\s+NULL|SET\s+STATISTICS|SET\s+STORAGE|SET\s+\(|RESET\s+\(|ADD\s+GENERATED|DROP\s+IDENTITY)\b/i.test(maskSql(rest))) continue;
+      }
       if (/^(?:MODIFY|CHANGE|ALTER\s+COLUMN)\b/i.test(masked)) {
         throw new SchemaBuildError(
           `${statement.summary}: SQLite cannot change a column's definition afterwards. Put the final definition in CREATE TABLE ${statement.table} instead.`,
@@ -454,9 +494,39 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
   return out;
 }
 
+/** Give a CREATE TABLE column a DEFAULT when its definition has none. */
+function addColumnDefault(createSql: string, column: string, value: string): string {
+  const name = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^([ \\t]*(?:"${name}"|\`${name}\`|\\[${name}\\]|${name})\\s+[^,\\n]*?)(,?)[ \\t]*$`, 'im');
+  return createSql.replace(pattern, (line, definition: string, comma: string) =>
+    /\bDEFAULT\b/i.test(definition) ? line : `${definition} DEFAULT ${value}${comma}`
+  );
+}
+
+/**
+ * pg_dump writes table rows as COPY ... FROM stdin blocks: tab-separated
+ * lines ending with a line holding "\.". Turn each block into an INSERT so
+ * the rest of the pipeline sees ordinary SQL. Values are quoted as text;
+ * SQLite's column affinity converts numbers on the way in.
+ */
+function convertCopyBlocks(script: string): string {
+  const copyBlock = /^[ \t]*COPY\s+([^\s(]+)\s*(\([^)]*\))?\s+FROM\s+stdin\b[^;\n]*;[ \t]*\r?\n([\s\S]*?)^\\\.[ \t]*$/gim;
+  const unescape = (field: string) =>
+    field.replace(/\\(.)/g, (_, ch: string) => ({ n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v' } as Record<string, string>)[ch] ?? ch);
+  const value = (field: string) => (field === '\\N' ? 'NULL' : `'${unescape(field).replace(/'/g, "''")}'`);
+  return script.replace(copyBlock, (_, table: string, columns: string | undefined, body: string) => {
+    const rows = body.split(/\r?\n/).filter((line) => line.length > 0);
+    if (rows.length === 0) return '';
+    const tuples = rows.map((line) => `(${line.split('\t').map(value).join(', ')})`);
+    return `INSERT INTO ${table} ${columns ?? ''} VALUES\n${tuples.join(',\n')};`;
+  });
+}
+
 /** Does the script read like MySQL, where "text" is a string and \' escapes a quote? */
 function looksLikeMySql(script: string): boolean {
-  return /`/.test(script) || /\bENGINE\s*=/i.test(script) || /^\s*#/m.test(script) || /\\'/.test(script);
+  if (/`/.test(script) || /\bENGINE\s*=/i.test(script) || /^\s*#/m.test(script)) return true;
+  // \' escapes a quote in MySQL; PostgreSQL uses it only inside E'...' literals.
+  return /\\'/.test(script) && !/(?<![\w"`\]])E'/.test(script);
 }
 
 /** Normalize, validate and split a custom-schema script into executable statements. */
@@ -464,7 +534,7 @@ export function prepareCustomDdl(ddl: string): PreparedStatement[] {
   if (ddl.length > MAX_CUSTOM_DDL_CHARS) {
     throw new Error(`Custom schema SQL is limited to ${MAX_CUSTOM_DDL_CHARS.toLocaleString()} characters.`);
   }
-  let script = normalizePastedText(ddl);
+  let script = convertCopyBlocks(normalizePastedText(ddl));
   if (looksLikeMySql(script)) {
     // MySQL dumps escape quotes as \' ; adopt that reading when it parses cleanly.
     if (/\\/.test(script) && !hasUnterminatedLiteral(script, { backslashEscapes: true })) {
@@ -478,6 +548,13 @@ export function prepareCustomDdl(ddl: string): PreparedStatement[] {
   script = stripComments(script);
   // SQL Server separates batches with a bare GO line; psql meta-commands start with a backslash.
   script = replaceOutsideLiterals(script, /^[ \t]*GO[ \t]*(?=\r?\n|$)/gim, ';');
+  // T-SQL also runs several statements per batch with no semicolons between
+  // them, so a statement head at the start of a line closes the one before it.
+  script = replaceOutsideLiterals(
+    script,
+    /^[ \t]*(?=(?:INSERT|UPDATE|DELETE|TRUNCATE|CREATE\s+TABLE|ALTER\s+TABLE|SET\s+IDENTITY_INSERT)\b)/gim,
+    ';'
+  );
   script = replaceOutsideLiterals(script, /^[ \t]*\\\w.*$/gm, '');
   // T-SQL leaves transaction and session lines unterminated; keep them from
   // swallowing the statement on the next line.
