@@ -769,13 +769,18 @@ async function main() {
     `).then(() => '', (error: Error) => error.message);
     assert(/FOREIGN KEY constraint failed: child_t has a row with parent_id = 999, but no parent_t row/.test(orphan), `orphan rows are explained (got "${orphan}")`);
 
+    // phpMyAdmin adds AUTO_INCREMENT after the fact; the column's final definition folds into CREATE TABLE.
+    const modified = prepareCustomDdl('CREATE TABLE t (\n  `id` int(11) NOT NULL,\n  `n` INT\n);\nALTER TABLE `t` ADD PRIMARY KEY (`id`);\nALTER TABLE `t` MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;');
+    assert(modified.length === 1 && /"id" INTEGER NOT NULL/.test(modified[0].sql) && /PRIMARY KEY \(`id`\)/.test(modified[0].sql), `ALTER TABLE MODIFY folds into CREATE TABLE (got ${JSON.stringify(modified.map((s) => s.sql))})`);
+    const autoNumbered = await build('CREATE TABLE t (\n  `id` int(11) NOT NULL,\n  `n` INT\n);\nALTER TABLE `t` ADD PRIMARY KEY (`id`);\nALTER TABLE `t` MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;\nINSERT INTO t (n) VALUES (7);');
+    assert(autoNumbered.exec('SELECT id FROM t')[0].values[0][0] === 1, 'a phpMyAdmin AUTO_INCREMENT column auto-numbers');
     let modifyMessage = '';
     try {
-      prepareCustomDdl('CREATE TABLE t (id INT PRIMARY KEY, n INT); ALTER TABLE t MODIFY n BIGINT;');
+      prepareCustomDdl('CREATE TABLE t (id INT PRIMARY KEY, n INT); ALTER TABLE t CHANGE n m BIGINT;');
     } catch (error) {
       modifyMessage = error instanceof Error ? error.message : String(error);
     }
-    assert(/cannot change a column's definition afterwards/.test(modifyMessage), 'ALTER TABLE MODIFY gets a specific explanation');
+    assert(/cannot rename and redefine a column afterwards/.test(modifyMessage), 'ALTER TABLE CHANGE to a new name gets a specific explanation');
     const addColumn = await build('CREATE TABLE t (id INT PRIMARY KEY); ALTER TABLE t ADD extra TEXT DEFAULT \'x\', ADD INDEX ix (extra); INSERT INTO t (id) VALUES (1);');
     assert(addColumn.exec('SELECT extra FROM t')[0].values[0][0] === 'x', 'ALTER TABLE ADD column runs natively while ADD INDEX is dropped');
     console.log('  INSERT / UPDATE / DELETE / ALTER dialects: ok');
@@ -957,7 +962,7 @@ async function main() {
     assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(rows('transit', 'SELECT NOW() FROM FERRY_ROUTE LIMIT 1')[0][0])), 'NOW() returns a SQLite-style timestamp');
     const dates = rows('observatory', "SELECT YEAR(OBSERVED_ON), MONTH(OBSERVED_ON), DAY(OBSERVED_ON), DAYNAME(OBSERVED_ON), MONTHNAME(OBSERVED_ON), QUARTER(OBSERVED_ON), WEEK(OBSERVED_ON), DAYOFWEEK(OBSERVED_ON), WEEKDAY(OBSERVED_ON), DAYOFYEAR(OBSERVED_ON), LAST_DAY(OBSERVED_ON), DATE_FORMAT(OBSERVED_ON, '%d/%m/%Y %W %b %e%%'), DATEDIFF('2026-03-20', OBSERVED_ON), DATE_ADD(OBSERVED_ON, INTERVAL 1 MONTH), DATE_SUB(OBSERVED_ON, INTERVAL 12 DAY), OBSERVED_ON + INTERVAL 2 YEAR, EXTRACT(YEAR FROM OBSERVED_ON), DATE_TRUNC('month', OBSERVED_ON), TO_CHAR(OBSERVED_ON, 'DD Mon YYYY'), STR_TO_DATE('15/03/2026', '%d/%m/%Y'), TO_DATE('2026-03-15', 'YYYY-MM-DD'), DATEADD(day, 10, OBSERVED_ON), DATEDIFF(day, OBSERVED_ON, '2026-03-22'), TIMESTAMPDIFF(MONTH, OBSERVED_ON, '2026-06-30'), DATEPART(year, OBSERVED_ON) FROM OBSERVATION WHERE OBSERVATION_ID = 5001");
     assert(
-      JSON.stringify(dates[0]) === JSON.stringify([2026, 3, 12, 'Thursday', 'March', 1, 11, 5, 3, 71, '2026-03-31', '12/03/2026 Thursday Mar 12%', 8, '2026-04-12', '2026-02-28', '2028-03-12', 2026, '2026-03-01 00:00:00', '12 Mar 2026', '2026-03-15', '2026-03-15', '2026-03-22', 10, 3, 2026]),
+      JSON.stringify(dates[0]) === JSON.stringify([2026, 3, 12, 'Thursday', 'March', 1, 10, 5, 3, 71, '2026-03-31', '12/03/2026 Thursday Mar 12%', 8, '2026-04-12', '2026-02-28', '2028-03-12', 2026, '2026-03-01 00:00:00', '12 Mar 2026', '2026-03-15', '2026-03-15', '2026-03-22', 10, 3, 2026]),
       `MySQL / PostgreSQL / SQL Server / Oracle date functions agree on a fixed date (got ${JSON.stringify(dates[0])})`
     );
     assert(rows('transit', "SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH), DATE_ADD('2024-01-31 10:00:00', INTERVAL 1 DAY), DATE_ADD('2024-03-01', INTERVAL -1 DAY) FROM FERRY_ROUTE LIMIT 1")[0].join('|') === '2024-02-29|2024-02-01 10:00:00|2024-02-29', 'month arithmetic clamps like MySQL and keeps a time component');

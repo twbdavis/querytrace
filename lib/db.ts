@@ -16,6 +16,7 @@ import {
   type SqlStatement,
 } from './sqlText';
 import { registerCompatFunctions } from './compatFunctions';
+import { translateCasts } from './dialect';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
 
 export { quoteIdent, splitSqlStatements } from './sqlText';
@@ -137,6 +138,91 @@ function stripPrefixLengths(text: string): string {
 }
 
 /**
+ * Rewrite the column definitions of a CREATE TABLE body (or of one ALTER TABLE
+ * MODIFY definition) into SQLite's column grammar: auto-numbered keys become
+ * plain INTEGER so SQLite assigns them, and type decorations SQLite has no
+ * words for are dropped.
+ */
+function normalizeColumnDefinitions(input: string): string {
+  let text = input;
+  const sub = (pattern: RegExp, replacement: string | ((original: string, match: RegExpMatchArray) => string)) => {
+    text = replaceOutsideLiterals(text, pattern, replacement);
+  };
+  // SQLite assigns an omitted key itself only for a column typed exactly
+  // INTEGER, so an auto-numbered "INT(11) NOT NULL AUTO_INCREMENT",
+  // "INT IDENTITY(1,1)" or "integer GENERATED ALWAYS AS IDENTITY" column is
+  // retyped and the identity keyword dropped.
+  sub(
+    new RegExp(
+      `\\b${INTEGER_TYPES}\\b(?:\\s*\\(\\s*\\d+\\s*\\))?(\\s+UNSIGNED)?(?=[^,()]*?\\b(?:AUTO_INCREMENT|IDENTITY)\\b)`,
+      'gi'
+    ),
+    'INTEGER'
+  );
+  sub(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
+  // SQL Server column-level "FOREIGN KEY REFERENCES parent(id)": SQLite spells the column form without FOREIGN KEY.
+  sub(/\bFOREIGN\s+KEY\s+(?=REFERENCES\b)/gi, '');
+  // MySQL Workbench 8 appends VISIBLE / INVISIBLE to every index.
+  sub(/\)\s*(?:IN)?VISIBLE\b/gi, ')');
+  // SQL Server scripts bracket type names ([int], [nvarchar](50)); the mask
+  // treats brackets as quoting, so unwrap the known type names first.
+  text = text.replace(
+    /\[(u?(?:tiny|small|big)?int|integer|bit|(?:small)?money|decimal|numeric|float|real|date|datetime2?|smalldatetime|datetimeoffset|time|timestamp|n?char|n?varchar|n?text|binary|varbinary|image|uniqueidentifier|xml|sql_variant|hierarchyid|geography|geometry|rowversion)\](?=\s*[(\s,)])/gi,
+    '$1'
+  );
+  // PostgreSQL 10+ / Oracle 12c identity columns: "GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]".
+  sub(
+    new RegExp(`\\b${INTEGER_TYPES}\\b\\s+(?:NOT\\s+NULL\\s+)?GENERATED\\s+(?:ALWAYS|BY\\s+DEFAULT)(?:\\s+ON\\s+NULL)?\\s+AS\\s+IDENTITY\\b(?:\\s*\\([^)]*\\))?`, 'gi'),
+    (original) => (/\bNOT\s+NULL\b/i.test(original) ? 'INTEGER NOT NULL' : 'INTEGER')
+  );
+  sub(/\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)(?:\s+ON\s+NULL)?\s+AS\s+IDENTITY\b(?:\s*\([^)]*\))?/gi, '');
+  sub(new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'), 'INTEGER');
+  sub(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
+  sub(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
+  // A DECIMAL(8,2) column must divide like a decimal (24.00 / 7 = 3.43). SQLite's
+  // NUMERIC affinity would store 24.00 as the integer 24 and divide to 3, so
+  // the type gets a REAL marker (the canvas shows the declared type without it).
+  sub(/(?<!\bREAL\s)\b(?:DECIMAL|DEC|NUMERIC|NUMBER)\s*\(\s*\d+\s*,\s*[1-9]\d*\s*\)/gi, (original) => `REAL ${original}`);
+  sub(/(?<!\bREAL\s)\b(?:NUMBER|(?:SMALL)?MONEY)\b(?!\s*\()/gi, (original) => `REAL ${original}`);
+  // pg_dump: "id integer NOT NULL DEFAULT nextval('t_id_seq')" plus a later
+  // ALTER TABLE ... ADD PRIMARY KEY; without the DEFAULT the folded INTEGER
+  // PRIMARY KEY auto-assigns exactly like the sequence did.
+  sub(/\bDEFAULT\s+nextval\s*\([^)]*\)/gi, '');
+  // Generated keys: SQLite can produce a random UUID itself.
+  sub(
+    /\bDEFAULT\s+(?:\(\s*)?(?:gen_random_uuid|uuid_generate_v4|uuid|newid|newsequentialid|sys_guid)\s*\(\s*\)(?:\s*\))?/gi,
+    "DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))))"
+  );
+  // Any other function-call default needs SQLite's parentheses: DEFAULT (expr).
+  sub(/\bDEFAULT\s+(?!\()([A-Za-z_]\w*\s*\((?:[^()]|\([^()]*\))*\))/gi, (original, match) => `${original.slice(0, original.length - match[1].length)}(${match[1]})`);
+  // Type spellings SQLite's "TYPE(n)" grammar rejects.
+  sub(/\(\s*MAX\s*\)/gi, ''); // NVARCHAR(MAX)
+  // PostgreSQL "timestamp(3) with time zone": SQLite wants the size last, and keeps no zone.
+  sub(/\b(TIMESTAMP|TIME)(?:\s*\(\s*\d+\s*\))?\s+WITH(?:OUT)?\s+TIME\s+ZONE\b/gi, (_, match) => match[1]);
+  sub(/\(\s*(\d+)\s+(?:CHAR|BYTE)\s*\)/gi, (_, match) => `(${match[1]})`); // VARCHAR2(50 CHAR)
+  // text[] (the mask blanks bracketed names too, so confirm the brackets are really empty)
+  sub(/(?<=\w)\s*\[\s*\]/g, (original) => (/^\s*\[\s*\]$/.test(original) ? '' : original));
+  // MySQL column attributes with no SQLite counterpart.
+  sub(/\bON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/gi, '');
+  sub(/\bCHARACTER\s+SET\s+\w+/gi, '');
+  sub(/\bCHARSET\s+\w+/gi, '');
+  // COLLATE is SQLite syntax too (NOCASE etc.); only foreign collation names go.
+  sub(/\bCOLLATE\s+(?!(?:BINARY|NOCASE|RTRIM)\b)(?:"[^"]*"|`[^`]*`|\w+)/gi, '');
+  sub(/\bCOMMENT\s+(?:'(?:''|[^'])*'|"(?:""|[^"])*")/gi, '');
+  sub(/\bZEROFILL\b/gi, '');
+  // "INT(11) UNSIGNED": SQLite allows a size only at the end of a type name.
+  sub(/\bUNSIGNED\b/gi, '');
+  sub(/\b(?:ENUM|SET)\s*\((?:\s*'(?:''|[^'])*'\s*,?)+\s*\)/gi, 'TEXT');
+  // SQL Server and Oracle constraint decorations.
+  sub(/\b(?:NON)?CLUSTERED\b/gi, '');
+  sub(/\bWITH\s*\([^)]*\)/gi, '');
+  sub(/\b(?:TEXTIMAGE_)?ON\s+(?:\[\s*\]|PRIMARY\b)/gi, '');
+  sub(/\b(?:ENABLE|DISABLE)(?:\s+(?:NO)?VALIDATE)?\b/gi, '');
+  sub(/\bUSING\s+(?:BTREE|HASH)\b/gi, '');
+  return text;
+}
+
+/**
  * Translate the dialect-specific parts of common exports (MySQL Workbench,
  * phpMyAdmin, pgAdmin / pg_dump, SQL Server Management Studio, Oracle) into
  * SQLite so a schema copied from a course project builds without hand edits.
@@ -185,46 +271,7 @@ function normalizeStatement(statement: SqlStatement): string {
   if (head(/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b/i)) {
     // Temporary tables live outside the schema the canvas reads; make them ordinary.
     sub(/^CREATE\s+TEMP(?:ORARY)?\s+TABLE\b/i, 'CREATE TABLE');
-    // SQLite assigns an omitted key itself only for a column typed exactly
-    // INTEGER, so an auto-numbered "INT(11) NOT NULL AUTO_INCREMENT" or
-    // "INT IDENTITY(1,1)" column is retyped and the identity keyword dropped.
-    sub(
-      new RegExp(
-        `\\b${INTEGER_TYPES}\\b(?:\\s*\\(\\s*\\d+\\s*\\))?(\\s+UNSIGNED)?(?=[^,()]*?\\bAUTO_INCREMENT\\b)`,
-        'gi'
-      ),
-      'INTEGER'
-    );
-    sub(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
-    sub(new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'), 'INTEGER');
-    sub(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
-    sub(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
-    // pg_dump: "id integer NOT NULL DEFAULT nextval('t_id_seq')" plus a later
-    // ALTER TABLE ... ADD PRIMARY KEY; without the DEFAULT the folded INTEGER
-    // PRIMARY KEY auto-assigns exactly like the sequence did.
-    sub(/\bDEFAULT\s+nextval\s*\([^)]*\)/gi, '');
-    // Type spellings SQLite's "TYPE(n)" grammar rejects.
-    sub(/\(\s*MAX\s*\)/gi, ''); // NVARCHAR(MAX)
-    sub(/\(\s*(\d+)\s+(?:CHAR|BYTE)\s*\)/gi, (_, match) => `(${match[1]})`); // VARCHAR2(50 CHAR)
-    // text[] (the mask blanks bracketed names too, so confirm the brackets are really empty)
-    sub(/(?<=\w)\s*\[\s*\]/g, (original) => (/^\s*\[\s*\]$/.test(original) ? '' : original));
-    // MySQL column attributes with no SQLite counterpart.
-    sub(/\bON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/gi, '');
-    sub(/\bCHARACTER\s+SET\s+\w+/gi, '');
-    sub(/\bCHARSET\s+\w+/gi, '');
-    // COLLATE is SQLite syntax too (NOCASE etc.); only foreign collation names go.
-    sub(/\bCOLLATE\s+(?!(?:BINARY|NOCASE|RTRIM)\b)(?:"[^"]*"|`[^`]*`|\w+)/gi, '');
-    sub(/\bCOMMENT\s+(?:'(?:''|[^'])*'|"(?:""|[^"])*")/gi, '');
-    sub(/\bZEROFILL\b/gi, '');
-    // "INT(11) UNSIGNED": SQLite allows a size only at the end of a type name.
-    sub(/\bUNSIGNED\b/gi, '');
-    sub(/\b(?:ENUM|SET)\s*\((?:\s*'(?:''|[^'])*'\s*,?)+\s*\)/gi, 'TEXT');
-    // SQL Server and Oracle constraint decorations.
-    sub(/\b(?:NON)?CLUSTERED\b/gi, '');
-    sub(/\bWITH\s*\([^)]*\)/gi, '');
-    sub(/\b(?:TEXTIMAGE_)?ON\s+(?:\[\s*\]|PRIMARY\b)/gi, '');
-    sub(/\b(?:ENABLE|DISABLE)(?:\s+(?:NO)?VALIDATE)?\b/gi, '');
-    sub(/\bUSING\s+(?:BTREE|HASH)\b/gi, '');
+    text = normalizeColumnDefinitions(text);
     // Inline secondary indexes: SQLite only accepts them as separate CREATE
     // INDEX statements, and the canvas does not draw them anyway. A column
     // that happens to be called "key" keeps its "key INT(11)" definition: the
@@ -244,6 +291,21 @@ function normalizeStatement(statement: SqlStatement): string {
     const tail = maskSql(text).match(TABLE_OPTIONS_TAIL);
     if (tail && tail.index !== undefined) text = `${text.slice(0, tail.index)})`;
     return text;
+  }
+
+  // PostgreSQL timestamptz literals end in a zone offset ('2025-07-01 10:00:00+00');
+  // SQLite's date functions read "+HH:MM" only, so a bare "+HH" gets its minutes and a zero offset goes.
+  if (head(/^(?:INSERT|REPLACE|UPDATE)\b/i)) {
+    text = text.replace(/('\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:Z|[+-]00(?::?00)?)'/g, "$1'");
+    text = text.replace(/('\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2})'/g, "$1:00'");
+  }
+  // CAST(N'2024-01-01' AS Date) and CONVERT(...) in row data.
+  if (head(/^(?:INSERT|REPLACE|UPDATE)\b/i) && /\b(?:CAST|CONVERT)\s*\(/i.test(maskSql(text))) {
+    try {
+      text = translateCasts(text);
+    } catch {
+      // An unknown type is left for SQLite to report against the statement.
+    }
   }
 
   // --- INSERT ----------------------------------------------------------------
@@ -289,7 +351,10 @@ function normalizeStatement(statement: SqlStatement): string {
   }
 
   // --- CREATE INDEX ------------------------------------------------------------
-  if (head(/^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i)) {
+  if (head(/^CREATE\s+(?:UNIQUE\s+)?(?:(?:NON)?CLUSTERED\s+)?INDEX\b/i)) {
+    // SQL Server: CREATE NONCLUSTERED INDEX ... ON [PRIMARY]; the storage words mean nothing here.
+    sub(/\b(?:NON)?CLUSTERED\b/gi, '');
+    sub(/\b(?:TEXTIMAGE_)?ON\s+(?:\[\s*\]|PRIMARY\b)\s*$/i, '');
     sub(/\bCONCURRENTLY\b/gi, '');
     sub(new RegExp(`\\bON(\\s+)(${QUOTED_OR_WORD}\\.)(?=[\\w"\`[])`, 'i'), (original, match) => original.slice(0, 2 + match[1].length));
     sub(/\bUSING\s+\w+/gi, '');
@@ -325,7 +390,7 @@ const INSERT_HEAD = new RegExp(`^INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${TABLE_NA
 const UPDATE_HEAD = new RegExp(`^UPDATE\\s+(?:OR\\s+\\w+\\s+)?${TABLE_NAME}`, 'i');
 const DELETE_HEAD = new RegExp(`^DELETE\\s+FROM\\s+${TABLE_NAME}`, 'i');
 const INDEX_HEAD = new RegExp(
-  `^CREATE\\s+(?:UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+(?:${TABLE_NAME}\\s+)?ON\\s+${TABLE_NAME}`,
+  `^CREATE\\s+(?:UNIQUE\\s+)?(?:(?:NON)?CLUSTERED\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+(?:${TABLE_NAME}\\s+)?ON\\s+${TABLE_NAME}`,
   'i'
 );
 const ALTER_HEAD = new RegExp(`^ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_NAME}\\s+`, 'i');
@@ -480,6 +545,32 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
         }
         if (/^(?:DROP\s+DEFAULT|SET\s+NOT\s+NULL|DROP\s+NOT\s+NULL|SET\s+STATISTICS|SET\s+STORAGE|SET\s+\(|RESET\s+\(|ADD\s+GENERATED|DROP\s+IDENTITY)\b/i.test(maskSql(rest))) continue;
       }
+      // phpMyAdmin exports a column's final definition afterwards:
+      // "ALTER TABLE t MODIFY id int(11) NOT NULL AUTO_INCREMENT". Replace the
+      // column's definition in CREATE TABLE before anything runs; CHANGE does
+      // the same when it keeps the name.
+      const modify = masked.match(new RegExp(`^(?:MODIFY|CHANGE)\\s+(?:COLUMN\\s+)?(${QUOTED_OR_WORD})\\s+`, 'i'));
+      if (modify && create) {
+        const column = unquoteIdent(action.slice(modify[0].length - modify[1].length - modify[0].match(/\s+$/)![0].length, modify[0].length).trim());
+        let definition = action.slice(modify[0].length).trim();
+        if (/^CHANGE\b/i.test(masked)) {
+          const renamed = maskSql(definition).match(new RegExp(`^(${QUOTED_OR_WORD})\\s+`, 'i'));
+          if (!renamed || unquoteIdent(definition.slice(0, renamed[1].length)) !== column) {
+            throw new SchemaBuildError(
+              `${statement.summary}: SQLite cannot rename and redefine a column afterwards. Put the final definition in CREATE TABLE ${statement.table} instead.`,
+              statement.source
+            );
+          }
+          definition = definition.slice(renamed[0].length).trim();
+        }
+        definition = normalizeColumnDefinitions(definition).replace(/\s+(?:FIRST|AFTER\s+\S+)\s*$/i, '').trim();
+        const replaced = replaceColumnDefinition(create.sql, column, definition);
+        if (replaced === null) {
+          throw new SchemaBuildError(`${statement.summary}: CREATE TABLE ${statement.table} has no column ${column}.`, statement.source);
+        }
+        create.sql = replaced;
+        continue;
+      }
       if (/^(?:MODIFY|CHANGE|ALTER\s+COLUMN)\b/i.test(masked)) {
         throw new SchemaBuildError(
           `${statement.summary}: SQLite cannot change a column's definition afterwards. Put the final definition in CREATE TABLE ${statement.table} instead.`,
@@ -492,6 +583,14 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
     }
   }
   return out;
+}
+
+/** Swap a CREATE TABLE column's definition (its own line) for a new one; null when the column is not found. */
+function replaceColumnDefinition(createSql: string, column: string, definition: string): string | null {
+  const name = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^([ \\t]*)(?:"${name}"|\`${name}\`|\\[${name}\\]|${name})\\s+[^,\\n]*?(,?)[ \\t]*$`, 'im');
+  if (!pattern.test(createSql)) return null;
+  return createSql.replace(pattern, (_, indent: string, comma: string) => `${indent}${quoteIdent(column)} ${definition}${comma}`);
 }
 
 /** Give a CREATE TABLE column a DEFAULT when its definition has none. */
@@ -802,7 +901,8 @@ export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEd
     // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
     const columns = info.rows.map((r) => ({
       name: String(r[1]),
-      type: String(r[2] ?? '') || undefined,
+      // The REAL marker in front of a decimal type (see normalizeColumnDefinitions) is an affinity hint, not the declared type.
+      type: String(r[2] ?? '').replace(/^REAL\s+(?=(?:DECIMAL|DEC|NUMERIC|NUMBER|MONEY|SMALLMONEY)\b)/i, '') || undefined,
       notNull: Number(r[3]) > 0 || Number(r[5]) > 0 ? true : undefined,
       defaultValue: r[4] === null ? null : String(r[4]),
       pk: Number(r[5]) > 0 ? true : undefined,

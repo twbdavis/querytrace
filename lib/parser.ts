@@ -757,10 +757,11 @@ function parseQueryInner(input: string): ParseOutcome {
         if (error) return { ok: false, error };
       }
       notes.push(...functionNotes(ast));
-    } else if (!/\bON\s+CONFLICT\b/i.test(maskSql(sql))) {
+    } else if (!/\bON\s+CONFLICT\b/i.test(maskSql(sql)) && !(kind === 'update' && /\bSET\b[\s\S]*\bFROM\b/i.test(maskSql(sql)))) {
       // The sqlite grammar reads every plain INSERT / UPDATE / DELETE form; an
       // unparseable statement is a real syntax error unless it is the upsert
-      // clause the grammar lacks, which SQLite itself validates.
+      // clause or the UPDATE ... FROM join the grammar lacks, which SQLite
+      // itself validates.
       return raw;
     }
     return { ok: true, kind: 'mutation', statement: kind, table, ast, sql, notes };

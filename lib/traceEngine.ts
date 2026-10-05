@@ -2,7 +2,8 @@
 import { Parser } from 'node-sql-parser/build/sqlite';
 import type { AstExpr, FromItem, MutationAst, ParseOutcome, SelectAst } from './parser';
 import { cteItems, cteNames, containsAggregate, groupByExprs, hasNestedSelect, queryTableNames } from './parser';
-import { tidyWindowSql } from './dialect';
+import { tidyIntegerCasts, tidyWindowSql, type DialectNote } from './dialect';
+import { rewriteDateArithmeticInSelect } from './dateArithmetic';
 import type { TableMeta } from './schemas';
 import { maskSql, quoteIdent } from './sqlText';
 import { GROUP_PALETTE } from '../styles/theme';
@@ -76,6 +77,8 @@ export interface MutationResult {
 export interface StatementTrace {
   steps: TraceStep[];
   mutation?: MutationResult;
+  /** Rewrites the engine made with the schema's help (date column arithmetic), for the notes panel. */
+  notes?: DialectNote[];
 }
 
 export interface TraceOptions {
@@ -569,7 +572,8 @@ function buildAdvancedTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): T
     let branch: SelectAst | null | undefined = ast;
     let branchIndex = 1;
     while (branch) {
-      const isolated = { ...branch, _next: null, set_op: null, with: cteItems(ast) };
+      // ORDER BY / LIMIT written after the last branch belong to the whole UNION.
+      const isolated = branch._next ? { ...branch, _next: null, set_op: null, with: cteItems(ast) } : { ...branch, _next: null, set_op: null, with: cteItems(ast), orderby: null, limit: null };
       const branchSql = selectSql(isolated as unknown as SelectAst);
       const partialResult = limitPreview(directExec(db, branchSql));
       steps.push({
@@ -982,17 +986,42 @@ export function traceStatement(
   schema: TableMeta[],
   options: TraceOptions = {}
 ): StatementTrace {
+  const trace = traceStatementRaw(parsed, originalSql, db, schema, options);
+  // The translator wraps emulated whole-number functions in CAST(... AS INTEGER)
+  // so SQLite sees integers; the learner sees the function as written.
+  for (const step of trace.steps) {
+    step.label = tidyIntegerCasts(step.label);
+    step.narration = tidyIntegerCasts(step.narration);
+    if (step.partialResult) step.partialResult.columns = step.partialResult.columns.map(tidyIntegerCasts);
+  }
+  return trace;
+}
+
+function traceStatementRaw(
+  parsed: Exclude<ParseOutcome, { ok: false }>,
+  originalSql: string,
+  db: SqlExec,
+  schema: TableMeta[],
+  options: TraceOptions
+): StatementTrace {
   if (parsed.kind === 'mutation') {
     return buildMutationTrace(parsed.statement, parsed.table, parsed.ast, parsed.sql, originalSql, db, schema, options);
   }
+  const notes: DialectNote[] = [];
   if (parsed.kind === 'compound') {
-    for (const branch of parsed.branches) {
+    const branches = parsed.branches.map((branch) => rewriteDateArithmeticInSelect(branch, schema, notes));
+    for (const branch of branches) {
       for (const name of queryTableNames(branch)) resolveTable(schema, name);
       validateColumnReferences(branch, schema);
     }
-    return { steps: buildCompoundTrace(parsed.branches, parsed.operators, parsed.sql, db, schema) };
+    // A rewritten branch must also be what the final statement executes.
+    const sql = notes.length
+      ? branches.map((branch, index) => `${index ? `${parsed.operators[index - 1]} ` : ''}${selectSql(branch)}`).join(' ')
+      : parsed.sql;
+    return { steps: buildCompoundTrace(branches, parsed.operators, sql, db, schema), notes };
   }
-  return { steps: buildTrace(parsed.ast, db, schema) };
+  const ast = rewriteDateArithmeticInSelect(parsed.ast, schema, notes);
+  return { steps: buildTrace(ast, db, schema), notes };
 }
 
 interface Scope {

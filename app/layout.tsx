@@ -23,8 +23,8 @@ const siteDescription =
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: 'Querytrace',
-    template: 'Querytrace',
+    default: 'QueryTrace',
+    template: 'QueryTrace',
   },
   description: siteDescription,
   applicationName: 'QueryTrace',

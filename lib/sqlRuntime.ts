@@ -111,17 +111,18 @@ export class SqlRuntime {
     }
 
     const db = this.db;
-    const { steps, mutation } = traceStatement(parsed, sql, db, this.schema, {
+    const { steps, mutation, notes: engineNotes } = traceStatement(parsed, sql, db, this.schema, {
       enforce: this.isCustom ? () => enforceCustomSchemaLimits(db, this.schema) : undefined,
       persistent: this.isCustom,
     });
     assignQueryRanges(steps, sql);
+    const notes = [...parsed.notes, ...(engineNotes ?? [])];
 
-    if (!mutation) return { trace: steps, notes: parsed.notes };
+    if (!mutation) return { trace: steps, notes };
     this.tableData = mutation.tableData;
     return {
       trace: steps,
-      notes: parsed.notes,
+      notes,
       mutation: {
         tableData: mutation.tableData,
         changedTables: mutation.changedTables,

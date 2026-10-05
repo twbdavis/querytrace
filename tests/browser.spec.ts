@@ -19,7 +19,7 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
 
   const wasmResponse = page.waitForResponse((response) => response.url().endsWith('.wasm'));
   const started = Date.now();
-  const response = await page.goto('/');
+  const response = await page.goto('/trace');
   const editor =
     (page.viewportSize()?.width ?? 0) >= 640
       ? page.locator('.cm-content')
@@ -78,7 +78,7 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
 
 test('restores custom SQLite data and lesson progress from IndexedDB', async ({ page }) => {
   test.setTimeout(45_000);
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
@@ -112,7 +112,7 @@ test('rejects executable custom-schema operations outside the safe subset', asyn
   browserName,
 }) => {
   test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic input validation.');
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill("ATTACH DATABASE 'other.db' AS other;");
@@ -124,7 +124,7 @@ test('runs curriculum DISTINCT, UNION, and subquery lessons through the teaching
   page,
 }) => {
   test.setTimeout(45_000);
-  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.goto('/trace', { waitUntil: 'domcontentloaded' });
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open lessons' }).click();
@@ -152,7 +152,7 @@ test('handles custom-schema edge cases and semicolon-terminated queries', async 
   browserName,
 }) => {
   test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic edge validation.');
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open schema settings' }).click();
@@ -233,7 +233,7 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
   browserName,
 }) => {
   test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic validation.');
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open schema settings' }).click();
@@ -278,7 +278,7 @@ test('enforces relational keys and aggregate rules with actionable feedback', as
 
 test('offers a header RUN button only while the query panel is collapsed', async ({ page }) => {
   test.skip((page.viewportSize()?.width ?? 0) < 1024, 'The query panel only collapses in the wide layout.');
-  await page.goto('/');
+  await page.goto('/trace');
   const runButtons = page.getByRole('button', { name: 'RUN', exact: true });
   await expect(runButtons.first()).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Run query', exact: true })).toHaveCount(0);
@@ -301,7 +301,7 @@ test('schema builder works in every layout: MySQL paste, kept draft, keyless tab
   page,
 }) => {
   test.setTimeout(60_000);
-  await page.goto('/');
+  await page.goto('/trace');
   const isPhone = (page.viewportSize()?.width ?? 0) < 640;
   const editor = isPhone
     ? page.locator('textarea[aria-label="SQL query editor"]')
@@ -374,7 +374,7 @@ test('builds a pasted MySQL export and keeps the draft when the dialog closes', 
 }) => {
   test.skip(browserName !== 'chromium', 'One engine is sufficient for deterministic input validation.');
   test.setTimeout(45_000);
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open schema settings' }).click();
@@ -456,7 +456,7 @@ test('builds a pasted MySQL export and keeps the draft when the dialog closes', 
 });
 
 test('help dialog explains the app and links to lessons and the schema builder', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open help' }).click();

@@ -29,7 +29,7 @@ interface Parts {
   time: boolean;
 }
 
-const DATE_RE = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?\s*(?:Z|[+-]\d{2}:?\d{2})?\s*$/;
+const DATE_RE = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)?\s*$/;
 
 function parts(value: Value): Parts | null {
   if (value === null || value === undefined) return null;
@@ -38,7 +38,7 @@ function parts(value: Value): Parts | null {
     const date = new Date((value - 2440587.5) * 86_400_000);
     return Number.isNaN(date.getTime()) ? null : fromDate(date, true);
   }
-  const match = DATE_RE.exec(String(value));
+  const match = DATE_RE.exec(String(value)) ?? timeOnly(String(value));
   if (!match) return null;
   const [, y, m, d, H, M, S, ms] = match;
   const out: Parts = {
@@ -55,6 +55,13 @@ function parts(value: Value): Parts | null {
     return null;
   }
   return out;
+}
+
+/** A bare time ('07:30' or '07:30:00'), as a MySQL TIME column holds, shaped like a DATE_RE match on 2000-01-01. */
+function timeOnly(value: string): RegExpExecArray | null {
+  const match = /^\s*(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?\s*$/.exec(value);
+  if (!match) return null;
+  return ['', '2000', '1', '1', match[1], match[2], match[3], match[4]] as unknown as RegExpExecArray;
 }
 
 function fromDate(date: Date, time: boolean): Parts {
@@ -119,7 +126,8 @@ const UNIT_ALIASES: Record<string, string> = {
   year: 'year', years: 'year', yy: 'year', yyyy: 'year', y: 'year',
   quarter: 'quarter', quarters: 'quarter', qq: 'quarter', q: 'quarter',
   month: 'month', months: 'month', mm: 'month', mon: 'month',
-  week: 'week', weeks: 'week', wk: 'week', ww: 'week', w: 'week',
+  week: 'week', weeks: 'week', wk: 'week', ww: 'week',
+  weekday: 'weekday', dw: 'weekday', w: 'weekday',
   day: 'day', days: 'day', dd: 'day', d: 'day', dayofyear: 'day', dy: 'day',
   hour: 'hour', hours: 'hour', hh: 'hour', h: 'hour',
   minute: 'minute', minutes: 'minute', mi: 'minute', n: 'minute', min: 'minute',
@@ -152,16 +160,56 @@ function addInterval(p: Parts, n: number, unit: string): Parts {
   return out;
 }
 
-function diffUnits(a: Parts, b: Parts, unit: string): number {
-  if (unit === 'year') return a.y - b.y;
-  if (unit === 'quarter') return (a.y - b.y) * 4 + (Math.ceil(a.m / 3) - Math.ceil(b.m / 3));
-  if (unit === 'month') return (a.y - b.y) * 12 + (a.m - b.m);
+/**
+ * a - b in `unit`. SQL Server DATEDIFF counts unit boundaries crossed
+ * (1980-12-31 to 1981-01-01 is one year); MySQL TIMESTAMPDIFF counts
+ * complete units (`complete`), so the same pair is zero years.
+ */
+function diffUnits(a: Parts, b: Parts, unit: string, complete = false): number {
   const ms = toDate(a).getTime() - toDate(b).getTime();
+  if (unit === 'year' || unit === 'quarter' || unit === 'month') {
+    let months = (a.y - b.y) * 12 + (a.m - b.m);
+    if (complete && months !== 0) {
+      // Drop the partial month when the later date has not reached the earlier one's day and time.
+      const timeA = a.d * 86_400 + a.H * 3600 + a.M * 60 + a.S;
+      const timeB = b.d * 86_400 + b.H * 3600 + b.M * 60 + b.S;
+      if (months > 0 && timeA < timeB) months--;
+      else if (months < 0 && timeA > timeB) months++;
+    }
+    if (unit === 'month') return months;
+    if (unit === 'quarter') return complete ? Math.trunc(months / 3) : (a.y - b.y) * 4 + (Math.ceil(a.m / 3) - Math.ceil(b.m / 3));
+    return complete ? Math.trunc(months / 12) : a.y - b.y;
+  }
   if (unit === 'week') return Math.trunc(ms / (7 * 86_400_000));
-  if (unit === 'day') return Math.trunc((Date.UTC(a.y, a.m - 1, a.d) - Date.UTC(b.y, b.m - 1, b.d)) / 86_400_000);
+  if (unit === 'day') return complete ? Math.trunc(ms / 86_400_000) : Math.trunc((Date.UTC(a.y, a.m - 1, a.d) - Date.UTC(b.y, b.m - 1, b.d)) / 86_400_000);
   if (unit === 'hour') return Math.trunc(ms / 3_600_000);
   if (unit === 'minute') return Math.trunc(ms / 60_000);
   return Math.trunc(ms / 1000);
+}
+
+/** MySQL's eight WEEK modes choose the first weekday, first-week rule, and year rollover. */
+function weekOfYear(p: Parts, mode: number): number {
+  mode = Math.trunc(mode) & 7;
+  const mondayFirst = (mode & 1) !== 0;
+  const rollover = (mode & 2) !== 0;
+  const firstWeekdayRule = mondayFirst ? (mode & 4) !== 0 : (mode & 4) === 0;
+  const firstWeekday = mondayFirst ? 1 : 0;
+  const firstWeekStart = (year: number) => {
+    // Either the first Sunday/Monday in January, or the week containing January 4.
+    const anchor = new Date(Date.UTC(year, 0, firstWeekdayRule ? 1 : 4));
+    const weekday = anchor.getUTCDay();
+    const shift = firstWeekdayRule ? (firstWeekday - weekday + 7) % 7 : -((weekday - firstWeekday + 7) % 7);
+    return anchor.getTime() + shift * 86_400_000;
+  };
+  const day = Date.UTC(p.y, p.m - 1, p.d);
+  let start = firstWeekStart(p.y);
+  if (day < start) {
+    if (!rollover) return 0;
+    start = firstWeekStart(p.y - 1);
+  } else if (rollover && day >= firstWeekStart(p.y + 1)) {
+    return 1;
+  }
+  return Math.floor((day - start) / (7 * 86_400_000)) + 1;
 }
 
 /** MySQL DATE_FORMAT specifiers. Unknown letters pass through unchanged. */
@@ -193,9 +241,10 @@ function dateFormat(p: Parts, format: string): string {
     p: () => (p.H < 12 ? 'AM' : 'PM'),
     r: () => `${pad(h12)}:${pad(p.M)}:${pad(p.S)} ${p.H < 12 ? 'AM' : 'PM'}`,
     T: () => `${pad(p.H)}:${pad(p.M)}:${pad(p.S)}`,
-    u: () => pad(isoWeek(p)),
-    v: () => pad(isoWeek(p)),
-    U: () => pad(Math.floor((dayOfYear(p) + 6 - dayOfWeek(p)) / 7)),
+    u: () => pad(weekOfYear(p, 1)),
+    v: () => pad(weekOfYear(p, 3)),
+    U: () => pad(weekOfYear(p, 0)),
+    V: () => pad(weekOfYear(p, 2)),
     '%': () => '%',
   };
   return format.replace(/%(.)/g, (whole, letter: string) => specifiers[letter]?.() ?? whole);
@@ -204,30 +253,36 @@ function dateFormat(p: Parts, format: string): string {
 /** Oracle / PostgreSQL TO_CHAR date patterns (the common subset). */
 function toChar(p: Parts, format: string): string {
   const h12 = p.H % 12 === 0 ? 12 : p.H % 12;
+  // Oracle and PostgreSQL read numeric fields case-insensitively; the spelling
+  // of a name field (MONTH / Month / month) decides its capitalization.
   const tokens: Array<[RegExp, () => string]> = [
-    [/^YYYY/, () => pad(p.y, 4)],
-    [/^YY/, () => pad(p.y % 100)],
+    [/^YYYY/i, () => pad(p.y, 4)],
+    [/^YY/i, () => pad(p.y % 100)],
     [/^MONTH/, () => MONTHS[p.m - 1].toUpperCase()],
     [/^Month/, () => MONTHS[p.m - 1]],
+    [/^month/, () => MONTHS[p.m - 1].toLowerCase()],
     [/^MON/, () => MONTHS[p.m - 1].slice(0, 3).toUpperCase()],
     [/^Mon/, () => MONTHS[p.m - 1].slice(0, 3)],
-    [/^MM/, () => pad(p.m)],
-    [/^DDD/, () => pad(dayOfYear(p), 3)],
-    [/^DD/, () => pad(p.d)],
+    [/^mon/, () => MONTHS[p.m - 1].slice(0, 3).toLowerCase()],
+    [/^MM/i, () => pad(p.m)],
+    [/^DDD/i, () => pad(dayOfYear(p), 3)],
+    [/^DD/i, () => pad(p.d)],
     [/^DAY/, () => DAYS[dayOfWeek(p)].toUpperCase()],
     [/^Day/, () => DAYS[dayOfWeek(p)]],
+    [/^day/, () => DAYS[dayOfWeek(p)].toLowerCase()],
     [/^DY/, () => DAYS[dayOfWeek(p)].slice(0, 3).toUpperCase()],
     [/^Dy/, () => DAYS[dayOfWeek(p)].slice(0, 3)],
-    [/^D/, () => String(dayOfWeek(p) + 1)],
-    [/^HH24/, () => pad(p.H)],
-    [/^HH12/, () => pad(h12)],
-    [/^HH/, () => pad(h12)],
-    [/^MI/, () => pad(p.M)],
-    [/^SS/, () => pad(p.S)],
-    [/^AM|^PM/, () => (p.H < 12 ? 'AM' : 'PM')],
-    [/^Q/, () => String(Math.ceil(p.m / 3))],
-    [/^WW/, () => pad(Math.ceil(dayOfYear(p) / 7))],
-    [/^IW/, () => pad(isoWeek(p))],
+    [/^dy/, () => DAYS[dayOfWeek(p)].slice(0, 3).toLowerCase()],
+    [/^D/i, () => String(dayOfWeek(p) + 1)],
+    [/^HH24/i, () => pad(p.H)],
+    [/^HH12/i, () => pad(h12)],
+    [/^HH/i, () => pad(h12)],
+    [/^MI/i, () => pad(p.M)],
+    [/^SS/i, () => pad(p.S)],
+    [/^AM|^PM/i, () => (p.H < 12 ? 'AM' : 'PM')],
+    [/^Q/i, () => String(Math.ceil(p.m / 3))],
+    [/^WW/i, () => pad(Math.ceil(dayOfYear(p) / 7))],
+    [/^IW/i, () => pad(isoWeek(p))],
   ];
   let out = '';
   let rest = format;
@@ -252,7 +307,8 @@ function toChar(p: Parts, format: string): string {
 function parseWithFormat(text: string, format: string): Parts | null {
   const fields: Record<string, number> = {};
   let i = 0;
-  const tokens = /%(.)|YYYY|YY|MM|DD|HH24|HH12|HH|MI|SS|Mon|MON|Month|MONTH/g;
+  // MySQL %x tokens are case-sensitive (%m is the month, %M its name); Oracle tokens are not.
+  const tokens = /%(.)|YYYY|YY|MM|DD|HH24|HH12|HH|MI|SS|MONTH|MON/gi;
   let last = 0;
   const literalMatches = (literal: string) => {
     if (text.slice(i, i + literal.length).toLowerCase() !== literal.toLowerCase()) return false;
@@ -340,7 +396,7 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   DAYOFWEEK: 'DAYOFWEEK(d) is MySQL (1 = Sunday); SQLite uses STRFTIME(\'%w\', d) + 1.',
   WEEKDAY: 'WEEKDAY(d) is MySQL (0 = Monday); SQLite uses (STRFTIME(\'%w\', d) + 6) % 7.',
   DAYOFYEAR: 'DAYOFYEAR(d) is MySQL; SQLite uses STRFTIME(\'%j\', d).',
-  WEEK: 'WEEK(d) is MySQL; SQLite uses STRFTIME(\'%W\', d).',
+  WEEK: 'WEEK(d) is MySQL (weeks start on Sunday, week 0 before the first Sunday); SQLite uses STRFTIME(\'%U\', d).',
   QUARTER: 'QUARTER(d) is MySQL; SQLite has no direct equivalent ((month + 2) / 3).',
   DAYNAME: 'DAYNAME(d) is MySQL; SQLite has no built-in day names.',
   MONTHNAME: 'MONTHNAME(d) is MySQL; SQLite has no built-in month names.',
@@ -357,6 +413,8 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   SUBDATE: 'SUBDATE is MySQL; SQLite spells it DATE(d, \'-n days\').',
   DATEADD: 'DATEADD(unit, n, d) is SQL Server; SQLite spells it DATE(d, \'+n unit\').',
   TIMESTAMPADD: 'TIMESTAMPADD(unit, n, d) is MySQL; SQLite spells it DATETIME(d, \'+n unit\').',
+  ADD_MONTHS: 'ADD_MONTHS(d, n) is Oracle; SQLite spells it DATE(d, \'+n months\').',
+  MONTHS_BETWEEN: 'MONTHS_BETWEEN(a, b) is Oracle; SQLite has no direct equivalent (subtract JULIANDAY values and divide by 30.44).',
   DATEPART: 'DATEPART(unit, d) is SQL Server; SQLite uses STRFTIME.',
   DATENAME: 'DATENAME(unit, d) is SQL Server; SQLite has no built-in names.',
   DATE_TRUNC: 'DATE_TRUNC(unit, d) is PostgreSQL; SQLite uses DATE(d, \'start of month\') and friends.',
@@ -382,7 +440,7 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   INITCAP: 'INITCAP(s) is Oracle / PostgreSQL; SQLite has no direct equivalent.',
   REGEXP_LIKE: 'REGEXP_LIKE is Oracle / MySQL 8; SQLite spells it s REGEXP pattern.',
   REGEXP: 'REGEXP is not built into SQLite; QueryTrace supplies a JavaScript implementation.',
-  MOD: 'MOD(a, b) is MySQL / Oracle; SQLite spells it a % b.',
+  MOD: 'MOD(a, b) is MySQL / Oracle; SQLite spells it a % b (whole numbers only).',
   CEILING: 'CEILING(x) is MySQL / SQL Server; SQLite spells it CEIL(x).',
   TRUNCATE: 'TRUNCATE(x, d) is MySQL; SQLite has no direct equivalent (use CAST or ROUND).',
   TRUNC: 'TRUNC(x) is Oracle / PostgreSQL; SQLite spells it CAST(x AS INTEGER).',
@@ -428,7 +486,10 @@ export function registerCompatFunctions(db: FunctionHost): void {
   dateFn('WEEKDAY', (p) => (dayOfWeek(p) + 6) % 7);
   dateFn('QT_DOW', (p) => dayOfWeek(p));
   dateFn('DAYOFYEAR', (p) => dayOfYear(p));
-  dateFn('WEEK', (p) => isoWeek(p));
+  define('WEEK', (value: Value, mode: Value) => {
+    const p = parts(value);
+    return p === null ? null : weekOfYear(p, num(mode) ?? 0);
+  });
   dateFn('QUARTER', (p) => Math.ceil(p.m / 3));
   dateFn('DAYNAME', (p) => DAYS[dayOfWeek(p)]);
   dateFn('MONTHNAME', (p) => MONTHS[p.m - 1]);
@@ -441,7 +502,9 @@ export function registerCompatFunctions(db: FunctionHost): void {
       case 'year': return p.y;
       case 'quarter': return Math.ceil(p.m / 3);
       case 'month': return p.m;
-      case 'week': return isoWeek(p);
+      // SQL Server's default DATEFIRST is Sunday, and January 1 always belongs to week 1.
+      case 'week': return Math.floor((dayOfYear(p) - 1 + new Date(Date.UTC(p.y, 0, 1)).getUTCDay()) / 7) + 1;
+      case 'weekday': return dayOfWeek(p) + 1;
       case 'day': return p.d;
       case 'hour': return p.H;
       case 'minute': return p.M;
@@ -473,6 +536,20 @@ export function registerCompatFunctions(db: FunctionHost): void {
   define('TO_CHAR', (value: Value, format: Value) => {
     const f = text(format);
     if (value === null) return null;
+    // A number with a numeric format model ('9999', 'FM9,990.00', '$999.99'): a date
+    // model always contains a letter other than FM / B / S / L / D / G / PR.
+    if (typeof value === 'number' && f !== null && /^(?:FM)?[$LB]?[0-9,.DGS]*[0-9][0-9,.DGS]*(?:PR|MI)?$/i.test(f)) {
+      const model = f.replace(/^FM/i, '').replace(/(?:PR|MI)$/i, '');
+      const currency = /^[$L]/i.test(model) ? '$' : '';
+      const digits = model.replace(/^[$LB]/i, '');
+      const decimalAt = digits.search(/[.D]/i);
+      const decimals = decimalAt === -1 ? 0 : digits.length - decimalAt - 1;
+      const grouped = /[,G]/i.test(digits.slice(0, decimalAt === -1 ? undefined : decimalAt));
+      const fixed = Math.abs(value).toFixed(decimals);
+      const [whole, fraction] = fixed.split('.');
+      const text = (grouped ? whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : whole) + (fraction ? `.${fraction}` : '');
+      return `${value < 0 ? '-' : ''}${currency}${text}`;
+    }
     const p = parts(value);
     if (p === null || f === null) return text(value);
     return toChar(p, f);
@@ -520,6 +597,28 @@ export function registerCompatFunctions(db: FunctionHost): void {
   define('DATE_SUB', add(-1));
   define('SUBDATE', add(-1));
   define('DATEADD', (unit: Value, n: Value, value: Value) => add(1)(value, n, unit));
+  define('ADD_MONTHS', (value: Value, n: Value) => {
+    const p = parts(value);
+    const count = num(n);
+    if (p === null || count === null) return null;
+    const out = addInterval(p, count, 'month');
+    // Oracle keeps a last-day input on the last day of the resulting month.
+    if (p.d === daysInMonth(p.y, p.m)) out.d = daysInMonth(out.y, out.m);
+    return formatLike(out);
+  });
+  define('MONTHS_BETWEEN', (a: Value, b: Value) => {
+    // Oracle: whole months when both dates share a day of month (or both end a month), else a 31-day fraction.
+    const pa = parts(a);
+    const pb = parts(b);
+    if (pa === null || pb === null) return null;
+    const months = (pa.y - pb.y) * 12 + (pa.m - pb.m);
+    const lastA = pa.d === daysInMonth(pa.y, pa.m);
+    const lastB = pb.d === daysInMonth(pb.y, pb.m);
+    if (pa.d === pb.d || (lastA && lastB)) return months;
+    const secondsA = pa.H * 3600 + pa.M * 60 + pa.S;
+    const secondsB = pb.H * 3600 + pb.M * 60 + pb.S;
+    return months + (pa.d - pb.d + (secondsA - secondsB) / 86_400) / 31;
+  });
   define('TIMESTAMPADD', (unit: Value, n: Value, value: Value) => add(1)(value, n, unit));
   define('DATEDIFF', (unit: Value, a: Value, b: Value) => {
     // SQL Server: DATEDIFF(unit, start, end) = end - start.
@@ -532,7 +631,7 @@ export function registerCompatFunctions(db: FunctionHost): void {
     const pa = parts(a);
     const pb = parts(b);
     const u = unitOf(unit);
-    return pa === null || pb === null || u === null ? null : diffUnits(pb, pa, u);
+    return pa === null || pb === null || u === null ? null : diffUnits(pb, pa, u, true);
   });
 
   // --- Strings -------------------------------------------------------------------

@@ -33,7 +33,7 @@ async function verifyConnections(page: Page) {
 }
 
 test('key wires use square bends and stay aligned with column borders when tables move', async ({ page }, testInfo) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.locator('.key-connection')).toHaveCount(3);
   await expect(page.locator('.key-connection[data-target-side="bottom"]').first()).toBeAttached();
   await verifyConnections(page);

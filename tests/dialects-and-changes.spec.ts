@@ -3,8 +3,19 @@ import { expect, test } from '@playwright/test';
 const editorFor = (page: import('@playwright/test').Page) => page.getByLabel('SQL query editor');
 const runButton = (page: import('@playwright/test').Page) => page.getByRole('button', { name: 'RUN', exact: true }).first();
 
+test('date compatibility functions keep correct week and month-end results in the browser worker', async ({ page }) => {
+  await page.goto('/trace');
+  await expect(runButton(page)).toBeEnabled();
+  await editorFor(page).fill("SELECT WEEK('2008-02-20', 1) AS week_number, WEEK('2000-01-01', 2) AS prior_year, DATEPART(week, '2023-01-01') AS first_week, ADD_MONTHS('2025-02-28', 1) AS month_end");
+  await runButton(page).click();
+  await expect(page.getByRole('tab').last()).toBeVisible();
+  await page.getByRole('tab').last().click();
+  const result = page.getByRole('table', { name: 'Query results' });
+  await expect(result.getByRole('cell')).toHaveText(['8', '52', '1', '2025-03-31']);
+});
+
 test('MySQL and SQL Server spellings run and are explained beside the result', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
   await editorFor(page).fill("SELECT TOP 3 `GIVEN_NAME`, YEAR('2026-03-12') AS yr FROM `ASTRONOMER` WHERE HOME_CITY ILIKE 'tucson' OR `HOME_CITY` <=> 'Flagstaff' ORDER BY GIVEN_NAME");
   await runButton(page).click();
@@ -26,7 +37,7 @@ test('MySQL and SQL Server spellings run and are explained beside the result', a
 });
 
 test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the applied change', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`
@@ -79,7 +90,7 @@ test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the a
 });
 
 test('a lesson restores the bundled rows after a data change in the same schema', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
   await editorFor(page).fill("DELETE FROM OBSERVATION WHERE ASTRONOMER_ID = 1");
   await runButton(page).click();
@@ -92,7 +103,7 @@ test('a lesson restores the bundled rows after a data change in the same schema'
 });
 
 test('a failing schema statement is reported and selected in place without closing the dialog', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   const ddl = page.getByLabel('Schema definition SQL');

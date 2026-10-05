@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('a pinned source stays highlighted through intermediate stages and hover previews', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByRole('button', { name: 'RUN', exact: true }).first()).toBeEnabled();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`
@@ -66,7 +66,7 @@ test('a pinned source stays highlighted through intermediate stages and hover pr
 });
 
 test('a pin outside the initial result window is revealed after joining, filtering and sorting', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByRole('button', { name: 'RUN', exact: true }).first()).toBeEnabled();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`

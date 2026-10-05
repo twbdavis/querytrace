@@ -55,7 +55,8 @@ const CAST_TYPES: Array<[RegExp, string | null]> = [
   [/^(?:INT2|INT4|INT8|SERIAL|BIGSERIAL|NUMBER\s*\(\s*\d+\s*\))$/i, 'INTEGER'],
   [/^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?(?:\s*\(\s*(?:\d+|MAX)\s*\))?$/i, 'TEXT'],
   [/^(?:N?TEXT|STRING|VARCHAR2(?:\s*\(\s*\d+(?:\s+(?:CHAR|BYTE))?\s*\))?|CITEXT|CLOB)$/i, 'TEXT'],
-  [/^(?:DECIMAL|DEC|NUMERIC|NUMBER|MONEY|SMALLMONEY)(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?$/i, 'NUMERIC'],
+  // Decimal casts divide like decimals; SQLite's NUMERIC would turn 24.00 into the integer 24.
+  [/^(?:DECIMAL|DEC|NUMERIC|NUMBER|MONEY|SMALLMONEY)(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?$/i, 'REAL'],
   [/^(?:FLOAT|FLOAT4|FLOAT8|DOUBLE(?:\s+PRECISION)?|REAL|BINARY_DOUBLE|BINARY_FLOAT)(?:\s*\(\s*\d+\s*\))?$/i, 'REAL'],
   [/^(?:BOOL|BOOLEAN|BIT)$/i, null],
 ];
@@ -100,6 +101,44 @@ function readInterval(text: string): { n: string; unit: string } | null {
   return n ? { n, unit } : null;
 }
 
+
+/**
+ * Rewrite CAST(x AS dialect-type) and CONVERT(...) into SQLite's four storage
+ * classes or its date functions. Shared by the query translator and the schema
+ * loader: CAST(N'1980-05-20' AS Date) in an SSMS export must become
+ * DATE('1980-05-20'), not SQLite's numeric cast of the text (1980).
+ */
+export function translateCasts(input: string, note: (from: string, to: string) => void = () => {}): string {
+  let sql = input;
+  sql = rewriteCalls(sql, ['CONVERT'], (call) => {
+    if (call.args.length === 1 && /^\s*[\s\S]+\s+USING\s+\w+\s*$/i.test(maskSql(call.inner))) {
+      note('CONVERT(x USING charset)', 'x');
+      return `(${call.inner.replace(/\s+USING\s+\w+\s*$/i, '').trim()})`;
+    }
+    if (call.args.length < 2 || call.args.length > 3) return null;
+    // SQL Server puts the type first; MySQL puts the value first.
+    const typeFirst = castTarget(call.args[0]) !== null && castTarget(call.args[1]) === null;
+    const value = typeFirst ? call.args[1] : call.args[0];
+    const type = typeFirst ? call.args[0] : call.args[1];
+    note(`CONVERT(${typeFirst ? `${type.trim()}, x` : `x, ${type.trim()}`})`, `CAST(x AS ${type.trim()})`);
+    return `CAST(${value.trim()} AS ${type.trim()})`;
+  });
+  sql = rewriteCalls(sql, ['CAST'], (call) => {
+    const match = maskSql(call.inner).match(/\s+AS\s+([\s\S]+)$/i);
+    if (!match || match.index === undefined) return null;
+    const expr = call.inner.slice(0, match.index).trim();
+    const typeText = call.inner.slice(match.index + match[0].length - match[1].length).trim();
+    if (/^(?:INTEGER|REAL|NUMERIC|TEXT|BLOB)$/i.test(typeText)) return null;
+    const target = castTarget(typeText);
+    if (!target) fail(`SQLite has no ${typeText} type. Cast to INTEGER, REAL, NUMERIC or TEXT instead.`);
+    const replacement =
+      'fn' in target ? `${target.fn}(${expr})` : 'passthrough' in target ? `(${expr})` : `CAST(${expr} AS ${target.sqlite})`;
+    note(`CAST(x AS ${typeText})`, replacement.replace(expr, 'x'));
+    return replacement;
+  });
+  return sql;
+}
+
 export function translateQuery(input: string): Translation {
   const notes: DialectNote[] = [];
   const seen = new Set<string>();
@@ -111,6 +150,14 @@ export function translateQuery(input: string): Translation {
   };
 
   let sql = normalizePastedText(input);
+
+  // SQL Server #temp tables, before # is read as a MySQL comment marker.
+  if (/\bINTO\s+#{1,2}\w+/i.test(sql)) {
+    fail('SELECT ... INTO #temp creates a temporary table in SQL Server. Trace the SELECT on its own here, or put the rows in a CTE: WITH temp AS (SELECT ...) SELECT ... FROM temp.');
+  }
+  if (/\b(?:FROM|JOIN|UPDATE|INTO)\s+#{1,2}\w+/i.test(sql)) {
+    fail('#temp tables are SQL Server session objects and do not exist here. Use a CTE (WITH name AS (SELECT ...)) or add the table to the schema script.');
+  }
 
   // --- Literals and comments ------------------------------------------------------
   if (/\\'/.test(sql) && hasUnterminatedLiteral(sql) && !hasUnterminatedLiteral(sql, { backslashEscapes: true })) {
@@ -132,8 +179,51 @@ export function translateQuery(input: string): Translation {
     sql = next;
     return changed;
   };
+  // A GO line pasted along with the query from SSMS is a batch separator, not SQL.
+  if (rewrite(/\s*\n\s*GO\s*;?\s*$/i, '')) note('GO', '(batch separator, dropped)');
   if (rewrite(/(?<![\w"`\]])N(?=')/g, '')) note("N'text'", "'text'");
   if (rewrite(/\b(?:DATE|TIME|TIMESTAMP)\s+(?=')/gi, '')) note("DATE '2024-01-01'", "'2024-01-01'");
+  // Date arithmetic with an unmistakable date operand: PostgreSQL and Oracle
+  // subtract two dates to a day count and add days to a date, while SQLite
+  // would subtract the numeric prefixes of the text ('2025-01-15' - '2025-01-01' = 0).
+  // A bare column (hired_on + 30) cannot be told from a number here and is left alone.
+  for (let guard = 0; guard < 100; guard++) {
+    const masked = maskSql(sql);
+    const isDateOperand = (text: string) =>
+      /^'\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?'$/.test(text) ||
+      /^(?:CURRENT_DATE|CURRENT_TIMESTAMP|SYSDATE)$/i.test(text) ||
+      /^(?:NOW|CURDATE|GETDATE|SYSDATETIME|DATE|DATETIME)\s*\(/i.test(text);
+    const isName = (text: string) => /^[A-Za-z_"`][\w."`]*$/.test(text) && !/^(?:INTERVAL|AND|OR|NOT|IS|IN|LIKE|BETWEEN|AS|FROM|WHERE)$/i.test(text);
+    const isInteger = (text: string) => /^-?\d+$/.test(text);
+    let done = true;
+    for (const op of masked.matchAll(/[+-]/g)) {
+      const at = op.index ?? 0;
+      const leftStart = operandStart(masked, at);
+      const rightEnd = operandEnd(masked, at + 1);
+      if (leftStart === at || rightEnd === at + 1) continue;
+      const left = sql.slice(leftStart, at).trim();
+      const right = sql.slice(at + 1, rightEnd).trim();
+      const sign = masked[at];
+      const leftDate = isDateOperand(left);
+      const rightDate = isDateOperand(right);
+      let replacement: string | null = null;
+      if (leftDate && isInteger(right)) {
+        replacement = `${sign === '-' ? 'DATE_SUB' : 'DATE_ADD'}(${left}, ${right}, 'DAY')`;
+        note(`date ${sign} n`, `${sign === '-' ? 'DATE_SUB' : 'DATE_ADD'}(date, n, 'DAY')`);
+      } else if (sign === '+' && rightDate && isInteger(left)) {
+        replacement = `DATE_ADD(${right}, ${left}, 'DAY')`;
+        note('n + date', "DATE_ADD(date, n, 'DAY')");
+      } else if (sign === '-' && ((leftDate && (rightDate || isName(right))) || (rightDate && isName(left)))) {
+        replacement = `DATEDIFF('day', ${right}, ${left})`;
+        note('date - date', "DATEDIFF('day', earlier, later) (SQLite would subtract the numbers inside the text)");
+      }
+      if (!replacement) continue;
+      sql = `${sql.slice(0, leftStart)}${replacement}${sql.slice(rightEnd)}`;
+      done = false;
+      break;
+    }
+    if (done) break;
+  }
   if (rewrite(/(?<![\w.])\.(?=\d)/g, '0.')) note('.5', '0.5');
 
   // --- Constructs SQLite cannot express -------------------------------------------
@@ -156,7 +246,7 @@ export function translateQuery(input: string): Translation {
   if (/\bOVER\s*\([^)]*\b(?:ROWS|RANGE|GROUPS)\s+(?:BETWEEN|UNBOUNDED|CURRENT|\d)/i.test(masked0)) {
     fail('Window frames (ROWS BETWEEN ...) are not supported in visual mode. Use OVER (PARTITION BY ... ORDER BY ...) without a frame.');
   }
-  if (/^\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\b[\s\S]*?\bINTO\s+(?:"[^"]*"|\w+)\s+FROM\b/i.test(masked0)) {
+  if (/^\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\b[\s\S]*?\bINTO\s+(?:"[^"]*"|#{0,2}\w+)\s+FROM\b/i.test(masked0)) {
     fail('SELECT ... INTO creates a table in SQL Server. Trace the SELECT on its own here; new tables belong in the schema script (SCHEMA button).');
   }
   if (/(?<![\w'"])@\w+/.test(masked0) || /:=/.test(masked0)) {
@@ -177,6 +267,47 @@ export function translateQuery(input: string): Translation {
   }
   if (/\bGROUP_CONCAT\s*\(\s*DISTINCT\b[^)]*\bSEPARATOR\b/i.test(masked0)) {
     fail('SQLite cannot combine DISTINCT with a custom separator in GROUP_CONCAT. Drop the SEPARATOR (SQLite uses a comma) or the DISTINCT.');
+  }
+  if (/\(\s*\+\s*\)/.test(masked0)) {
+    fail('The (+) outer-join marker is Oracle-only. Write LEFT JOIN table2 ON table1.column = table2.column instead.');
+  }
+  if (/\bARRAY\s*\[/i.test(masked0) || /\bARRAY_AGG\s*\(/i.test(masked0)) {
+    fail('Arrays are PostgreSQL-only. Compare with IN (a, b, c), and collect values with GROUP_CONCAT(column, \', \').');
+  }
+  if (/\bAGE\s*\(/i.test(masked0)) {
+    fail("AGE() is PostgreSQL-only. Use DATEDIFF('day', earlier, later) for a day count, or JULIANDAY(later) - JULIANDAY(earlier).");
+  }
+  if (/\b(?:UPDATE|DELETE)\s+TOP\s*\(/i.test(masked0)) {
+    fail('UPDATE / DELETE TOP (n) is SQL Server-only. Use WHERE key IN (SELECT key FROM table ORDER BY ... LIMIT n) to pick the rows.');
+  }
+  if (/^\s*UPDATE\s+(\w+)\s+SET\b[\s\S]*\bFROM\s+(?:"[^"]*"|\[[^\]]*\]|\w+)\s+(?:AS\s+)?\1\b/i.test(masked0)) {
+    fail('UPDATE alias SET ... FROM table alias is SQL Server-only. Write UPDATE table SET column = value FROM other WHERE table.key = other.key.');
+  }
+  if (/^\s*UPDATE\b[\s\S]*?\bJOIN\b[\s\S]*?\bSET\b/i.test(masked0)) {
+    fail('UPDATE ... JOIN ... SET is MySQL-only. Write UPDATE table SET ... WHERE key IN (SELECT key FROM other WHERE ...), or UPDATE table SET ... FROM other WHERE table.key = other.key.');
+  }
+  if (/^\s*DELETE\s+(?!FROM\b|TOP\b)(?:\w+\s*,\s*)*\w+(?:\s*\.\s*\*)?\s+FROM\b/i.test(masked0)) {
+    fail('DELETE alias FROM ... JOIN is MySQL-only. Write DELETE FROM table WHERE key IN (SELECT key FROM other WHERE ...).');
+  }
+  if (/^\s*DELETE\s+FROM\s+\S+(?:\s+(?:AS\s+)?\w+)?\s+USING\b/i.test(masked0)) {
+    fail('DELETE ... USING is PostgreSQL-only. Write DELETE FROM table WHERE key IN (SELECT key FROM other WHERE ...), or WHERE EXISTS (SELECT 1 FROM other WHERE ...).');
+  }
+  {
+    const kind0 = statementKind(sql);
+    if ((kind0 === 'update' || kind0 === 'delete') && topLevelMatches(masked0, /\b(?:ORDER\s+BY|LIMIT)\b/gi).length) {
+      fail('ORDER BY / LIMIT on UPDATE and DELETE is MySQL-only (SQLite needs a special build). Use WHERE key IN (SELECT key FROM table ORDER BY ... LIMIT n) to choose the rows.');
+    }
+  }
+  // SQL Server table hints change locking, not results.
+  if (rewrite(/\s+WITH\s*\(\s*(?:NOLOCK|READUNCOMMITTED|READCOMMITTED|REPEATABLEREAD|SERIALIZABLE|ROWLOCK|PAGLOCK|TABLOCK|TABLOCKX|UPDLOCK|XLOCK|HOLDLOCK|NOWAIT|READPAST|FORCESEEK|FORCESCAN)(?:\s*,\s*\w+)*\s*\)/gi, '')) {
+    note('WITH (NOLOCK)', '(no locking hints in a trace)');
+  }
+  // PostgreSQL regular-expression operators.
+  if (/(?<=[\w)'"\]]\s{0,8})!?~\*(?=\s*['(\w])/.test(masked0)) {
+    fail("The ~* operator (case-insensitive regular expression) is PostgreSQL-only. Use LOWER(column) REGEXP 'pattern' with a lower-case pattern.");
+  }
+  if (rewrite(/(?<=[\w)'"\]]\s{0,8})(!?)~(?=\s*['(\w])/g, (_, match) => (match[1] ? ' NOT REGEXP ' : ' REGEXP '))) {
+    note("column ~ 'pattern'", "column REGEXP 'pattern'");
   }
 
   // --- Whole-statement forms -------------------------------------------------------
@@ -199,11 +330,27 @@ export function translateQuery(input: string): Translation {
     note('OFFSET n ROWS', 'LIMIT -1 OFFSET n');
   }
   if (rewrite(/\bLIMIT\s+ALL\b/gi, '')) note('LIMIT ALL', '(no limit)');
+  {
+    // PostgreSQL allows OFFSET on its own; SQLite needs a LIMIT in front of it.
+    const masked = maskSql(sql);
+    if (topLevelMatches(masked, /\bLIMIT\b/gi).length === 0 && topLevelMatches(masked, /\bOFFSET\s+\d+/gi).length) {
+      rewrite(/\bOFFSET\s+(\d+)/i, (_, match) => `LIMIT -1 OFFSET ${match[1]}`);
+      note('OFFSET n', 'LIMIT -1 OFFSET n (SQLite needs a LIMIT before OFFSET)');
+    }
+  }
   if (rewrite(/^(\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\s+)ALL\b\s*/i, (original, match) => original.slice(0, match[1].length))) note('SELECT ALL', 'SELECT');
   if (rewrite(/\bFROM\s+DUAL\b/gi, '')) note('FROM DUAL', '(no FROM needed)');
   if (rewrite(/\s+FOR\s+(?:UPDATE|SHARE)(?:\s+(?:NOWAIT|SKIP\s+LOCKED))?\s*$/i, '')) note('FOR UPDATE', '(no row locking in a trace)');
   if (rewrite(/\bMINUS\b/gi, 'EXCEPT')) note('MINUS', 'EXCEPT');
-  if (rewrite(/^(\s*)TRUNCATE\s+(?:TABLE\s+)?/i, (_, match) => `${match[1]}DELETE FROM `)) note('TRUNCATE TABLE t', 'DELETE FROM t');
+  if (rewrite(/^(\s*)TRUNCATE\s+(?:TABLE\s+)?/i, (_, match) => `${match[1]}DELETE FROM `)) {
+    note('TRUNCATE TABLE t', 'DELETE FROM t');
+    // PostgreSQL options after the table name.
+    rewrite(/\s+(?:(?:RESTART|CONTINUE)\s+IDENTITY)(?:\s+(?:CASCADE|RESTRICT))?\s*;?\s*$|\s+(?:CASCADE|RESTRICT)\s*;?\s*$/i, '');
+  }
+  // SQL Server lets FROM be omitted: DELETE dbo.t WHERE ...
+  if (rewrite(/^(\s*)DELETE\s+(?!FROM\b|TOP\b)(?=(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+)\s*(?:\.|\s+WHERE\b|\s*;?\s*$))/i, (_, match) => `${match[1]}DELETE FROM `)) {
+    note('DELETE table', 'DELETE FROM table');
+  }
   if (rewrite(/^(\s*)INSERT\s+IGNORE\s+INTO\b/i, (_, match) => `${match[1]}INSERT OR IGNORE INTO`)) note('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO');
   if (rewrite(/^(\s*)REPLACE\s+INTO\b/i, (_, match) => `${match[1]}INSERT OR REPLACE INTO`)) note('REPLACE INTO', 'INSERT OR REPLACE INTO');
   if (rewrite(/^(\s*)INSERT\s+(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY)\s+INTO\b/i, (_, match) => `${match[1]}INSERT INTO`)) note('INSERT LOW_PRIORITY INTO', 'INSERT INTO');
@@ -217,6 +364,19 @@ export function translateQuery(input: string): Translation {
     )
   ) {
     note('schema.table', 'table (SQLite has a single schema)');
+  }
+  // PostgreSQL and Oracle alias the changed table without AS; SQLite needs the keyword.
+  if (
+    rewrite(
+      /^(\s*UPDATE(?:\s+OR\s+\w+)?\s+(?:"[^"]*"|`[^`]*`|\w+))\s+(?!AS\b|SET\b)(\w+)(?=\s+SET\b)/i,
+      (original, match) => `${original.slice(0, match[1].length)} AS ${match[2]}`
+    ) ||
+    rewrite(
+      /^(\s*DELETE\s+FROM\s+(?:"[^"]*"|`[^`]*`|\w+))\s+(?!AS\b|WHERE\b|RETURNING\b|INDEXED\b|NOT\b)(\w+)(?=\s*(?:WHERE\b|RETURNING\b|;|$))/i,
+      (original, match) => `${original.slice(0, match[1].length)} AS ${match[2]}`
+    )
+  ) {
+    note('UPDATE table t SET ...', 'UPDATE table AS t SET ...');
   }
   if (/^\s*INSERT\b[\s\S]*\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/i.test(maskSql(sql))) {
     const upsert = maskSql(sql).match(/\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/i)!;
@@ -240,7 +400,7 @@ export function translateQuery(input: string): Translation {
       }
     }
   }
-  if (rewrite(/^(\s*INSERT\b[^(]*?)\bVALUE\s*(?=\()/i, (original) => `${original.slice(0, -'VALUE'.length).trimEnd()} VALUES `)) note('VALUE (...)', 'VALUES (...)');
+  if (rewrite(/^(\s*INSERT\b[\s\S]*?)\bVALUE\s*(?=\()/i, (original, match) => `${original.slice(0, match[1].length).trimEnd()} VALUES `)) note('VALUE (...)', 'VALUES (...)');
   // Oracle row limiting: WHERE ROWNUM <= n on its own, or AND ROWNUM <= n at the end of a WHERE.
   {
     let limit: number | null = null;
@@ -273,6 +433,36 @@ export function translateQuery(input: string): Translation {
     note('CURRENT_DATE()', 'CURRENT_DATE (no parentheses)');
   }
 
+  // SQL Server joins strings with +; SQLite's + adds numbers. A + whose
+  // operand is a string literal, a string function, a text cast, or a value
+  // already joined with || becomes ||. (A chain resolves one + at a time.)
+  {
+    const STRING_FUNCTION = /^(?:UPPER|LOWER|UCASE|LCASE|LEFT|RIGHT|SUBSTRING|SUBSTR|MID|CONCAT|CONCAT_WS|TRIM|LTRIM|RTRIM|REPLACE|REVERSE|REPEAT|REPLICATE|LPAD|RPAD|INITCAP|FORMAT|STR|CHAR|NCHAR|CHR|SPACE|STUFF|TO_CHAR|DATE_FORMAT|DATENAME|MONTHNAME|DAYNAME|GROUP_CONCAT|STRING_AGG|QUOTENAME|TRANSLATE)\s*\(/i;
+    const TEXT_CAST = /^(?:CAST\s*\([\s\S]*\bAS\s+N?(?:VAR)?CHAR(?:ACTER)?\b|CONVERT\s*\(\s*N?(?:VAR)?CHAR(?:ACTER)?\b|CAST\s*\([\s\S]*\bAS\s+(?:N?TEXT|STRING)\s*\))/i;
+    const stringy = (text: string) => text.startsWith("'") || STRING_FUNCTION.test(text) || TEXT_CAST.test(text);
+    for (let guard = 0; guard < 200; guard++) {
+      const masked = maskSql(sql);
+      let found: number | null = null;
+      for (const plus of masked.matchAll(/\+/g)) {
+        const at = plus.index ?? 0;
+        const leftStart = operandStart(masked, at);
+        const rightEnd = operandEnd(masked, at + 1);
+        if (leftStart === at || rightEnd === at + 1) continue;
+        const left = sql.slice(leftStart, at).trim();
+        const right = sql.slice(at + 1, rightEnd).trim();
+        const joinedBefore = /\|\|\s*$/.test(masked.slice(0, leftStart));
+        const joinedAfter = /^\s*\|\|/.test(masked.slice(rightEnd));
+        if (stringy(left) || stringy(right) || joinedBefore || joinedAfter) {
+          found = at;
+          break;
+        }
+      }
+      if (found === null) break;
+      sql = `${sql.slice(0, found)}||${sql.slice(found + 1)}`;
+      note("'text' + column", "'text' || column (SQLite's + adds numbers)");
+    }
+  }
+
   // a DIV b (MySQL integer division)
   for (;;) {
     const masked = maskSql(sql);
@@ -297,8 +487,8 @@ export function translateQuery(input: string): Translation {
     if (leftStart === mod.index || rightEnd === mod.index + mod[0].length) fail('a MOD b could not be translated; write a % b instead.');
     const left = sql.slice(leftStart, mod.index).trim();
     const right = sql.slice(mod.index + mod[0].length, rightEnd).trim();
-    sql = `${sql.slice(0, leftStart)}(${left} % ${right})${sql.slice(rightEnd)}`;
-    note('a MOD b', 'a % b');
+    sql = `${sql.slice(0, leftStart)}MOD(${left}, ${right})${sql.slice(rightEnd)}`;
+    note('a MOD b', "MOD(a, b) (SQLite's a % b works on whole numbers only)");
   }
 
   // PostgreSQL casts: expr::type
@@ -362,7 +552,7 @@ export function translateQuery(input: string): Translation {
     const map: Record<string, string> = {
       YEAR: `YEAR(${expr})`, MONTH: `MONTH(${expr})`, DAY: `DAY(${expr})`, HOUR: `HOUR(${expr})`,
       MINUTE: `MINUTE(${expr})`, SECOND: `SECOND(${expr})`, DOW: `QT_DOW(${expr})`, DOY: `DAYOFYEAR(${expr})`,
-      WEEK: `WEEK(${expr})`, QUARTER: `QUARTER(${expr})`, EPOCH: `UNIXEPOCH(${expr})`, ISODOW: `(QT_DOW(${expr}) + 6) % 7 + 1`,
+      WEEK: `WEEK(${expr}, 3)`, QUARTER: `QUARTER(${expr})`, EPOCH: `UNIXEPOCH(${expr})`, ISODOW: `(QT_DOW(${expr}) + 6) % 7 + 1`,
     };
     const replacement = map[unit];
     if (!replacement) fail(`EXTRACT(${unit} FROM ...) is not supported. Use YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, WEEK, QUARTER or EPOCH.`);
@@ -416,32 +606,7 @@ export function translateQuery(input: string): Translation {
     return `${name}(${[...args, ...(separator !== null ? [separator] : [])].join(', ')})`;
   });
   if (rewrite(/\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\b[^)]*\)/gi, ')')) note('WITHIN GROUP (ORDER BY ...)', '(dropped)');
-  sql = rewriteCalls(sql, ['CONVERT'], (call) => {
-    if (call.args.length === 1 && /^\s*[\s\S]+\s+USING\s+\w+\s*$/i.test(maskSql(call.inner))) {
-      note('CONVERT(x USING charset)', 'x');
-      return `(${call.inner.replace(/\s+USING\s+\w+\s*$/i, '').trim()})`;
-    }
-    if (call.args.length < 2 || call.args.length > 3) return null;
-    // SQL Server puts the type first; MySQL puts the value first.
-    const typeFirst = castTarget(call.args[0]) !== null && castTarget(call.args[1]) === null;
-    const value = typeFirst ? call.args[1] : call.args[0];
-    const type = typeFirst ? call.args[0] : call.args[1];
-    note(`CONVERT(${typeFirst ? `${type.trim()}, x` : `x, ${type.trim()}`})`, `CAST(x AS ${type.trim()})`);
-    return `CAST(${value.trim()} AS ${type.trim()})`;
-  });
-  sql = rewriteCalls(sql, ['CAST'], (call) => {
-    const match = maskSql(call.inner).match(/\s+AS\s+([\s\S]+)$/i);
-    if (!match || match.index === undefined) return null;
-    const expr = call.inner.slice(0, match.index).trim();
-    const typeText = call.inner.slice(match.index + match[0].length - match[1].length).trim();
-    if (/^(?:INTEGER|REAL|NUMERIC|TEXT|BLOB)$/i.test(typeText)) return null;
-    const target = castTarget(typeText);
-    if (!target) fail(`SQLite has no ${typeText} type. Cast to INTEGER, REAL, NUMERIC or TEXT instead.`);
-    const replacement =
-      'fn' in target ? `${target.fn}(${expr})` : 'passthrough' in target ? `(${expr})` : `CAST(${expr} AS ${target.sqlite})`;
-    note(`CAST(x AS ${typeText})`, replacement.replace(expr, 'x'));
-    return replacement;
-  });
+  sql = translateCasts(sql, note);
   // T-SQL / MySQL unit keywords are bare words; quote them so they are not read as columns.
   sql = rewriteCalls(sql, ['DATEADD', 'DATEDIFF', 'DATEPART', 'DATENAME', 'TIMESTAMPDIFF', 'TIMESTAMPADD', 'DATE_TRUNC'], (call) => {
     if (!call.args.length) return null;
@@ -463,7 +628,7 @@ export function translateQuery(input: string): Translation {
   sql = rewriteCalls(sql, ['LPAD', 'RPAD'], (call) => (call.args.length === 2 ? `${call.name}(${call.args.join(', ')}, ' ')` : null));
   sql = rewriteCalls(sql, ['TO_CHAR', 'TO_DATE'], (call) => (call.args.length === 1 ? `${call.name}(${call.args[0]}, NULL)` : null));
   sql = rewriteCalls(sql, ['TRUNC'], (call) => (call.args.length === 1 ? `TRUNC(${call.args[0]}, 0)` : null));
-  sql = rewriteCalls(sql, ['WEEK'], (call) => (call.args.length === 2 ? `WEEK(${call.args[0]})` : null));
+  sql = rewriteCalls(sql, ['WEEK'], (call) => (call.args.length === 1 ? `WEEK(${call.args[0]}, 0)` : null));
   sql = rewriteCalls(sql, ['GREATEST', 'LEAST'], (call) => {
     const replacement = call.name.toUpperCase() === 'GREATEST' ? 'MAX' : 'MIN';
     note(`${call.name.toUpperCase()}(a, b)`, `${replacement}(a, b) (SQLite's multi-argument MAX / MIN)`);
@@ -471,9 +636,59 @@ export function translateQuery(input: string): Translation {
   });
   sql = rewriteCalls(sql, ['FORMAT'], (call) => {
     // MySQL FORMAT(x, decimals) vs SQLite FORMAT(printf-style, ...): a numeric second argument means MySQL.
-    if (call.args.length !== 2 || !/^\d+$/.test(call.args[1].trim())) return null;
-    note(`FORMAT(x, ${call.args[1].trim()})`, `PRINTF('%.${call.args[1].trim()}f', x)`);
-    return `PRINTF('%.${call.args[1].trim()}f', ${call.args[0].trim()})`;
+    if (call.args.length === 2 && /^\d+$/.test(call.args[1].trim())) {
+      note(`FORMAT(x, ${call.args[1].trim()})`, `PRINTF('%.${call.args[1].trim()}f', x)`);
+      return `PRINTF('%.${call.args[1].trim()}f', ${call.args[0].trim()})`;
+    }
+    // SQL Server FORMAT(value, '.NET pattern'): a quoted second argument without printf
+    // specifiers is a date pattern (yyyy-MM-dd) or a numeric pattern (N2, C, F0).
+    const pattern = call.args.length >= 2 ? call.args[1].trim().match(/^'([^']*)'$/) : null;
+    if (!pattern || pattern[1].includes('%')) return null;
+    const numeric = pattern[1].match(/^([NFC])(\d*)$/i);
+    if (numeric) {
+      const decimals = numeric[2] === '' ? 2 : Number(numeric[2]);
+      note(`FORMAT(x, '${pattern[1]}')`, `PRINTF('%.${decimals}f', x)`);
+      return `PRINTF('%.${decimals}f', ${call.args[0].trim()})`;
+    }
+    const DOTNET: Record<string, string> = {
+      yyyy: '%Y', yy: '%y', MMMM: '%M', MMM: '%b', MM: '%m', M: '%c', dddd: '%W', ddd: '%a', dd: '%d', d: '%e',
+      HH: '%H', H: '%k', hh: '%h', h: '%l', mm: '%i', ss: '%s', tt: '%p', fff: '%f',
+    };
+    if (!/yyyy|MM|dd|HH|hh|mm|ss/.test(pattern[1])) return null;
+    const converted = pattern[1].replace(/yyyy|yy|MMMM|MMM|MM|M|dddd|ddd|dd|d|HH|H|hh|h|mm|ss|tt|fff|%/g, (token) => (token === '%' ? '%%' : DOTNET[token] ?? token));
+    note(`FORMAT(d, '${pattern[1]}')`, `DATE_FORMAT(d, '${converted}')`);
+    return `DATE_FORMAT(${call.args[0].trim()}, '${converted}')`;
+  });
+  // Spellings of functions SQLite or the compatibility library already has under another name.
+  sql = rewriteCalls(sql, ['POW'], (call) => {
+    note('POW(x, y)', 'POWER(x, y)');
+    return `POWER(${call.inner})`;
+  });
+  sql = rewriteCalls(sql, ['TIME_FORMAT'], (call) => {
+    note('TIME_FORMAT(t, fmt)', 'DATE_FORMAT(t, fmt)');
+    return `DATE_FORMAT(${call.inner})`;
+  });
+  sql = rewriteCalls(sql, ['REPLICATE'], (call) => {
+    note('REPLICATE(s, n)', 'REPEAT(s, n)');
+    return `REPEAT(${call.inner})`;
+  });
+  sql = rewriteCalls(sql, ['DATE_PART'], (call) => {
+    if (call.args.length !== 2) return null;
+    note("DATE_PART('unit', d)", "DATEPART('unit', d)");
+    return `DATEPART(${call.inner})`;
+  });
+  // Oracle DECODE(expr, search1, result1, ..., default) is a CASE expression.
+  sql = rewriteCalls(sql, ['DECODE'], (call) => {
+    if (call.args.length < 3) return null;
+    const [subject, ...rest] = call.args.map((arg) => arg.trim());
+    const fallback = rest.length % 2 === 1 ? rest.pop() : null;
+    const branches: string[] = [];
+    for (let i = 0; i < rest.length; i += 2) {
+      const search = rest[i];
+      branches.push(/^NULL$/i.test(search) ? `WHEN ${subject} IS NULL THEN ${rest[i + 1]}` : `WHEN ${subject} = ${search} THEN ${rest[i + 1]}`);
+    }
+    note('DECODE(x, a, r1, b, r2, default)', 'CASE WHEN x = a THEN r1 WHEN x = b THEN r2 ELSE default END');
+    return `CASE ${branches.join(' ')}${fallback !== null && fallback !== undefined ? ` ELSE ${fallback}` : ''} END`;
   });
 
   // --- NULLS FIRST / LAST ---------------------------------------------------------------
@@ -519,7 +734,7 @@ export function translateQuery(input: string): Translation {
   // trace renders the specification back without it (tidyWindowSql).
   rewrite(/\bOVER\s*\(\s*(?!PARTITION\b)/gi, 'OVER (PARTITION BY NULL ');
 
-  return { sql: sql.trim(), notes };
+  return { sql: wrapIntegerCompatCalls(sql).trim(), notes };
 }
 
 /** Which kind of statement a query is, judged from its first keyword (comments skipped). */
@@ -549,7 +764,43 @@ export function splitCompound(sql: string): { branches: string[]; operators: str
   return { branches, operators };
 }
 
+/**
+ * Emulated functions that answer with a whole number. sql.js hands every
+ * JavaScript number to SQLite as a REAL, so YEAR(d) || '-' || MONTH(d) would
+ * read "2026.0-3.0"; the translator wraps these calls in CAST(... AS INTEGER)
+ * and the trace hides the wrapper again (tidyWindowSql).
+ */
+const INTEGER_COMPAT_FUNCTIONS = [
+  'YEAR', 'MONTH', 'DAY', 'DAYOFMONTH', 'HOUR', 'MINUTE', 'SECOND', 'DAYOFWEEK', 'WEEKDAY', 'QT_DOW', 'DAYOFYEAR',
+  'WEEK', 'QUARTER', 'DATEPART', 'DATEDIFF', 'TIMESTAMPDIFF', 'LEN', 'CHAR_LENGTH', 'CHARACTER_LENGTH', 'LOCATE',
+  'CHARINDEX', 'ASCII', 'CEILING', 'ISDATE',
+];
+
+function wrapIntegerCompatCalls(sql: string): string {
+  return rewriteCalls(sql, INTEGER_COMPAT_FUNCTIONS, (call) => `CAST(${call.text} AS INTEGER)`);
+}
+
+const INTEGER_CAST_PATTERN = new RegExp(String.raw`\bCAST\s*\(\s*(${INTEGER_COMPAT_FUNCTIONS.join('|')})\s*\(`, 'i');
+
 /** Render a window specification the way SQLite prints it, hiding the parser-only partition. */
 export function tidyWindowSql(sql: string): string {
   return sql.replace(/OVER \(PARTITION BY NULL\s*\)/g, 'OVER ()').replace(/OVER \(PARTITION BY NULL\s+/g, 'OVER (');
+}
+
+/** Display form of translated SQL: the integer wrappers around emulated functions are hidden. */
+export function tidyIntegerCasts(sql: string): string {
+  let text = sql;
+  for (;;) {
+    const masked = maskSql(text);
+    const match = masked.match(INTEGER_CAST_PATTERN);
+    if (!match || match.index === undefined) break;
+    const castOpen = masked.indexOf('(', match.index);
+    const callOpen = match.index + match[0].length - 1;
+    const callClose = matchingParen(masked, callOpen);
+    const castClose = matchingParen(masked, castOpen);
+    if (callClose === -1 || castClose === -1 || !/^\s*AS\s+INTEGER\s*$/i.test(masked.slice(callClose + 1, castClose))) break;
+    const start = castOpen + 1 + (masked.slice(castOpen + 1).match(/^\s*/)?.[0].length ?? 0);
+    text = text.slice(0, match.index) + text.slice(start, callClose + 1) + text.slice(castClose + 1);
+  }
+  return text;
 }

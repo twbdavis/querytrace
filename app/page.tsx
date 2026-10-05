@@ -1,252 +1,365 @@
-'use client';
+import Image from 'next/image';
+import Link from 'next/link';
+import { LESSONS, type Lesson } from '@/lib/lessons';
+import { schemaById } from '@/lib/schemas';
+import {
+  ColumnsIcon,
+  DatabaseIcon,
+  FilterIcon,
+  GroupIcon,
+  JoinIcon,
+  PlayIcon,
+  SortIcon,
+} from '@/components/Icons';
+import { HeroStage } from '@/components/landing/HeroStage';
+import { Reveal } from '@/components/landing/Reveal';
+import PoweredByPlatmatics from '@/components/badge/PoweredByPlatmatics';
+import provenanceCrop from '@/public/landing/provenance-crop.png';
+import schemaDialog from '@/public/landing/schema.png';
+import mobileJoin from '@/public/landing/mobile-join.png';
 
-import { useEffect, useState, type ReactNode } from 'react';
-import dynamic from 'next/dynamic';
-import { useAppStore } from '@/store/useAppStore';
-import { useMediaQuery } from '@/lib/useMediaQuery';
-import { TopBar } from '@/components/TopBar';
-import { PlaybackDock } from '@/components/PlaybackDock';
-import { BottomSheet } from '@/components/BottomSheet';
-import { ResultPanel } from '@/components/ResultPanel';
-import { SqlEditor } from '@/components/SqlEditor';
-import { HelpModal } from '@/components/HelpModal';
-import { LessonsModal } from '@/components/LessonsModal';
-import { SchemaModal } from '@/components/SchemaModal';
-import { TableIcon, TerminalIcon } from '@/components/Icons';
+const REPO_URL = 'https://github.com/twbdavis/querytrace';
 
-// React Flow is browser-only; skip SSR entirely.
-const SchemaCanvas = dynamic(
-  () => import('@/components/SchemaCanvas').then((m) => m.SchemaCanvas),
-  { ssr: false, loading: () => <PanelLoading label="loading canvas" /> }
-);
+const container = 'mx-auto w-full max-w-[1200px] px-5 sm:px-8';
 
-function PanelLoading({ label }: { label: string }) {
+const primaryCta =
+  'inline-flex h-11 cursor-pointer items-center justify-center gap-2 rounded-md bg-accent-active px-5 font-ui text-[13px] font-bold tracking-wide text-app transition-[background-color,transform] duration-200 hover:-translate-y-px hover:bg-accent-pulse active:translate-y-0 active:scale-[0.98]';
+const secondaryCta =
+  'inline-flex h-11 cursor-pointer items-center justify-center gap-2 rounded-md border border-line-strong px-5 font-ui text-[13px] font-bold tracking-wide text-ink transition-colors duration-200 hover:border-accent-active hover:text-accent-active active:scale-[0.98]';
+
+const STAGES = [
+  {
+    name: 'FROM',
+    Icon: DatabaseIcon,
+    tone: 'text-accent-active',
+    text: 'Every table the query names lights up. Their rows are the starting set; everything else dims.',
+  },
+  {
+    name: 'JOIN',
+    Icon: JoinIcon,
+    tone: 'text-accent-active',
+    text: 'Wires connect the key columns and matched rows light together. Outer joins keep the unmatched rows, dashed in gold.',
+  },
+  {
+    name: 'WHERE',
+    Icon: FilterIcon,
+    tone: 'text-accent-filter',
+    text: 'The columns the condition reads turn gold. Rows that fail drop out, so you can count exactly what survived.',
+  },
+  {
+    name: 'GROUP BY',
+    Icon: GroupIcon,
+    tone: 'text-accent-group',
+    text: 'Rows take the color of their bucket, then each bucket collapses into a single row. HAVING filters the buckets.',
+  },
+  {
+    name: 'SELECT',
+    Icon: ColumnsIcon,
+    tone: 'text-accent-result',
+    text: 'The kept columns turn mint and everything else falls away. Aliases and expressions are evaluated here.',
+  },
+  {
+    name: 'ORDER BY',
+    Icon: SortIcon,
+    tone: 'text-accent-active',
+    text: 'The result settles into its final order. Scrub back to any earlier stage and the rows are still there.',
+  },
+];
+
+const LESSON_SECTIONS: Lesson['section'][] = ['Foundations', 'Combining data'];
+
+function LessonLink({ lesson }: { lesson: Lesson }) {
+  const schemaName = schemaById(lesson.schemaId)?.name ?? lesson.schemaId;
   return (
-    <div className="flex h-full items-center justify-center font-data text-[11px] text-ink-mute">
-      {label}…
-    </div>
-  );
-}
-
-/** Slim rail on the left screen edge that re-opens the collapsed panel column. */
-function EdgeTab({
-  offsetClass,
-  label,
-  badge,
-  icon,
-  onClick,
-}: {
-  offsetClass: string;
-  label: string;
-  badge?: number;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={`Show ${label.toLowerCase()} panel`}
-      className={`absolute left-0 z-20 flex cursor-pointer flex-col items-center gap-1.5 rounded-r-md border border-l-0 border-line-strong bg-panel px-1.5 py-2.5 text-ink-dim transition-colors hover:border-accent-active hover:text-accent-active ${offsetClass}`}
+    <Link
+      href={`/trace?lesson=${lesson.id}`}
+      className="group flex min-h-11 items-center gap-3 rounded-md px-3 py-2 transition-colors hover:bg-panel focus-visible:bg-panel"
     >
-      {icon}
-      <span
-        className="font-ui text-[9px] font-bold tracking-[0.2em]"
-        style={{ writingMode: 'vertical-rl' }}
-      >
-        {label}
-      </span>
-      {badge !== undefined && (
-        <span className="rounded bg-accent-active/15 px-1 py-0.5 font-data text-[8px] tabular-nums text-accent-active">
-          {badge}
-        </span>
-      )}
-    </button>
+      <PlayIcon size={10} className="shrink-0 text-ink-mute transition-colors group-hover:text-accent-active" />
+      <span className="min-w-0 flex-1 font-ui text-[14px] leading-snug text-ink">{lesson.title}</span>
+      <span className="hidden shrink-0 font-data text-[10px] text-ink-mute sm:inline">{schemaName}</span>
+    </Link>
   );
 }
 
-/** Slim horizontal strip inside the panel column that restores a collapsed panel. */
-function RestoreBar({
-  label,
-  badge,
-  icon,
-  onClick,
-}: {
-  label: string;
-  badge?: number;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={`Show ${label.toLowerCase()} panel`}
-      className="flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-line-strong bg-panel px-3 text-ink-dim transition-colors hover:border-accent-active hover:text-accent-active"
-    >
-      {icon}
-      <span className="font-ui text-[9px] font-bold tracking-[0.2em]">{label}</span>
-      {badge !== undefined && (
-        <span className="ml-auto rounded bg-accent-active/15 px-1.5 py-0.5 font-data text-[9px] tabular-nums text-accent-active">
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
-const panelShell = 'flex flex-col overflow-hidden rounded-md border border-line-strong bg-panel';
-
-export default function Home() {
-  const dbReady = useAppStore((s) => s.dbReady);
-  const dbError = useAppStore((s) => s.dbError);
-  const init = useAppStore((s) => s.init);
-  const rowCount = useAppStore((s) => s.trace?.[s.currentStep]?.partialResult?.rows.length);
-  const [lessonsOpen, setLessonsOpen] = useState(false);
-  const [schemaOpen, setSchemaOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [queryOpen, setQueryOpen] = useState(true);
-  const [resultsOpen, setResultsOpen] = useState(true);
-  // Two UIs: a floating left column (query stacked over results) beside a
-  // full-bleed canvas (laptop and up), or a full-screen canvas with a stacked
-  // bottom sheet (anything narrower). Query and results are always visible
-  // together so the clause highlighting can be read against the arriving rows.
-  const isWide = useMediaQuery('(min-width: 1024px)');
-  const columnOpen = queryOpen || resultsOpen;
-
-  useEffect(() => {
-    // Let the shell/editor paint before compiling SQLite WASM. This keeps the
-    // app responsive on slower mobile Safari CPUs without delaying the data.
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => void init());
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (secondFrame) window.cancelAnimationFrame(secondFrame);
-    };
-  }, [init]);
-
-  if (dbError) {
-    return (
-      <main className="flex h-[100dvh] items-center justify-center sm:h-screen">
-        <div className="max-w-md rounded-md border-l-2 border border-accent-error/40 border-l-accent-error bg-accent-error/[0.08] p-6 font-data text-sm text-accent-error">
-          <div className="mb-2 font-bold">The in-browser database could not start</div>
-          <p className="mb-3">{dbError}</p>
-          <p className="text-[11px] text-accent-error/70">Reload the page to try again.</p>
-        </div>
-      </main>
-    );
-  }
-
+export default function LandingPage() {
   return (
     <>
-      <main className="flex h-[100dvh] flex-col overflow-hidden sm:h-screen">
-        <TopBar
-          onOpenSchema={() => setSchemaOpen(true)}
-          onOpenLessons={() => setLessonsOpen(true)}
-          onOpenHelp={() => setHelpOpen(true)}
-          // The query panel carries its own RUN; offer one up here while it is collapsed.
-          showRun={isWide && !queryOpen}
-        />
-
-        <div className="relative min-h-0 flex-1">
-          {!dbReady && (
-            <div
-              role="status"
-              className="pointer-events-none absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line-strong bg-panel px-3 py-1.5 font-ui text-[9px] font-bold tracking-[0.18em] text-ink-dim"
+      <header className="sticky top-0 z-40 border-b border-line/70 bg-app/85 backdrop-blur-md">
+        <nav className={`${container} flex h-16 items-center justify-between gap-6`} aria-label="Primary">
+          <Link href="/" className="shrink-0 font-ui text-sm font-bold tracking-[0.2em] text-ink">
+            QUERY<span className="text-accent-active">TRACE</span>
+          </Link>
+          <div className="hidden items-center gap-7 md:flex">
+            <a href="#stages" className="font-ui text-[13px] font-medium text-ink-dim transition-colors hover:text-ink">
+              How it works
+            </a>
+            <a href="#lessons" className="font-ui text-[13px] font-medium text-ink-dim transition-colors hover:text-ink">
+              Lessons
+            </a>
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-ui text-[13px] font-medium text-ink-dim transition-colors hover:text-ink"
             >
-              <span className="h-2.5 w-2.5 animate-spin rounded-full border border-line-strong border-t-accent-active" />
-              STARTING SQLITE
-            </div>
-          )}
-          {/* The schema owns the entire viewport; everything else floats. */}
-          <div className="absolute inset-0">
-            <SchemaCanvas />
+              GitHub
+            </a>
           </div>
+          <Link href="/trace" className={`${primaryCta} h-9 px-4 text-[12px]`}>
+            Open the tracer
+          </Link>
+        </nav>
+      </header>
 
-          {isWide && (
-            <>
-              {columnOpen && (
-                <div
-                  key="panel-column"
-                  className="panel-enter absolute bottom-2 left-2 top-2 z-20 flex w-[19rem] flex-col gap-2 xl:bottom-3 xl:left-3 xl:top-3 xl:w-[21rem] 2xl:w-[24rem]"
-                >
-                  {queryOpen ? (
-                    <section
-                      aria-label="SQL editor panel"
-                      className={`${panelShell} ${
-                        resultsOpen ? 'h-[42%] max-h-[420px] min-h-[200px]' : 'min-h-0 flex-1'
-                      }`}
-                    >
-                      <SqlEditor onCollapse={() => setQueryOpen(false)} />
-                    </section>
-                  ) : (
-                    <RestoreBar
-                      label="QUERY"
-                      icon={<TerminalIcon size={12} />}
-                      onClick={() => setQueryOpen(true)}
-                    />
-                  )}
-                  {resultsOpen ? (
-                    <section aria-label="Results panel" className={`${panelShell} min-h-0 flex-1`}>
-                      <ResultPanel onCollapse={() => setResultsOpen(false)} />
-                    </section>
-                  ) : (
-                    <RestoreBar
-                      label="RESULTS"
-                      badge={rowCount}
-                      icon={<TableIcon size={12} />}
-                      onClick={() => setResultsOpen(true)}
-                    />
-                  )}
+      <main id="main">
+        {/* ------------------------------------------------------------ hero */}
+        <section className="relative overflow-hidden">
+          <div className="hero-glow pointer-events-none absolute inset-0" aria-hidden="true" />
+          <div className={`${container} relative grid items-center gap-10 pb-16 pt-12 sm:pt-16 lg:grid-cols-12 lg:gap-8 lg:pb-24 lg:pt-20`}>
+            <div className="lg:col-span-5">
+              <h1
+                className="hero-in max-w-[14ch] font-ui text-[2.6rem] font-bold leading-[1.02] tracking-tight text-ink sm:text-5xl lg:text-[3.5rem]"
+                style={{ '--d': '0ms' } as React.CSSProperties}
+              >
+                See the query run.
+              </h1>
+              <p
+                className="hero-in mt-6 max-w-[42ch] font-ui text-base leading-relaxed text-ink-dim sm:text-lg"
+                style={{ '--d': '90ms' } as React.CSSProperties}
+              >
+                Joins pulse along foreign keys. Filtered rows fade. Groups collapse into results. Live tables in your
+                browser, nothing to install.
+              </p>
+              <div
+                className="hero-in mt-8 flex flex-col gap-3 sm:flex-row sm:items-center"
+                style={{ '--d': '160ms' } as React.CSSProperties}
+              >
+                <Link href="/trace" className={primaryCta}>
+                  <PlayIcon size={12} />
+                  Open the tracer
+                </Link>
+                <a href="#stages" className={secondaryCta}>
+                  How it works
+                </a>
+              </div>
+            </div>
+            <div className="lg:col-span-7 lg:-mr-16 xl:-mr-28">
+              <HeroStage />
+            </div>
+          </div>
+        </section>
+
+        {/* ---------------------------------------------------------- stages */}
+        <section id="stages" className="scroll-mt-20 border-t border-line/70">
+          <div className={`${container} py-20 lg:py-28`}>
+            <Reveal className="max-w-[60ch]">
+              <h2 className="font-ui text-3xl font-bold leading-tight tracking-tight text-ink sm:text-4xl">
+                Six stages. Every row accounted for.
+              </h2>
+              <p className="mt-4 font-ui text-base leading-relaxed text-ink-dim sm:text-lg">
+                A query is not one step. QueryTrace splits it into the stages the database actually runs, and shows
+                what each one keeps, drops, or builds.
+              </p>
+            </Reveal>
+            <ol className="mt-14 grid gap-x-10 gap-y-12 sm:grid-cols-2 lg:grid-cols-3">
+              {STAGES.map((stage, i) => (
+                <Reveal key={stage.name} delay={i * 60}>
+                  <li className="border-t border-line pt-5">
+                    <div className={`flex items-center gap-2.5 ${stage.tone}`}>
+                      <stage.Icon size={16} />
+                      <span className="font-data text-[13px] font-bold tracking-[0.12em]">{stage.name}</span>
+                    </div>
+                    <p className="mt-3 font-ui text-[15px] leading-relaxed text-ink-dim">{stage.text}</p>
+                  </li>
+                </Reveal>
+              ))}
+            </ol>
+          </div>
+        </section>
+
+        {/* ------------------------------------------------------ provenance */}
+        <section className="border-t border-line/70 bg-canvas">
+          <div className={`${container} grid items-center gap-12 py-20 lg:grid-cols-12 lg:gap-14 lg:py-28`}>
+            <Reveal className="lg:col-span-5">
+              <h2 className="font-ui text-3xl font-bold leading-tight tracking-tight text-ink sm:text-4xl">
+                Click a result. See where it came from.
+              </h2>
+              <p className="mt-4 max-w-[48ch] font-ui text-base leading-relaxed text-ink-dim sm:text-lg">
+                Pin any row in the result and every source row that produced it lights up in mint, across all the
+                tables and at every stage. Hover to preview, click to keep it.
+              </p>
+              <p className="mt-4 max-w-[48ch] font-ui text-base leading-relaxed text-ink-dim">
+                It works in reverse too: pin a row in a table and watch whether it survives the WHERE, which group it
+                lands in, and which result it ends up inside.
+              </p>
+            </Reveal>
+            <Reveal className="lg:col-span-7" delay={80}>
+              <Link
+                href="/trace"
+                aria-label="Open the tracer"
+                className="block overflow-hidden rounded-md border border-line-strong bg-canvas shadow-[0_30px_80px_-30px_rgba(9,13,24,0.9)] transition-colors hover:border-accent-active/70 focus-visible:border-accent-active"
+              >
+                <Image
+                  src={provenanceCrop}
+                  alt="The result panel with Beacon Theater pinned, and the VENUE and RESERVATION rows that produced it outlined in mint."
+                  sizes="(min-width: 1024px) 58vw, 100vw"
+                  className="h-auto w-full"
+                />
+              </Link>
+            </Reveal>
+          </div>
+        </section>
+
+        {/* --------------------------------------------------------- lessons */}
+        <section id="lessons" className="scroll-mt-20 border-t border-line/70">
+          <div className={`${container} py-20 lg:py-28`}>
+            <Reveal className="max-w-[60ch]">
+              <h2 className="font-ui text-3xl font-bold leading-tight tracking-tight text-ink sm:text-4xl">
+                Nineteen lessons, from SELECT to subqueries.
+              </h2>
+              <p className="mt-4 font-ui text-base leading-relaxed text-ink-dim sm:text-lg">
+                Each lesson loads a small database, runs one query, and suggests a change to try. Pick one and the
+                tracer opens with it already running.
+              </p>
+            </Reveal>
+            <div className="mt-12 grid gap-10 lg:grid-cols-2 lg:gap-14">
+              {LESSON_SECTIONS.map((section, si) => (
+                <Reveal key={section} delay={si * 80}>
+                  <h3 className="mb-3 px-3 font-ui text-[13px] font-bold text-ink-mute">{section}</h3>
+                  <div className="-mx-3 flex flex-col">
+                    {LESSONS.filter((l) => l.section === section).map((lesson) => (
+                      <LessonLink key={lesson.id} lesson={lesson} />
+                    ))}
+                  </div>
+                </Reveal>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ----------------------------------------------------------- bento */}
+        <section className="border-t border-line/70 bg-canvas">
+          <div className={`${container} py-20 lg:py-28`}>
+            <Reveal className="max-w-[60ch]">
+              <h2 className="font-ui text-3xl font-bold leading-tight tracking-tight text-ink sm:text-4xl">
+                Yours to run, anywhere.
+              </h2>
+            </Reveal>
+            <div className="mt-12 grid gap-4 md:grid-cols-12">
+              <Reveal className="md:col-span-7">
+                <div className="blueprint-grid flex h-full min-h-[280px] flex-col justify-end rounded-md border border-line-strong bg-app p-7 sm:p-9">
+                  <h3 className="font-ui text-2xl font-bold leading-tight tracking-tight text-ink sm:text-3xl">
+                    Nothing leaves this tab.
+                  </h3>
+                  <p className="mt-3 max-w-[46ch] font-ui text-[15px] leading-relaxed text-ink-dim">
+                    SQLite compiled to WebAssembly runs inside the page. No account, no server, no tracking. The code is
+                    open source under the MIT license.
+                  </p>
                 </div>
-              )}
-              {!columnOpen && (
-                <EdgeTab
-                  key="editor-tab"
-                  offsetClass="top-4"
-                  label="QUERY"
-                  icon={<TerminalIcon size={13} />}
-                  onClick={() => setQueryOpen(true)}
-                />
-              )}
-              {!columnOpen && (
-                <EdgeTab
-                  key="results-tab"
-                  offsetClass="top-36"
-                  label="RESULTS"
-                  badge={rowCount}
-                  icon={<TableIcon size={13} />}
-                  onClick={() => setResultsOpen(true)}
-                />
-              )}
-            </>
-          )}
+              </Reveal>
+              <Reveal className="md:col-span-5" delay={60}>
+                <div className="flex h-full flex-col overflow-hidden rounded-md border border-line-strong bg-panel">
+                  <div className="p-7">
+                    <h3 className="font-ui text-xl font-bold leading-tight tracking-tight text-ink">
+                      Bring your own schema.
+                    </h3>
+                    <p className="mt-2 font-ui text-[15px] leading-relaxed text-ink-dim">
+                      Paste CREATE TABLE and INSERT statements, or a Workbench export, and trace against your own
+                      data.
+                    </p>
+                  </div>
+                  <div className="relative mt-auto h-56 overflow-hidden border-t border-line">
+                    <Image
+                      src={schemaDialog}
+                      alt="The schema dialog listing five preloaded databases and a Build Your Own editor."
+                      sizes="(min-width: 768px) 40vw, 100vw"
+                      className="absolute left-5 top-5 w-[115%] max-w-none rounded-tl-md border-l border-t border-line-strong"
+                    />
+                  </div>
+                </div>
+              </Reveal>
+              <Reveal className="md:col-span-5" delay={40}>
+                <div className="flex h-full flex-col overflow-hidden rounded-md border border-line-strong bg-panel">
+                  <div className="relative order-2 h-80 overflow-hidden border-t border-line md:order-1 md:border-b md:border-t-0">
+                    <Image
+                      src={mobileJoin}
+                      alt="QueryTrace on a phone: the schema canvas on top with the playback dock, and the query sheet below."
+                      sizes="(min-width: 768px) 40vw, 100vw"
+                      className="absolute left-1/2 top-5 w-[62%] max-w-none -translate-x-1/2 rounded-t-xl border border-line-strong"
+                    />
+                  </div>
+                  <div className="order-1 p-7 md:order-2">
+                    <h3 className="font-ui text-xl font-bold leading-tight tracking-tight text-ink">Fits a phone.</h3>
+                    <p className="mt-2 font-ui text-[15px] leading-relaxed text-ink-dim">
+                      The canvas fills the screen and the query and results live in a sheet beneath it.
+                    </p>
+                  </div>
+                </div>
+              </Reveal>
+              <Reveal className="md:col-span-7" delay={100}>
+                <div className="flex h-full flex-col justify-end rounded-md border border-line-strong bg-panel p-7 sm:p-9">
+                  <h3 className="font-ui text-2xl font-bold leading-tight tracking-tight text-ink sm:text-3xl">
+                    Write it in your dialect.
+                  </h3>
+                  <p className="mt-3 max-w-[50ch] font-ui text-[15px] leading-relaxed text-ink-dim">
+                    MySQL, PostgreSQL, SQL Server and Oracle queries are translated to SQLite before they run, and the
+                    rewrite is shown under the editor so you learn both spellings.
+                  </p>
+                  <ul className="mt-6 flex flex-wrap gap-2" aria-label="Supported dialects">
+                    {['MySQL / MariaDB', 'PostgreSQL', 'SQL Server', 'Oracle', 'SQLite'].map((d) => (
+                      <li
+                        key={d}
+                        className="rounded-md border border-line px-2.5 py-1 font-data text-[11px] text-ink-dim"
+                      >
+                        {d}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </Reveal>
+            </div>
+          </div>
+        </section>
 
-          {/* Keep the dock centered in the canvas area left free by the column. */}
-          <PlaybackDock
-            leftClass={
-              isWide && columnOpen ? 'left-[20rem] xl:left-[22.5rem] 2xl:left-[25.5rem]' : 'left-0'
-            }
-          />
-        </div>
-
-        {!isWide && <BottomSheet editor={<SqlEditor bare />} results={<ResultPanel />} />}
-
-        <LessonsModal open={lessonsOpen} onClose={() => setLessonsOpen(false)} />
-        <SchemaModal open={schemaOpen} onClose={() => setSchemaOpen(false)} />
-        <HelpModal
-          open={helpOpen}
-          onClose={() => setHelpOpen(false)}
-          onOpenLessons={() => {
-            setHelpOpen(false);
-            setLessonsOpen(true);
-          }}
-          onOpenSchema={() => {
-            setHelpOpen(false);
-            setSchemaOpen(true);
-          }}
-        />
+        {/* ------------------------------------------------------- final cta */}
+        <section className="border-t border-line/70">
+          <div className={`${container} py-24 lg:py-32`}>
+            <Reveal className="flex flex-col items-start gap-8 lg:flex-row lg:items-end lg:justify-between">
+              <h2 className="max-w-[18ch] font-ui text-4xl font-bold leading-[1.05] tracking-tight text-ink sm:text-5xl">
+                Open the tracer and run a query.
+              </h2>
+              <Link href="/trace" className={`${primaryCta} h-12 px-6 text-sm`}>
+                <PlayIcon size={12} />
+                Open the tracer
+              </Link>
+            </Reveal>
+          </div>
+        </section>
       </main>
+
+      <footer className="border-t border-line/70">
+        <div className={`${container} flex flex-col gap-4 py-8 text-[12px] text-ink-mute sm:flex-row sm:items-center sm:justify-between`}>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <span className="font-ui font-bold tracking-[0.2em] text-ink-dim">
+              QUERY<span className="text-accent-active">TRACE</span>
+            </span>
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-ui transition-colors hover:text-ink"
+            >
+              Source on GitHub
+            </a>
+            <span className="font-ui">MIT license</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <PoweredByPlatmatics site="querytrace.net" variant="inline" />
+            <span className="font-ui">&copy; {new Date().getFullYear()} QueryTrace</span>
+          </div>
+        </div>
+      </footer>
     </>
   );
 }

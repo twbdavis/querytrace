@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('large results keep a bounded DOM and preserve row tracing across scroll windows', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByRole('button', { name: 'RUN', exact: true }).first()).toBeEnabled();
   await page.getByRole('button', { name: 'Open schema settings' }).click();
   await page.getByLabel('Schema definition SQL').fill(`
@@ -34,7 +34,7 @@ test('large results keep a bounded DOM and preserve row tracing across scroll wi
 });
 
 test('join motion stops when paused and respects reduced motion', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/trace');
   await expect(page.getByRole('button', { name: 'RUN', exact: true }).first()).toBeEnabled();
   const editor = page.getByLabel('SQL query editor');
   await editor.fill('SELECT a.GIVEN_NAME FROM ASTRONOMER a JOIN OBSERVATION o ON a.ASTRONOMER_ID = o.ASTRONOMER_ID');
