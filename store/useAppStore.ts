@@ -1,5 +1,6 @@
 'use client';
 
+import { emptyRecord, ownValue } from '@/lib/records';
 import { create } from 'zustand';
 import type { TableData } from '@/lib/db';
 import type { DialectNote } from '@/lib/dialect';
@@ -39,6 +40,8 @@ interface AppState {
   dbError: string | null;
 
   schemaDef: SchemaDef;
+  /** A successful reload replaces geometry and relationships, even with identical table names. */
+  schemaRevision: number;
   savedCustomSchema: SchemaDef | null;
   savedCustomDatabase: Uint8Array | null;
   /** Schema SQL being edited in the builder; survives closing the dialog and reloads. */
@@ -105,6 +108,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dbError: null,
 
   schemaDef: PRELOADED_SCHEMAS[0],
+  schemaRevision: 0,
   savedCustomSchema: null,
   savedCustomDatabase: null,
   customDdlDraft: null,
@@ -175,6 +179,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         dbReady: true,
         dbError: null,
         schemaDef: def,
+        schemaRevision: previous.schemaRevision + 1,
         schema,
         fkEdges,
         tableData,
@@ -241,6 +246,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   runQuery: async (sqlArg) => {
     const generation = ++queryRunGeneration;
     const sql = sqlArg ?? get().sql;
+    const schemaAtDispatch = get().schemaRevision;
+    const isCustom = get().schemaDef.id === 'custom';
     if (!get().dbReady) {
       set({ error: 'SQLite is still starting. Try again in a moment.', playing: false });
       return;
@@ -255,8 +262,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ playing: false });
     try {
       const { trace, notes, mutation } = await runQueryInWorker(sql);
-      if (generation !== queryRunGeneration) return;
-      const isCustom = get().schemaDef.id === 'custom';
+      const mutationState = mutation ? {
+        tableData: mutation.tableData,
+        ...(mutation.schema ? { schema: mutation.schema, fkEdges: mutation.fkEdges ?? [] } : {}),
+        dataModified: !isCustom,
+        ...(isCustom && mutation.databaseBytes ? { savedCustomDatabase: mutation.databaseBytes } : {}),
+      } : {};
+      if (generation !== queryRunGeneration) {
+        // Editing cancels an obsolete teaching trace, not an acknowledged
+        // database write. Retain the write without replacing the new text or
+        // a different schema that has already finished loading.
+        if (mutation && get().schemaRevision === schemaAtDispatch) {
+          set(mutationState);
+          if (isCustom) await persistCurrentState();
+        }
+        return;
+      }
       set({
         trace,
         notes,
@@ -268,14 +289,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         selection: null,
         hoveredRow: null,
         hoveredResultRow: null,
-        ...(mutation
-          ? {
-              tableData: mutation.tableData,
-              dataModified: !isCustom,
-              // A custom schema keeps its edits: the saved database now holds them.
-              ...(isCustom && mutation.databaseBytes ? { savedCustomDatabase: mutation.databaseBytes } : {}),
-            }
-          : {}),
+        ...mutationState,
       });
       if (mutation && isCustom) await persistCurrentState();
     } catch (err) {
@@ -357,7 +371,7 @@ export function displayRowLabel(table: string, rid: number): string {
   const { schema, tableData, trace, currentStep } = useAppStore.getState();
   const meta = schema.find((t) => t.name === table);
   // While a data change shows the "before" state, label rows from that snapshot.
-  const data = trace?.[currentStep]?.tableSnapshots?.[table] ?? tableData[table];
+  const data = ownValue(trace?.[currentStep]?.tableSnapshots, table) ?? ownValue(tableData, table);
   const pkIndices = meta
     ? meta.columns.map((column, index) => (column.pk ? index : -1)).filter((index) => index >= 0)
     : [];
@@ -418,7 +432,7 @@ function selectHighlight(state: AppState): Highlight | null {
     const pinned = selectPinnedHighlight(state);
     let preview: Provenance | null = null;
     if (hoveredResultRow !== null && step.resultRowSources?.[hoveredResultRow]) {
-      const rows: Record<string, Set<number>> = {};
+      const rows: Record<string, Set<number>> = emptyRecord();
       for (const [table, rids] of Object.entries(step.resultRowSources[hoveredResultRow])) {
         if (rids.length) rows[table] = new Set(rids);
       }
@@ -428,7 +442,7 @@ function selectHighlight(state: AppState): Highlight | null {
     }
     const base = pinned ?? preview;
     if (!base) return null;
-    const rows = { ...base.rows };
+    const rows = Object.assign(emptyRecord<Set<number>>(), base.rows);
     const resultRows = new Set(base.resultRows);
     if (pinned && preview) {
       for (const [table, rids] of Object.entries(preview.rows)) {

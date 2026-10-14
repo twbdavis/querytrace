@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 interface RevealProps {
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
   /** Stagger offset in ms, applied as a transition delay. */
   delay?: number;

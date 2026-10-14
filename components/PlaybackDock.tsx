@@ -32,6 +32,7 @@ const STAGE_META: Record<string, { short: string; Icon: ComponentType<{ size?: n
   select: { short: 'SELECT', Icon: ColumnsIcon },
   orderLimit: { short: 'ORDER', Icon: SortIcon },
   modify: { short: 'APPLY', Icon: EditIcon },
+  create: { short: 'CREATE', Icon: DatabaseIcon },
 };
 
 /** Narration stage badge, tinted by the stage's role accent. */
@@ -46,6 +47,7 @@ const STAGE_BADGE: Record<string, string> = {
   select: 'border-accent-result text-accent-result',
   orderLimit: 'border-line-strong text-ink-dim',
   modify: 'border-accent-result text-accent-result',
+  create: 'border-accent-result text-accent-result',
 };
 
 const SPEEDS: Speed[] = [0.5, 1, 2];

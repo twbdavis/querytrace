@@ -161,6 +161,7 @@ export function assignQueryRanges(steps: TraceStep[], sql: string): void {
       case 'subquery':
       case 'union':
       case 'modify':
+      case 'create':
         step.queryRange = { start: 0, end: sql.length };
         break;
       case 'orderLimit':

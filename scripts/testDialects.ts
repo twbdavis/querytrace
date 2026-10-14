@@ -117,6 +117,12 @@ async function main() {
     import('./dialectCases/queries'),
     import('./dialectCases/pasted'),
     import('./dialectCases/final'),
+    import('./dialectCases/edgeRuntime'),
+    import('./dialectCases/edgeMysql'),
+    import('./dialectCases/edgePostgres'),
+    import('./dialectCases/edgeAggregates'),
+    import('./dialectCases/releasePostgres'),
+    import('./dialectCases/releaseMysql'),
   ]);
   for (const module of modules) for (const p of module.PROBES) await runSchema(p.def, p.label, p.cases);
   console.log(`\n=== ${pass} passed, ${fail} failed`);

@@ -1,3 +1,4 @@
+import { emptyRecord, ownValue } from './records';
 import type { TraceStep } from './traceEngine';
 
 type SourceIndex = Map<string, Map<number, number[]>>;
@@ -25,7 +26,7 @@ function indexFor(step: TraceStep): ProvenanceIndex {
   const index: ProvenanceIndex = { tuples: new Map(), results: new Map() };
   step.tuples?.forEach((tuple, position) => {
     for (const [alias, rid] of Object.entries(tuple)) {
-      if (rid !== null) add(index.tuples, step.tupleTables?.[alias] ?? alias, rid, position);
+      if (rid !== null) add(index.tuples, ownValue(step.tupleTables, alias) ?? alias, rid, position);
     }
   });
   step.resultRowSources?.forEach((sources, position) => {
@@ -48,9 +49,10 @@ export function provenanceFor(
   table: string,
   rid: number
 ): { rows: Record<string, Set<number>>; resultRows: Set<number> } {
-  const rows: Record<string, Set<number>> = { [table]: new Set([rid]) };
+  const rows = emptyRecord<Set<number>>();
+  rows[table] = new Set([rid]);
   const index = indexFor(step);
-  const tableOf = (alias: string) => step.tupleTables?.[alias] ?? alias;
+  const tableOf = (alias: string) => ownValue(step.tupleTables, alias) ?? alias;
   for (const position of index.tuples.get(table)?.get(rid) ?? []) {
     const tuple = step.tuples![position];
     for (const [alias, relatedRid] of Object.entries(tuple)) {

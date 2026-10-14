@@ -15,7 +15,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CI: true
       NEXT_TELEMETRY_DISABLED: 1
@@ -33,23 +33,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
+      - name: Audit dependencies with strict production checks and expiring build-only exception
+        run: npm run audit:release
 
-      - name: Type-check
-        run: npm run typecheck
-
-      - name: Test SQL tracing
-        run: npm run test:trace
-
-      - name: Test key routes
-        run: npm run test:routes
-
-      - name: Fuzz the trace engine against SQLite
-        run: npm run test:fuzz
-
-      - name: Build production application
-        run: npm run build
+      - name: Run complete release checks and production build
+        run: npm run check
 
       - name: Install browser engines
         run: npx playwright install --with-deps chromium firefox webkit

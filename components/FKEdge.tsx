@@ -1,12 +1,12 @@
 'use client';
 
-import { memo, useMemo, type CSSProperties } from 'react';
+import { memo, type CSSProperties } from 'react';
 import { BaseEdge, type EdgeProps } from '@xyflow/react';
 import { useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
 import { useDocumentVisible } from '@/lib/useDocumentVisible';
-import { routeKeys, type KeySide } from '@/lib/keyRoutes';
-import { useTableBounds } from '@/lib/useTableBounds';
+import type { KeySide } from '@/lib/keyRoutes';
+import { useKeyRoutes } from '@/lib/useKeyRoutes';
 
 /**
  * Column handles supply the horizontal alignment. Project those anchors to
@@ -21,11 +21,6 @@ function FKEdgeInner({
   id,
   source,
   target,
-  data,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
   sourceHandleId,
   targetHandleId,
 }: EdgeProps) {
@@ -34,17 +29,14 @@ function FKEdgeInner({
   const speed = useAppStore((s) => s.speed);
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   const visible = useDocumentVisible();
-  const bounds = useTableBounds();
-  const lane = typeof data?.lane === 'number' ? data.lane : 0;
-  const route = useMemo(() => routeKeys(
-    bounds.find((box) => box.id === source) ?? { id: source, x: sourceX, y: sourceY, width: 0, height: 0 },
-    bounds.find((box) => box.id === target) ?? { id: target, x: targetX, y: targetY, width: 0, height: 0 },
-    sourceX, targetX, bounds, lane
-  ), [bounds, source, target, sourceX, sourceY, targetX, targetY, lane]);
+  const routes = useKeyRoutes();
+  const route = routes.get(id);
+  if (!route) return null;
   const { path, points } = route;
   const start = points[0];
   const end = points[points.length - 1];
   const label = `${source}.${sourceHandleId} → ${target}.${targetHandleId}`;
+  if (!path) return null;
 
   return (
     <g

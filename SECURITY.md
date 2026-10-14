@@ -16,8 +16,11 @@ Anything imported into a browser remains subject to that browser's security and
 local device access. Prefer fictional data for teaching and shared demonstrations.
 
 Schema import supports the validated construction and editing subset described in
-[Architecture](docs/architecture.md). Visual queries are read-only. Dialect
-translation does not make arbitrary SQL scripts universally supported.
+[Architecture](docs/architecture.md). The visual query editor supports SELECT,
+INSERT, UPDATE, DELETE, CREATE TABLE and CREATE INDEX. Data changes run inside
+the browser worker, and custom database changes are saved locally. Rejected
+changes are rolled back. Dialect translation does not make arbitrary SQL scripts
+universally supported.
 
 ## Delivery controls
 
@@ -30,6 +33,30 @@ The policy allows inline framework scripts/styles and WebAssembly compilation.
 These are compatibility tradeoffs, not a guarantee against browser or supply-chain
 vulnerabilities. CI audits npm dependencies and runs tracing and browser checks.
 Dependency-update workflows and pinned Actions help keep the delivery chain current.
+
+## Build tooling advisories
+
+The Tailwind 3 development dependency chain currently includes `braces` 3.0.3,
+affected by [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
+No patched upstream version was available when reviewed on October 14, 2026.
+This also appears as findings against chokidar, micromatch, fast-glob and
+Tailwind. These packages read the repository's fixed content globs and trusted
+source files during development/build; visitors' SQL and schema data are never
+passed to them. Malicious repository or build configuration changes can still
+exhaust build resources, so untrusted contributions require review.
+
+The selector parser is overridden to patched `postcss-selector-parser` 7.1.6
+without migrating Tailwind to a new major version. Changes to that override
+require production CSS and browser verification. Production dependency auditing
+must remain strict; development-only exceptions must identify the exact advisory,
+affected paths, review rationale and expiry rather than suppress all audit errors.
+
+`npm run audit:release` enforces zero reported production vulnerabilities and
+temporarily permits only that advisory through the exact reviewed development
+versions and paths in `scripts/dependencyAuditPolicy.mjs`. The exception expires
+November 14, 2026. New advisories, production exposure, changed versions or paths,
+critical severity, and expiry fail CI. The exception is a documented build risk,
+not a claim that a full `npm audit` is clean.
 
 ## Out of scope
 

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('loads, edits, and traces without browser or policy errors', async ({ page }) => {
+test('loads, edits, and traces without browser or policy errors', async ({ page, baseURL }) => {
   const issues: string[] = [];
   const externalRequests: string[] = [];
   page.on('console', (message) => {
@@ -12,7 +12,7 @@ test('loads, edits, and traces without browser or policy errors', async ({ page 
   });
   page.on('request', (request) => {
     const url = new URL(request.url());
-    if (url.protocol.startsWith('http') && url.origin !== 'http://127.0.0.1:3100') {
+    if (url.protocol.startsWith('http') && url.origin !== new URL(baseURL!).origin) {
       externalRequests.push(request.url());
     }
   });

@@ -6,15 +6,11 @@ import { useMediaQuery } from '@/lib/useMediaQuery';
 import type { TraceStep } from '@/lib/traceEngine';
 import { rowStates, surfaces } from '@/styles/theme';
 import { CheckIcon } from './Icons';
+import { formatValue } from '@/lib/formatValue';
+import { widestTableValues } from '@/lib/tableRowWindow';
 
 const TRANSPARENT = 'rgba(0, 0, 0, 0)';
 const OVERSCAN = 8;
-
-function fmt(value: unknown): string {
-  if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'number' && !Number.isInteger(value)) return value.toFixed(2);
-  return String(value);
-}
 
 const ResultRow = memo(function ResultRow({ row, index, sources, highlighted, animate, virtual }: {
   row: unknown[];
@@ -49,7 +45,7 @@ const ResultRow = memo(function ResultRow({ row, index, sources, highlighted, an
           {ci === 0 && highlighted && (
             <CheckIcon size={11} strokeWidth={3} className="absolute left-1 top-1/2 -translate-y-1/2 text-accent-result" />
           )}
-          {fmt(value)}
+          {formatValue(value)}
         </td>
       ))}
     </tr>
@@ -73,6 +69,12 @@ export function ResultTable({ result, sources }: {
   const viewport = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: 32 });
   const [entering, setEntering] = useState(playing);
+  const [fontsReady, setFontsReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void document.fonts.ready.then(() => { if (active) setFontsReady(true); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (viewport.current) viewport.current.scrollTop = 0;
@@ -127,14 +129,19 @@ export function ResultTable({ result, sources }: {
     }
   }, [result, pinned, firstPinned, rowHeight]);
 
-  // Keep column widths stable across windows. Scan text lengths once per result
-  // instead of mounting thousands of cells to measure their widths.
+  // Keep column widths stable across windows, including non-Latin fallback
+  // glyphs whose pixel width cannot be predicted from string length.
   const widths = useMemo(() => {
     if (!virtual) return [];
-    const lengths = columns.map((column) => column.length);
-    for (const row of rows) row.forEach((value, i) => { lengths[i] = Math.max(lengths[i], fmt(value).length); });
-    return lengths;
-  }, [columns, rows, virtual]);
+    const context = document.createElement('canvas').getContext('2d');
+    const family = getComputedStyle(document.body).getPropertyValue('--font-data');
+    const font = `${compact ? 12 : 11.5}px ${family || 'ui-monospace'}, monospace`;
+    if (context) context.font = `bold ${font}`;
+    const headers = columns.map((column) => context?.measureText(column).width ?? column.length * 8);
+    if (context) context.font = font;
+    const measure = (text: string) => context?.measureText(text).width ?? text.length * 8;
+    return widestTableValues(rows, columns.length, formatValue, measure).map((text, i) => Math.max(headers[i], measure(text)));
+  }, [columns, rows, virtual, compact, fontsReady]);
   const start = virtual ? range.start : 0;
   const end = virtual ? Math.min(range.end, rows.length) : rows.length;
   const spacer = (height: number) => (
@@ -147,9 +154,9 @@ export function ResultTable({ result, sources }: {
         aria-label="Query results"
         aria-rowcount={virtual ? rows.length + 1 : undefined}
         className="w-full border-collapse font-data text-[11.5px] max-sm:min-w-max max-sm:text-xs"
-        style={virtual ? { tableLayout: 'fixed', minWidth: `calc(${widths.reduce((sum, width) => sum + width, 0)}ch + ${columns.length * 16 + 16}px)` } : undefined}
+        style={virtual ? { tableLayout: 'fixed', minWidth: widths.reduce((sum, width) => sum + width, 0) + columns.length * 16 + 16 } : undefined}
       >
-        {virtual && <colgroup>{widths.map((width, i) => <col key={i} style={{ width: `calc(${width}ch + ${i === 0 ? 32 : 16}px)` }} />)}</colgroup>}
+        {virtual && <colgroup>{widths.map((width, i) => <col key={i} style={{ width: width + (i === 0 ? 32 : 16) }} />)}</colgroup>}
         <thead className="sticky top-0 z-10">
           <tr className="result-data-row" aria-rowindex={virtual ? 1 : undefined}>
             {columns.map((column, i) => <th key={i} className={`whitespace-nowrap border-b border-line-strong bg-node-header px-1.5 py-1 text-left font-bold text-ink-dim ${i === 0 ? 'pl-6' : ''}`}>{column}</th>)}

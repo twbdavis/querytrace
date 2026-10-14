@@ -94,7 +94,7 @@ const structuredData = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${ui.variable} ${data.variable}`}>
+    <html lang="en" className={`dark ${ui.variable} ${data.variable}`} suppressHydrationWarning>
       <body className="bg-app font-ui text-ink antialiased">
         <script
           type="application/ld+json"

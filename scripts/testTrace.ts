@@ -580,7 +580,7 @@ async function main() {
         PRIMARY KEY (\`customer_id\`),
         UNIQUE KEY \`uq_company\` (\`company_name\`),
         KEY \`idx_tier\` (\`tier\`)
-      ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Engine=Fake; still a comment';
+      ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Engine=Fake; still a comment';
       CREATE TABLE equipment (
         equipment_id INT PRIMARY KEY,
         customer_id INT UNSIGNED,
@@ -771,7 +771,7 @@ async function main() {
 
     // phpMyAdmin adds AUTO_INCREMENT after the fact; the column's final definition folds into CREATE TABLE.
     const modified = prepareCustomDdl('CREATE TABLE t (\n  `id` int(11) NOT NULL,\n  `n` INT\n);\nALTER TABLE `t` ADD PRIMARY KEY (`id`);\nALTER TABLE `t` MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;');
-    assert(modified.length === 1 && /"id" INTEGER NOT NULL/.test(modified[0].sql) && /PRIMARY KEY \(`id`\)/.test(modified[0].sql), `ALTER TABLE MODIFY folds into CREATE TABLE (got ${JSON.stringify(modified.map((s) => s.sql))})`);
+    assert(modified.length === 1 && /"id" INTEGER NOT NULL/.test(modified[0].sql) && /PRIMARY KEY AUTOINCREMENT/.test(modified[0].sql) && modified[0].initializers?.length === 2, `ALTER TABLE MODIFY folds into CREATE TABLE and retains its seed (got ${JSON.stringify(modified.map((s) => s.sql))})`);
     const autoNumbered = await build('CREATE TABLE t (\n  `id` int(11) NOT NULL,\n  `n` INT\n);\nALTER TABLE `t` ADD PRIMARY KEY (`id`);\nALTER TABLE `t` MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;\nINSERT INTO t (n) VALUES (7);');
     assert(autoNumbered.exec('SELECT id FROM t')[0].values[0][0] === 1, 'a phpMyAdmin AUTO_INCREMENT column auto-numbers');
     let modifyMessage = '';
@@ -1203,7 +1203,9 @@ async function main() {
     const bytes = exportDatabase(database);
     assert(bytes.byteLength > 0, 'export produces bytes');
     assert(Number(database.exec('PRAGMA foreign_keys')[0].values[0][0]) === 1, 'foreign keys stay enforced after export (sql.js reopens the connection)');
-    assert(Number(database.exec('PRAGMA max_page_count')[0].values[0][0]) === 16384, 'the memory bound stays applied after export');
+    const pageSize = Number(database.exec('PRAGMA page_size')[0].values[0][0]);
+    assert(Number(database.exec('PRAGMA max_page_count')[0].values[0][0]) * pageSize <= 16 * 1024 * 1024, 'the restorable database size bound stays applied after export');
+    assert(Number(database.exec('PRAGMA hard_heap_limit')[0].values[0][0]) === 64 * 1024 * 1024, 'the SQLite allocation bound stays applied after export');
     assert(database.exec("SELECT YEAR('2026-01-05')")[0].values[0][0] === 2026, 'dialect functions are re-registered after export');
     database.run('DELETE FROM parent_t WHERE id = 1');
     assert(Number(database.exec('SELECT COUNT(*) FROM child_t')[0].values[0][0]) === 0, 'ON DELETE CASCADE still fires on the exported connection');

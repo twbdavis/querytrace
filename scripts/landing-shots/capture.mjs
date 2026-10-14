@@ -51,6 +51,10 @@ const tabCount = await page.getByRole('tab').count();
 console.log('tabs', tabCount);
 // pause autoplay so frames are deterministic
 await page.keyboard.press('Escape');
+// The landing frames show the canvas alone: fold both side panels away.
+await page.getByRole('button', { name: 'Collapse query panel' }).click();
+await page.getByRole('button', { name: 'Collapse result panel' }).click();
+await page.waitForTimeout(600);
 await stage(page, 1); // first JOIN
 await page.screenshot({ path: `${OUT}/hero-join.png` });
 await stage(page, 3); // WHERE
@@ -60,30 +64,10 @@ await page.screenshot({ path: `${OUT}/stage-group.png` });
 await stage(page, tabCount - 1); // final
 await page.screenshot({ path: `${OUT}/stage-final.png` });
 
-// Provenance: pin a result row at the last stage
-const result = page.getByRole('table', { name: 'Query results' });
-const rows = result.getByRole('row');
-const n = await rows.count();
-if (n > 1) { await rows.nth(1).click(); await page.waitForTimeout(700); }
-// Tight crop: result panel plus the VENUE and RESERVATION tables it lights up.
-await page.screenshot({ path: `${OUT}/provenance-crop.png`, clip: { x: 0, y: 330, width: 1000, height: 400 } });
-
 // Schema modal
 await page.getByRole('button', { name: 'Open schema settings' }).click();
 await page.waitForTimeout(400);
 await page.getByRole('dialog').screenshot({ path: `${OUT}/schema.png` });
 await ctx.close();
-
-// Mobile frame
-const m = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, colorScheme: 'dark', isMobile: true, hasTouch: true });
-const mp = await m.newPage();
-await mp.goto(BASE, { waitUntil: 'networkidle' });
-await mp.addStyleTag({ content: 'nextjs-portal{display:none!important}' });
-await waitReady(mp);
-await openLesson(mp, '12. Match related rows with JOIN');
-await mp.keyboard.press('Escape');
-await stage(mp, 1);
-await mp.screenshot({ path: `${OUT}/mobile-join.png` });
-await m.close();
 await browser.close();
 console.log('done');

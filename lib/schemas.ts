@@ -298,6 +298,14 @@ export const PRELOADED_SCHEMAS: SchemaDef[] = [
     description: 'Attendees reserve screenings at several venues; one attendee has not booked anything yet.',
     ddl: FESTIVAL_DDL,
     starterQuery: 'SELECT FILM_TITLE, SCREENING_DAY, GENRE FROM SCREENING;',
+    // Two columns: people on the left, programme on the right, with the
+    // RESERVATION table under the attendees it belongs to.
+    positions: {
+      ATTENDEE: { x: 0, y: 0 },
+      RESERVATION: { x: 140, y: 520 },
+      SCREENING: { x: 1330, y: 0 },
+      VENUE: { x: 1500, y: 520 },
+    },
   },
   {
     id: 'marine',

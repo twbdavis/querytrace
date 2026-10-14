@@ -10,6 +10,8 @@
  * exactly as SQLite's STRFTIME does.
  */
 
+import { checkBlobSize, checkTextSize } from './resourceLimits';
+
 /** Minimal connection surface: sql.js Database, also satisfied in tests. */
 export interface FunctionHost {
   create_function(name: string, fn: (...args: never[]) => unknown): unknown;
@@ -419,6 +421,8 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   DATENAME: 'DATENAME(unit, d) is SQL Server; SQLite has no built-in names.',
   DATE_TRUNC: 'DATE_TRUNC(unit, d) is PostgreSQL; SQLite uses DATE(d, \'start of month\') and friends.',
   QT_DOW: 'EXTRACT(DOW FROM d) is PostgreSQL; SQLite uses STRFTIME(\'%w\', d).',
+  QT_ISOYEAR: 'EXTRACT(ISOYEAR FROM d) returns the ISO week-numbering year.',
+  QT_BOOLEAN: 'CAST(x AS BOOLEAN) converts PostgreSQL boolean input to 1, 0 or NULL.',
   LEN: 'LEN(s) is SQL Server; SQLite spells it LENGTH(s).',
   LCASE: 'LCASE(s) is MySQL; SQLite spells it LOWER(s).',
   UCASE: 'UCASE(s) is MySQL; SQLite spells it UPPER(s).',
@@ -433,6 +437,7 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   SPACE: 'SPACE(n) is MySQL / SQL Server; SQLite has no direct equivalent.',
   REVERSE: 'REVERSE(s) is MySQL / SQL Server; SQLite has no direct equivalent.',
   SUBSTRING_INDEX: 'SUBSTRING_INDEX is MySQL; SQLite has no direct equivalent.',
+  SPLIT_PART: 'SPLIT_PART(s, delimiter, field) is PostgreSQL; QueryTrace selects a field by its position.',
   CHAR_LENGTH: 'CHAR_LENGTH(s) is MySQL / PostgreSQL; SQLite spells it LENGTH(s).',
   CHARACTER_LENGTH: 'CHARACTER_LENGTH(s) is standard SQL; SQLite spells it LENGTH(s).',
   ASCII: 'ASCII(s) is MySQL / SQL Server; SQLite spells it UNICODE(s).',
@@ -455,13 +460,43 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
 /** Register every compatibility function on a connection. Idempotent per connection. */
 export function registerCompatFunctions(db: FunctionHost): void {
   const define = (name: string, fn: (...args: Value[]) => unknown) => {
-    db.create_function(name, fn as (...args: never[]) => unknown);
+    const bounded = (...args: Value[]) => {
+      try {
+        for (const value of args) {
+          if (typeof value === 'string') checkTextSize(value.length);
+          else if (value instanceof Uint8Array) checkBlobSize(value.byteLength);
+        }
+        const value = fn(...args);
+        if (typeof value === 'string') checkTextSize(value.length);
+        else if (value instanceof Uint8Array) checkBlobSize(value.byteLength);
+        return value;
+      } catch (error) {
+        // sql.js passes a thrown string to SQLite's error-result API.
+        throw error instanceof Error ? error.message : error;
+      }
+    };
+    // sql.js uses function.length to register SQLite's required arity.
+    Object.defineProperty(bounded, 'length', { value: fn.length });
+    db.create_function(name, bounded as (...args: never[]) => unknown);
   };
   const dateFn = (name: string, fn: (p: Parts) => unknown) =>
     define(name, (value: Value) => {
       const p = parts(value);
       return p === null ? null : fn(p);
     });
+
+  define('QT_BOOLEAN', (value: Value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'number' && Number.isInteger(value)) return value === 0 ? 0 : 1;
+    const input = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    const trueWords = ['true', 'yes', 'on', '1'];
+    const falseWords = ['false', 'no', 'off', '0'];
+    const isTrue = input.length > 0 && trueWords.some((word) => word.startsWith(input));
+    const isFalse = input.length > 0 && falseWords.some((word) => word.startsWith(input));
+    if (isTrue !== isFalse) return isTrue ? 1 : 0;
+    // sql.js forwards strings to sqlite3_result_error; Error objects lose their message.
+    throw `Invalid BOOLEAN value ${JSON.stringify(value)}. Use TRUE, FALSE, 1, 0 or NULL.`;
+  });
 
   // --- Current date and time -------------------------------------------------
   define('NOW', () => formatDateTime(nowParts()));
@@ -485,6 +520,11 @@ export function registerCompatFunctions(db: FunctionHost): void {
   dateFn('DAYOFWEEK', (p) => dayOfWeek(p) + 1);
   dateFn('WEEKDAY', (p) => (dayOfWeek(p) + 6) % 7);
   dateFn('QT_DOW', (p) => dayOfWeek(p));
+  dateFn('QT_ISOYEAR', (p) => {
+    const date = new Date(Date.UTC(p.y, p.m - 1, p.d));
+    date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+    return date.getUTCFullYear();
+  });
   dateFn('DAYOFYEAR', (p) => dayOfYear(p));
   define('WEEK', (value: Value, mode: Value) => {
     const p = parts(value);
@@ -642,54 +682,74 @@ export function registerCompatFunctions(db: FunctionHost): void {
     });
   define('LEN', (value: Value) => {
     const s = text(value);
-    return s === null ? null : s.replace(/\s+$/, '').length;
+    return s === null ? null : Array.from(s.replace(/\s+$/, '')).length;
   });
-  define('CHAR_LENGTH', (value: Value) => text(value)?.length ?? null);
-  define('CHARACTER_LENGTH', (value: Value) => text(value)?.length ?? null);
+  const characterLength = (value: Value) => {
+    const s = text(value);
+    return s === null ? null : Array.from(s).length;
+  };
+  define('CHAR_LENGTH', characterLength);
+  define('CHARACTER_LENGTH', characterLength);
   define('LCASE', (value: Value) => text(value)?.toLowerCase() ?? null);
   define('UCASE', (value: Value) => text(value)?.toUpperCase() ?? null);
   define('LEFT', (value: Value, n: Value) => {
     const s = text(value);
     const count = num(n);
-    return s === null || count === null ? null : s.slice(0, Math.max(0, Math.trunc(count)));
+    return s === null || count === null ? null : Array.from(s).slice(0, Math.max(0, Math.trunc(count))).join('');
   });
   define('RIGHT', (value: Value, n: Value) => {
     const s = text(value);
     const count = num(n);
     if (s === null || count === null) return null;
     const k = Math.max(0, Math.trunc(count));
-    return k === 0 ? '' : s.slice(-k);
+    return k === 0 ? '' : Array.from(s).slice(-k).join('');
   });
   define('MID', (value: Value, start: Value, length: Value) => {
     const s = text(value);
     const from = num(start);
     const len = num(length);
     if (s === null || from === null || len === null) return null;
-    const begin = from > 0 ? from - 1 : from < 0 ? Math.max(0, s.length + from) : 0;
-    return s.slice(begin, begin + Math.max(0, len));
+    if (from === 0) return '';
+    const characters = Array.from(s);
+    const begin = from > 0 ? from - 1 : characters.length + from;
+    if (begin < 0) return '';
+    return characters.slice(begin, begin + Math.max(0, len)).join('');
   });
   define('LOCATE', (needle: Value, haystack: Value, position: Value) => {
     const n = text(needle);
     const h = text(haystack);
     const from = num(position);
     if (n === null || h === null || from === null) return null;
-    const index = h.indexOf(n, Math.max(0, from - 1));
-    return index === -1 ? 0 : index + 1;
+    const characters = Array.from(h);
+    const start = Math.max(0, Math.trunc(from) - 1);
+    const suffix = characters.slice(start).join('');
+    const index = suffix.indexOf(n);
+    return index === -1 ? 0 : start + Array.from(suffix.slice(0, index)).length + 1;
   });
   define('CHARINDEX', (needle: Value, haystack: Value) => {
     const n = text(needle);
     const h = text(haystack);
-    return n === null || h === null ? null : h.toLowerCase().indexOf(n.toLowerCase()) + 1;
+    if (n === null || h === null) return null;
+    const lowered = h.toLowerCase();
+    const index = lowered.indexOf(n.toLowerCase());
+    return index === -1 ? 0 : Array.from(lowered.slice(0, index)).length + 1;
   });
   const padWith = (side: 'left' | 'right') => (value: Value, length: Value, fill: Value) => {
     const s = text(value);
     const len = num(length);
-    const f = text(fill) ?? ' ';
-    if (s === null || len === null) return null;
+    const f = text(fill);
+    if (s === null || len === null || f === null) return null;
     const target = Math.max(0, Math.trunc(len));
-    if (s.length >= target) return s.slice(0, target);
+    checkTextSize(target);
+    const characters = Array.from(s);
+    if (characters.length >= target) return characters.slice(0, target).join('');
     if (!f.length) return s;
-    const filler = f.repeat(Math.ceil((target - s.length) / f.length)).slice(0, target - s.length);
+    const padding = Array.from(f);
+    const missing = target - characters.length;
+    const cycles = Math.floor(missing / padding.length);
+    const remainder = padding.slice(0, missing % padding.length).join('');
+    checkTextSize(s.length + cycles * f.length + remainder.length);
+    const filler = f.repeat(cycles) + remainder;
     return side === 'left' ? filler + s : s + filler;
   };
   define('LPAD', padWith('left'));
@@ -697,11 +757,17 @@ export function registerCompatFunctions(db: FunctionHost): void {
   define('REPEAT', (value: Value, n: Value) => {
     const s = text(value);
     const count = num(n);
-    return s === null || count === null ? null : s.repeat(Math.min(10_000, Math.max(0, Math.trunc(count))));
+    if (s === null || count === null) return null;
+    const repeats = Math.max(0, Math.trunc(count));
+    checkTextSize(s.length * repeats);
+    return s.length ? s.repeat(repeats) : '';
   });
   define('SPACE', (n: Value) => {
     const count = num(n);
-    return count === null ? null : ' '.repeat(Math.min(10_000, Math.max(0, Math.trunc(count))));
+    if (count === null) return null;
+    const length = Math.max(0, Math.trunc(count));
+    checkTextSize(length);
+    return ' '.repeat(length);
   });
   str('REVERSE', (s) => Array.from(s).reverse().join(''));
   define('SUBSTRING_INDEX', (value: Value, delimiter: Value, count: Value) => {
@@ -713,20 +779,35 @@ export function registerCompatFunctions(db: FunctionHost): void {
     const pieces = s.split(d);
     return n > 0 ? pieces.slice(0, n).join(d) : pieces.slice(Math.max(0, pieces.length + n)).join(d);
   });
+  define('SPLIT_PART', (value: Value, delimiter: Value, field: Value) => {
+    const s = text(value);
+    const d = text(delimiter);
+    const n = num(field);
+    if (s === null || d === null || n === null) return null;
+    const whole = Math.trunc(n);
+    if (whole === 0) throw 'SPLIT_PART field position cannot be zero. Use 1 for the first field or -1 for the last.';
+    const pieces = d.length ? s.split(d) : [s];
+    return pieces[whole > 0 ? whole - 1 : pieces.length + whole] ?? '';
+  });
   str('ASCII', (s) => (s.length ? s.codePointAt(0) ?? 0 : 0));
   define('CHR', (n: Value) => {
     const code = num(n);
     return code === null ? null : String.fromCodePoint(Math.max(0, Math.min(0x10ffff, Math.trunc(code))));
   });
   str('INITCAP', (s) => s.toLowerCase().replace(/(^|[^\p{L}\p{N}])(\p{L})/gu, (_, before: string, letter: string) => before + letter.toUpperCase()));
-  // Patterns are bounded in size and may not nest quantifiers, so a typo cannot
-  // send the worker into catastrophic backtracking.
-  const NESTED_QUANTIFIER = /\([^()]*[*+}][^()]*\)\s*[*+{]/;
+  // A conservative subset avoids ambiguous repeated groups/backreferences.
+  // The worker deadline remains the final backstop for JavaScript regex work.
   const regexpMatch = (pattern: Value, value: Value) => {
     const p = text(pattern);
     const v = text(value);
     if (p === null || v === null) return null;
-    if (p.length > 200 || v.length > 10_000 || NESTED_QUANTIFIER.test(p)) return 0;
+    const structure = p.replace(/\\./g, 'x').replace(/\[(?:\\.|[^\]\\])*\]/g, 'x');
+    const repeats = [...structure.matchAll(/[*+?]|\{\d+(?:,\d*)?\}/g)];
+    if (p.length > 200 || v.length > 10_000 || /\\[1-9]/.test(p)
+      || /\)\s*(?:[*+?]|\{)/.test(structure) || repeats.length > 1
+      || repeats.some((match) => [...match[0].matchAll(/\d+/g)].some((number) => Number(number[0]) > 1000))) {
+      throw 'REGEXP exceeds the browser-safe pattern limits. Use a simple pattern without repeated groups, backreferences, or multiple repetitions.';
+    }
     try {
       return new RegExp(p).test(v) ? 1 : 0;
     } catch {

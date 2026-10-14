@@ -2,20 +2,33 @@
 
 import { describeLoadFailure, SqlRuntime } from '../lib/sqlRuntime';
 import type { SqlWorkerRequest, SqlWorkerResponse } from '../lib/sqlWorkerProtocol';
+import type { SchemaDef } from '../lib/schemas';
+import { RecoveryRequiredError } from '../lib/sqlRecovery';
 
 const runtime = new SqlRuntime();
 let queue = Promise.resolve();
+let currentDef: SchemaDef | null = null;
 
 // Serialize requests so a schema switch cannot race a query against the old connection.
 self.onmessage = (event: MessageEvent<SqlWorkerRequest>) => {
   const request = event.data;
   queue = queue.then(async () => {
+    let completed = false;
     try {
-      const result =
-        request.operation === 'loadSchema'
-          ? await runtime.loadSchema(request.def, request.savedBytes)
-          : runtime.runQuery(request.sql);
-      self.postMessage({ id: request.id, ok: true, result } satisfies SqlWorkerResponse);
+      if (request.operation === 'loadSchema') {
+        const result = await runtime.loadSchema(request.def, request.savedBytes);
+        completed = true;
+        currentDef = request.def;
+        self.postMessage({ id: request.id, ok: true, result,
+          checkpoint: { def: currentDef, databaseBytes: result.databaseBytes ?? runtime.exportSnapshot() },
+        } satisfies SqlWorkerResponse);
+      } else {
+        const result = runtime.runQuery(request.sql);
+        completed = true;
+        self.postMessage({ id: request.id, ok: true, result,
+          ...(result.mutation && currentDef ? { checkpoint: { def: currentDef, databaseBytes: result.mutation.databaseBytes ?? runtime.exportSnapshot() } } : {}),
+        } satisfies SqlWorkerResponse);
+      }
     } catch (error) {
       const failure = describeLoadFailure(error);
       self.postMessage({
@@ -23,6 +36,7 @@ self.onmessage = (event: MessageEvent<SqlWorkerRequest>) => {
         ok: false,
         error: failure.message,
         statement: failure.statement,
+        ...(completed || error instanceof RecoveryRequiredError ? { recover: true } : {}),
       } satisfies SqlWorkerResponse);
     }
   });

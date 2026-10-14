@@ -2,9 +2,11 @@ import { expect, test } from '@playwright/test';
 
 test('homepage opens the tracer and runs a selected lesson with the QueryTrace tab title', async ({ page }) => {
   test.setTimeout(45_000);
+  // Keep lesson-link clicks stable during back navigation and scrolling.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
   await expect(page).toHaveTitle('QueryTrace');
-  await expect(page.getByRole('heading', { name: 'See the query run.', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Watch a SQL Query run.', level: 1 })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Stage shown in the preview' })).toBeVisible();
 
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
@@ -16,7 +18,7 @@ test('homepage opens the tracer and runs a selected lesson with the QueryTrace t
   // Enter through a lesson link after the default schema has already loaded,
   // ensuring the route prepares the lesson's different database and runs it.
   await page.goBack();
-  await expect(page.getByRole('heading', { name: 'See the query run.', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Watch a SQL Query run.', level: 1 })).toBeVisible();
   await page.getByRole('link', { name: '1. Choose result columns', exact: false }).click();
   await expect(page).toHaveURL(/\/trace\?lesson=projection$/);
   await expect(page).toHaveTitle('QueryTrace');
