@@ -95,7 +95,7 @@ export default function LandingPage() {
                 <Reveal key={state.word} className={s.state} delay={i * 60}>
                   <span className={s.stateWord}>{state.word}</span>
                   <div className={s.statePic}>
-                    <Image src={state.src} alt={state.alt} sizes="(min-width: 1024px) 520px, 100vw" />
+                    <Image src={state.src} alt={state.alt} unoptimized sizes="(min-width: 1024px) 520px, 100vw" />
                   </div>
                 </Reveal>
               ))}
@@ -143,6 +143,7 @@ export default function LandingPage() {
             <Reveal className={`${s.picture} ${s.col}`} delay={80}>
               <Image
                 src={schemaCrop}
+                unoptimized
                 alt="The schema dialog: five preloaded databases and a text area for your own CREATE TABLE statements."
                 sizes="(min-width: 1024px) 520px, 100vw"
               />

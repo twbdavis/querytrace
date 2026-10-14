@@ -82,7 +82,7 @@ function Clause({ stage, active, tone, onPick, children }: ClauseProps) {
 
 /**
  * The demonstration under the headline: real frames of lesson 15, one per
- * stage, crossfading slowly. The query beneath is the control; pressing a
+ * stage, crossfading slowly. The query is the control; pressing a
  * clause shows that stage and stops the drift. The first frame and the
  * static query render without script.
  */
@@ -107,31 +107,8 @@ export function Hero() {
   };
 
   return (
-    <>
-      <Link
-        href="/trace"
-        aria-label="Open the tracer"
-        className={`${s.frame} ${s.wide}`}
-        data-rise
-        style={{ '--i': 3 } as CSSProperties}
-        onMouseEnter={() => setHeld(true)}
-        onMouseLeave={() => setHeld(false)}
-      >
-        {FRAMES.map((frame, i) => (
-          <Image
-            key={frame.key}
-            src={frame.src}
-            alt={i === index ? frame.alt : ''}
-            fill
-            preload={i === 0}
-            sizes="(min-width: 1024px) 860px, 100vw"
-            className={`${s.frameImg} ${i === index ? s.frameOn : ''}`}
-            aria-hidden={i !== index}
-          />
-        ))}
-      </Link>
-
-      <div className={s.col} data-ui data-rise style={{ '--i': 4 } as CSSProperties}>
+    <div className={s.demo}>
+      <div className={s.demoQuery} data-ui data-rise style={{ '--i': 3 } as CSSProperties}>
         <pre className={s.sql}>
           <code>
             <span className={s.line}>
@@ -164,6 +141,30 @@ export function Hero() {
           {FRAMES[index].caption}
         </p>
       </div>
-    </>
+
+      <Link
+        href="/trace"
+        aria-label="Open the tracer"
+        className={s.frame}
+        data-rise
+        style={{ '--i': 4 } as CSSProperties}
+        onMouseEnter={() => setHeld(true)}
+        onMouseLeave={() => setHeld(false)}
+      >
+        {FRAMES.map((frame, i) => (
+          <Image
+            key={frame.key}
+            src={frame.src}
+            alt={i === index ? frame.alt : ''}
+            fill
+            unoptimized
+            preload={i === 0}
+            sizes="(min-width: 1440px) 680px, (min-width: 1024px) calc((100vw - 240px) * 17 / 30), calc(100vw - 48px)"
+            className={`${s.frameImg} ${i === index ? s.frameOn : ''}`}
+            aria-hidden={i !== index}
+          />
+        ))}
+      </Link>
+    </div>
   );
 }
