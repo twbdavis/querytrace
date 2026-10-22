@@ -10,7 +10,7 @@
 - Resume saved custom databases after lessons, detect conflicting saves across tabs, and preserve queries and newer drafts during schema changes.
 - Reject integers outside the exact browser tracing range before imports or mutations commit, including hidden row identities.
 - Keep keyboard focus inside dialogs and restore the invoking control when they close.
-- Keep the homepage usable if its optional animation fails, and provide pause/resume with live reduced-motion support.
+- Keep the homepage usable if its optional animation fails, and respect live reduced-motion preferences without showing animation controls.
 - Replace the homepage's crossfading screenshots with a three.js scene: SCREENING and VENUE built from row slabs that rise into place, joined on VENUE_ID with the tracer's wire, pulses and lit rows, and the selected cells flying together into the result table. It plays once and holds; reduced motion shows the finished frame, and browsers without WebGL get a static join diagram.
 - Let `next dev` accept its own "Network:" address so the page hydrates when opened over the LAN.
 - Accept `ORDER BY alias` (standard SQL), replace an alias in `GROUP BY` / `HAVING` by its expression, and explain why an alias cannot be used in `WHERE`. Double-quoted and bracketed names in `ORDER BY` are identifiers; only `ORDER BY 'text'` is refused.

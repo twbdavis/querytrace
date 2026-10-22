@@ -119,24 +119,6 @@
   inset: 0;
 }
 
-.sceneControl {
-  position: absolute;
-  right: var(--edge);
-  bottom: 20px;
-  z-index: 1;
-  min-height: 44px;
-  padding: 8px 12px;
-  border: 1px solid var(--border-default);
-  background: var(--ground);
-  color: var(--soft);
-  font: inherit;
-  font-size: var(--step-small);
-  cursor: pointer;
-}
-
-.sceneControl:hover:not(:disabled) { color: var(--ink); }
-.sceneControl:disabled { cursor: default; }
-
 /* Vignette and a floor scrim for the text. */
 .scene::after {
   content: '';

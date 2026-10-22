@@ -8,10 +8,8 @@ interface JoinCanvasProps {
   className?: string;
   /** Draw one finished frame and never animate. */
   still: boolean;
-  paused: boolean;
   onPhase: (phase: JoinPhase) => void;
   onReady: () => void;
-  onComplete: () => void;
   /** Rendering failed or the context was lost: the parent shows the static join. */
   onFail: () => void;
 }
@@ -21,13 +19,10 @@ interface JoinCanvasProps {
  * with the parent, pauses when scrolled away or when the tab is hidden, and
  * feeds the pointer position in for the camera parallax. Disposes on unmount.
  */
-export default function JoinCanvas({ className, still, paused, onPhase, onReady, onComplete, onFail }: JoinCanvasProps) {
+export default function JoinCanvas({ className, still, onPhase, onReady, onFail }: JoinCanvasProps) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const callbacks = useRef({ onPhase, onReady, onComplete, onFail });
-  callbacks.current = { onPhase, onReady, onComplete, onFail };
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
-  const syncRef = useRef<() => void>(() => {});
+  const callbacks = useRef({ onPhase, onReady, onFail });
+  callbacks.current = { onPhase, onReady, onFail };
 
   useEffect(() => {
     const canvas = ref.current;
@@ -40,9 +35,8 @@ export default function JoinCanvas({ className, still, paused, onPhase, onReady,
 
     const sync = () => {
       if (still) return;
-      scene?.setRunning(!pausedRef.current && intersecting && document.visibilityState === 'visible');
+      scene?.setRunning(intersecting && document.visibilityState === 'visible');
     };
-    syncRef.current = sync;
 
     const safely = (action: () => void) => {
       if (cancelled) return;
@@ -62,7 +56,6 @@ export default function JoinCanvas({ className, still, paused, onPhase, onReady,
         lite,
         onPhase: (p) => callbacks.current.onPhase(p),
         onReady: () => callbacks.current.onReady(),
-        onComplete: () => callbacks.current.onComplete(),
         onFail: () => callbacks.current.onFail(),
       });
       scene.setSize(host.clientWidth, host.clientHeight);
@@ -78,7 +71,7 @@ export default function JoinCanvas({ className, still, paused, onPhase, onReady,
         scene.renderStill(T_END);
         return;
       }
-      // A paused or off-screen scene still needs its first frame and controls.
+      // An off-screen scene still needs its first frame.
       scene.renderStill(0);
 
       const io = new IntersectionObserver((entries) => {
@@ -110,14 +103,11 @@ export default function JoinCanvas({ className, still, paused, onPhase, onReady,
 
     return () => {
       cancelled = true;
-      syncRef.current = () => {};
       for (const fn of cleanups) fn();
       scene?.dispose();
       scene = null;
     };
   }, [still]);
-
-  useEffect(() => { syncRef.current(); }, [paused]);
 
   return <canvas ref={ref} className={className} aria-hidden="true" />;
 }

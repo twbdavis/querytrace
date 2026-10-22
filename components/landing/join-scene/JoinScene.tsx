@@ -55,15 +55,12 @@ const noop = () => {};
 export function JoinScene({ onPhase = noop }: JoinSceneProps) {
   const [mode, setMode] = useState<Mode>('pending');
   const [ready, setReady] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [complete, setComplete] = useState(false);
 
   useEffect(() => {
     if (!supportsWebGL()) { setMode('fallback'); return; }
     const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
     const sync = () => {
       setReady(false);
-      setComplete(false);
       // A motion preference change must not retry a broken renderer/download.
       setMode((current) => current === 'fallback' ? current : preference.matches ? 'still' : 'live');
     };
@@ -83,7 +80,6 @@ export function JoinScene({ onPhase = noop }: JoinSceneProps) {
     <div
       className={s.scene}
       data-mode={mode}
-      data-playback={mode === 'live' ? complete ? 'complete' : paused ? 'paused' : 'playing' : mode}
       data-rise
       style={{ '--i': 1 } as CSSProperties}
     >
@@ -94,26 +90,14 @@ export function JoinScene({ onPhase = noop }: JoinSceneProps) {
               key={mode}
               className={`${s.canvas} ${ready ? s.canvasOn : ''}`}
               still={mode === 'still'}
-              paused={paused}
               onPhase={onPhase}
               onReady={() => setReady(true)}
-              onComplete={() => setComplete(true)}
               onFail={fail}
             />
           </SceneBoundary>
         )}
         {mode === 'fallback' && <StaticJoin />}
       </div>
-      {mode === 'live' && ready && (
-        <button
-          type="button"
-          className={s.sceneControl}
-          disabled={complete}
-          onClick={() => setPaused((current) => !current)}
-        >
-          {complete ? 'Animation complete' : paused ? 'Resume animation' : 'Pause animation'}
-        </button>
-      )}
     </div>
   );
 }

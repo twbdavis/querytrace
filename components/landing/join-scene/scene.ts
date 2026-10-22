@@ -64,7 +64,6 @@ export interface JoinSceneOptions {
   onPhase: (phase: JoinPhase) => void;
   /** First frame has been drawn. */
   onReady: () => void;
-  onComplete: () => void;
   onFail: () => void;
 }
 
@@ -979,7 +978,6 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
         // The sequence is complete: hold this frame and stop drawing.
         finished = true;
         running = false;
-        opts.onComplete();
         return;
       }
       raf = requestAnimationFrame(frame);

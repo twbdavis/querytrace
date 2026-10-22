@@ -77,7 +77,7 @@ async function expectStaticJoin(page: Page, screenshotRequests: string[]) {
   expect(screenshotRequests).toEqual([]);
 }
 
-test('landing animation renders, pauses, resumes and follows motion preferences', async ({ page }) => {
+test('landing animation plays without controls and follows motion preferences', async ({ page }) => {
   await requireWebGL(page);
   await trackDraws(page);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -90,17 +90,12 @@ test('landing animation renders, pauses, resumes and follows motion preferences'
   const initial = await drawCount(page);
   await expect.poll(() => drawCount(page)).toBeGreaterThan(initial);
 
-  await page.getByRole('button', { name: 'Pause animation', exact: true }).click();
-  await expect(scene).toHaveAttribute('data-playback', 'paused');
-  await expectDrawsStopped(page);
-  const paused = await drawCount(page);
-  await page.getByRole('button', { name: 'Resume animation', exact: true }).click();
-  await expect.poll(() => drawCount(page)).toBeGreaterThan(paused);
+  await expect(scene.getByRole('button')).toHaveCount(0);
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(scene).toHaveAttribute('data-mode', 'still');
   await expect(canvas).toHaveCSS('opacity', '1');
-  await expect(page.getByRole('button', { name: 'Pause animation', exact: true })).toHaveCount(0);
+  await expect(scene.getByRole('button')).toHaveCount(0);
   await expectDrawsStopped(page);
 
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -141,7 +136,7 @@ test('a scene rendering failure falls back without replacing the homepage', asyn
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
   await page.locator('[data-mode]').scrollIntoViewIfNeeded();
-  await expect(page.getByRole('button', { name: 'Pause animation', exact: true })).toBeVisible();
+  await expect(page.locator('[data-mode] canvas')).toHaveCSS('opacity', '1');
   await page.evaluate(() => { window.__querytraceRenderFailure = true; });
   await expectStaticJoin(page, screenshotRequests);
   await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
@@ -158,7 +153,7 @@ test('the static join stays complete across screen sizes without WebGL or screen
   });
   await page.goto('/');
   await expectStaticJoin(page, screenshotRequests);
-  await expect(page.getByRole('button', { name: 'Pause animation', exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-mode]').getByRole('button')).toHaveCount(0);
   for (const width of [320, 390, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await expectStaticJoin(page, screenshotRequests);
