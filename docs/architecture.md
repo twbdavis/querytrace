@@ -53,6 +53,15 @@ and the note names the SQLite equivalent. Constructs SQLite cannot express
 window frames, session variables, `SELECT ... INTO`) are refused with the alternative
 spelled out.
 
+Ordered `GROUP_CONCAT`, `STRING_AGG`, and `LISTAGG` preserve their requested sort
+order using SQLite's aggregate-local `ORDER BY`. `lib/orderedAggregates.ts` encodes
+that syntax only while the parser reads the query and restores it before execution.
+PostgreSQL Boolean casts, nested precision casts, `SPLIT_PART`, `BTRIM`, and
+`EXTRACT(ISOYEAR ...)` are also supported. Character length, slicing, positioning,
+and padding functions count Unicode code points so supplementary characters such
+as emoji remain intact. Ambiguous vendor behavior still uses the defined translation
+subset; this is not a full implementation of each server's SQL dialect.
+
 **Data changes in the editor:** `INSERT`, `UPDATE`, `DELETE` (and MySQL's `INSERT
 IGNORE`, `REPLACE INTO`, `INSERT ... SET`, `ON DUPLICATE KEY UPDATE`, `TRUNCATE`) run
 against the loaded schema with their own stage sequence: the table before the change,
@@ -63,6 +72,22 @@ live data. The statement runs inside a savepoint and is rolled back with an expl
 when a key, `NOT NULL`, `CHECK` or foreign-key constraint (or a custom-schema size limit)
 rejects it. Changes to a custom schema are saved with it; changes to a bundled schema
 last for the session and lessons reload the original rows first.
+When a statement includes `RETURNING`, its final result contains the requested
+columns and expressions, including matched rows whose UPDATE values did not change.
+Deferred foreign-key failures at savepoint release also roll back the whole statement.
+`INSERT ... SELECT ... RETURNING` previews only the source SELECT; `UPDATE ... FROM`
+traces its actual matching target rows. Moving an integer primary key is counted as
+an update even when its internal SQLite row identity changes.
+
+**Structure changes in the editor:** `CREATE TABLE` with explicit columns and
+`CREATE [UNIQUE] INDEX` run on the same connection as subsequent queries. Each CREATE
+uses a savepoint and validates the resulting schema before refreshing the canvas,
+column metadata, foreign-key edges, and saved custom database. The CREATE stage
+reports the object name and type. `IF NOT EXISTS` preserves existing objects and
+rows. Generated columns appear in both metadata and results; composite foreign-key
+edges follow the declared parent key order. Failed CREATE statements leave no partial
+objects. Temporary tables, views, triggers, and CREATE TABLE AS SELECT remain outside
+this supported subset; use explicit columns followed by INSERT ... SELECT.
 
 **Custom schemas:** the schema builder accepts `CREATE TABLE`, `INSERT`, `UPDATE`,
 `DELETE`/`TRUNCATE`, `CREATE INDEX` and `ALTER TABLE` scripts as exported by MySQL
@@ -92,14 +117,81 @@ be inserted before their parents, as dumps do: the script is accepted when the f
 state satisfies every foreign key, and the first orphan is reported with its values
 otherwise. Tables without a declared PRIMARY KEY (import/staging tables) load and are
 traced by SQLite rowid; the canvas marks them `NO PK`.
+Explicit automatic keys must be a table's single integer primary key. They retain
+their high-water mark after deletion; MySQL `AUTO_INCREMENT=n` seeds are preserved.
+Custom identity increments and nondefault identity starts are rejected with guidance
+to supply explicit values. Sequence handling is an SQLite-backed approximation;
+it does not reproduce each vendor's allocation behavior after failed transactions.
 The detailed row-provenance pipeline is used wherever the query can be safely
 decomposed; compound and derived-table queries expose their inner/branch results
 and exact SQLite final result.
 
 Schema import builds a separate in-browser database using the supported construction
 and editing statements listed above. Visual query mode traces `SELECT` statements and
-the row-changing statements described above; structural changes (`CREATE`, `ALTER`,
-`DROP`) belong in the schema script and are redirected there.
+the row-changing and CREATE statements described above. ALTER and DROP remain outside
+live query mode; rebuild the schema through the schema editor for other structure changes.
+
+The schema canvas measures table cards before showing a new schema. Imported
+tables use shelves sized from those measurements; bundled hand layouts retain
+their positions wherever there is sufficient space. Row/value growth and new
+tables move only cards that no longer fit, reserving the largest displayed size
+so mutation playback does not shuffle the layout. Ordinary queries and dragging
+preserve positions. Each successful schema load replaces the canvas state, even
+when its table names match the previous schema, so foreign-key wires also refresh.
+Relationship routes use measured key-column anchors and shared lane reservations,
+with an orthogonal gutter search when simple routes are blocked by other cards.
+Routing waits for measured placement and stable dimensions; subsequent changes
+are coalesced into one shared pass per animation frame. Cards
+with more than 60 rows render a viewport window of at most 80 rows plus a pinned
+row. Dense scenes share an 8,000-cell row budget, including initial measurements;
+spacers and font-measured width probes retain the complete table's geometry and
+key anchors, including Unicode values outside the visible row window.
+Selecting an off-screen row brings it into view. Text and binary cell previews
+are bounded independently of the underlying values retained for tracing.
+
+## Browser resource boundaries
+
+SQL requests are serialized in a worker. A query has a 10-second deadline and a
+schema load has a 15-second deadline, measured from dispatch. An unresponsive
+worker is terminated; the next query restores the most recently acknowledged
+database checkpoint, including changes to bundled schemas. A timed-out operation
+is not acknowledged or kept. Snapshot or response-delivery failures after a
+change also discard the worker and restore the last acknowledged checkpoint.
+Editing the next query cancels the obsolete trace without discarding a successful
+write's canvas data or saved custom database.
+
+The application queues database operations through their persistence acknowledgment.
+Queries cannot start while a schema replacement is pending. Preparing a lesson always
+queues its original schema, including when a previous write has not acknowledged yet.
+Successful builds clear only the draft that was submitted, preserving any later edits.
+Schema settings can resume the saved custom checkpoint after a lesson without rebuilding
+its original DDL. Resume reserves its request order before waiting for writes or storage;
+a later lesson or schema choice cancels that resume before it can dispatch an old choice.
+Custom database saves compare a revision inside one IndexedDB transaction. A stale
+tab's write is rejected and its worker restores the latest durable checkpoint with
+an explicit conflict message. Lesson and draft saves patch only their own fields.
+
+Database files are bounded to 16 MiB and SQLite allocations to 64 MiB. Each trace
+has a cumulative budget of 500,000 cells or 8 MiB of raw values, with no more than
+50,000 rows in any intermediate result. These are value budgets, not total
+JavaScript heap guarantees: object/provenance overhead is additional. A text value
+is limited to 100,000 characters and a binary value to 100,000 bytes. Result rows
+are read incrementally so an oversized result fails before it is fully retained.
+Mutation and CREATE validation includes these limits before committing. Bundled
+and custom sessions both enforce table/row/column capacity limits on edits.
+
+SQLite INTEGER values, including hidden rowids, must fit the exact JavaScript integer
+range (-9,007,199,254,740,991 through 9,007,199,254,740,991). They are read as BigInt before
+validation, then converted to numbers. Out-of-range imports, results, and writes are
+rejected; writes roll back. Store larger identifiers as TEXT, or explicitly CAST a
+query result AS TEXT to retain every digit. REAL values keep SQLite's floating-point
+semantics.
+
+Compatibility functions check allocation sizes before padding/repetition and
+before decoding binary arguments. REGEXP accepts a conservative subset: at most
+200 pattern characters, 10,000 input characters, one repetition, no repeated
+groups or backreferences, and a repetition count no larger than 1,000. The worker
+deadline remains a backstop for expensive parsing, SQL, or regular expressions.
 
 ## Stack
 

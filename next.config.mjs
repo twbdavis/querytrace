@@ -1,8 +1,19 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.NODE_ENV !== 'production';
+
+// `next dev` prints a "Network:" URL on the machine's LAN address; without this
+// Next blocks its own script chunks for that origin and the page never
+// hydrates. Development only; production serves one origin.
+const lanAddresses = isDev
+  ? Object.values(os.networkInterfaces())
+      .flat()
+      .filter((i) => i && !i.internal && i.family === 'IPv4')
+      .map((i) => i.address)
+  : [];
 
 // The app is entirely same-origin and needs only WebAssembly compilation plus
 // inline framework/styles. `wasm-unsafe-eval` permits sql.js without opening
@@ -51,6 +62,7 @@ const nextConfig = {
   poweredByHeader: false,
   compress: true,
   turbopack: { root: projectRoot },
+  ...(lanAddresses.length ? { allowedDevOrigins: lanAddresses } : {}),
   async headers() {
     return [
       { source: '/(.*)', headers: securityHeaders },

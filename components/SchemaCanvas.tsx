@@ -1,14 +1,17 @@
 'use client';
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
   Controls,
   Panel,
   ReactFlow,
+  useNodesInitialized,
   useReactFlow,
+  useStore,
   type Edge,
+  type FitViewOptions,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { TableNode, type TableFlowNode } from './TableNode';
@@ -16,17 +19,14 @@ import { FKEdge } from './FKEdge';
 import { displayRowLabel, useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
 import { grid } from '@/styles/theme';
+import { ownValue } from '@/lib/records';
+import { formatValue } from '@/lib/formatValue';
 import { ChevronDownIcon, CloseIcon, CrosshairIcon } from './Icons';
+import { packSchemaTables, separateSchemaTables } from '@/lib/schemaLayout';
+import { KeyRoutesReadyContext } from '@/lib/useKeyRoutes';
 
 const nodeTypes = { table: TableNode };
 const edgeTypes = { fk: FKEdge };
-
-/** Staggered grid for schemas without a hand layout; nodes stay draggable. */
-function autoPosition(i: number): { x: number; y: number } {
-  const col = i % 3;
-  const row = Math.floor(i / 3);
-  return { x: col * 640, y: row * 460 + (col === 1 ? 230 : 0) };
-}
 
 const LEGEND: Array<{ swatch: string; name: string; desc: string }> = [
   { swatch: 'border border-l-4 border-accent-active/65 bg-accent-active/30', name: 'alive', desc: 'still in the pipeline' },
@@ -67,7 +67,7 @@ function StateLegend() {
               <path d="M13 1.5 19 5l-6 3.5Z" fill="var(--accent-active)" />
             </svg>
             <span className="text-ink-dim">
-              key wire: square at the PK, arrow into the FK; enters at the column’s top or bottom
+              key wire: square at the referenced key, arrow into the FK; enters at the column’s top or bottom
             </span>
           </div>
           <div className="flex items-center gap-2 pt-0.5">
@@ -87,17 +87,81 @@ function StateLegend() {
  * positions), so refreshed table rows (a data change, or a "before" snapshot
  * while scrubbing a data-changing trace) are pushed into the flow's own state.
  */
-function NodeDataSync({ nodes }: { nodes: TableFlowNode[] }) {
-  const { setNodes } = useReactFlow<TableFlowNode>();
+function CanvasSync({ nodes, edges, handLayout, fitOptions, onReady }: {
+  nodes: TableFlowNode[];
+  edges: Edge[];
+  handLayout: boolean;
+  fitOptions: FitViewOptions<TableFlowNode>;
+  onReady: () => void;
+}) {
+  const { getNodes, setNodes, setEdges, fitView } = useReactFlow<TableFlowNode>();
+  const initialized = useNodesInitialized();
+  // Only geometry changes run the layout. Hovering, playback and dragging do
+  // not disturb positions or the viewport.
+  const sizes = useStore((state) => JSON.stringify(state.nodes.map((node) =>
+    [node.id, node.measured?.width, node.measured?.height])));
+  const laidOut = useRef(false);
+  const needsFit = useRef(true);
+  // Reserve the largest displayed size so scrubbing a mutation's before/after
+  // snapshots cannot repeatedly shuffle the same cards back and forth.
+  const reservedSizes = useRef(new Map<string, { width: number; height: number }>());
   useEffect(() => {
-    const byId = new Map(nodes.map((node) => [node.id, node.data]));
-    setNodes((current) =>
-      current.map((node) => {
-        const data = byId.get(node.id);
-        return data && data !== node.data ? { ...node, data } : node;
-      })
-    );
+    setNodes((current) => {
+      const nextById = new Map(nodes.map((node) => [node.id, node]));
+      const existingIds = new Set(current.map((node) => node.id));
+      // Place established cards first, regardless of where a CREATE name sorts
+      // in the database metadata; the new card finds space around them.
+      return [
+        ...current.filter((node) => nextById.has(node.id)).map((node) => ({ ...node, data: nextById.get(node.id)!.data })),
+        ...nodes.filter((node) => !existingIds.has(node.id)).map((node) => ({ ...node, style: { ...node.style, opacity: 0 } })),
+      ];
+    });
   }, [nodes, setNodes]);
+  useEffect(() => { setEdges(edges); }, [edges, setEdges]);
+
+  useEffect(() => {
+    if (!initialized) return;
+    const current = getNodes();
+    if (current.length !== nodes.length || current.some((node) => !node.measured?.width || !node.measured?.height)) return;
+    const boxes = current.map((node) => {
+      const previous = reservedSizes.current.get(node.id);
+      if (!previous) needsFit.current = true;
+      const size = {
+        width: Math.max(previous?.width ?? 0, node.measured!.width!),
+        height: Math.max(previous?.height ?? 0, node.measured!.height!),
+      };
+      if (previous && (size.width > previous.width || size.height > previous.height)) needsFit.current = true;
+      reservedSizes.current.set(node.id, size);
+      return { id: node.id, position: node.position, ...size };
+    });
+    const layout = !laidOut.current && !handLayout
+      ? packSchemaTables(boxes)
+      : separateSchemaTables(boxes);
+    laidOut.current = true;
+    const positions = new Map(layout.map((box) => [box.id, box.position]));
+    if (current.some((node) => {
+      const next = positions.get(node.id)!;
+      return next.x !== node.position.x || next.y !== node.position.y || node.style?.opacity === 0;
+    })) {
+      needsFit.current = true;
+      setNodes((items) => items.map((node) => ({
+        ...node,
+        position: positions.get(node.id) ?? node.position,
+        style: node.style?.opacity === 0 ? { ...node.style, opacity: 1 } : node.style,
+      })));
+    }
+    if (!needsFit.current) return;
+    let cancelled = false;
+    // Allow React Flow to apply the new positions before fitting the viewport.
+    const frame = requestAnimationFrame(() => {
+      void fitView(fitOptions).then(() => {
+        if (cancelled) return;
+        needsFit.current = false;
+        onReady();
+      });
+    });
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
+  }, [sizes, initialized, nodes.length, handLayout, fitOptions, getNodes, setNodes, fitView, onReady]);
   return null;
 }
 
@@ -119,26 +183,36 @@ function TracePin() {
   ) : null;
 }
 
-export const SchemaCanvas = memo(function SchemaCanvas() {
+export const SchemaCanvas = memo(function SchemaCanvas({ leftInset = 0 }: { leftInset?: number }) {
   // On wide screens the floating panels cover the canvas edges, so the
   // initial fit targets the visible middle instead of the full viewport.
   const isWide = useMediaQuery('(min-width: 1024px)');
   const schema = useAppStore((s) => s.schema);
   const schemaDef = useAppStore((s) => s.schemaDef);
+  const schemaRevision = useAppStore((s) => s.schemaRevision);
   const fkEdges = useAppStore((s) => s.fkEdges);
   const liveTableData = useAppStore((s) => s.tableData);
   // A data-changing statement's early stages show the tables as they were
   // before it ran. The selector is stable (undefined) for every other trace.
   const snapshots = useAppStore((s) => s.trace?.[s.currentStep]?.tableSnapshots);
+  const [readyRevision, setReadyRevision] = useState(-1);
+  const onReady = useCallback(() => setReadyRevision(schemaRevision), [schemaRevision]);
+  const fitOptions = useMemo<FitViewOptions<TableFlowNode>>(() => ({
+    minZoom: 0.02,
+    // Keep the row-tracing chip clear of the first table, including on phones.
+    padding: isWide
+      ? { left: `${leftInset + 24}px`, right: '32px', top: '56px', bottom: '110px' }
+      : { x: '16px', top: '56px', bottom: '90px' },
+  }), [isWide, leftInset]);
 
   const nodes = useMemo<TableFlowNode[]>(
-    () =>
-      schema.map((meta, i) => {
-        const tableData = snapshots?.[meta.name] ?? liveTableData[meta.name];
+    () => {
+      const initial = schema.map((meta) => {
+        const tableData = ownValue(snapshots, meta.name) ?? ownValue(liveTableData, meta.name);
         return {
           id: meta.name,
           type: 'table' as const,
-          position: schemaDef.positions?.[meta.name] ?? autoPosition(i),
+          position: ownValue(schemaDef.positions, meta.name) ?? { x: 0, y: 0 },
           data: {
             meta,
             columns: tableData?.columns ?? meta.columns.map((c) => c.name),
@@ -146,7 +220,23 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
             rids: tableData?.rids ?? [],
           },
         };
-      }),
+      });
+      // These estimates are only for the hidden measurement pass. The browser's
+      // actual card bounds determine the visible layout, including loaded fonts.
+      const boxes = initial.map((node) => ({
+        id: node.id, position: node.position,
+        width: Math.max(180, node.data.meta.columns.reduce((sum, column, i) => {
+          const chars = Math.max(column.name.length + (column.type?.length ?? 0),
+            ...node.data.rows.map((row) => formatValue(row[i]).length));
+          return sum + chars * 8 + 48;
+        }, 0)),
+        height: 64 + node.data.rows.length * 18,
+      }));
+      const layout = schemaDef.positions ? separateSchemaTables(boxes) : packSchemaTables(boxes);
+      return initial.map((node, i) => ({
+        ...node, position: ownValue(schemaDef.positions, node.id) ?? layout[i].position,
+      }));
+    },
     [schema, schemaDef, liveTableData, snapshots]
   );
 
@@ -167,7 +257,7 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
           targetHandle: e.targetHandle,
           type: 'fk' as const,
           data: { lane: Math.max(sourceLane, targetLane) },
-          ariaLabel: `${e.source}.${e.sourceHandle} primary key to ${e.target}.${e.targetHandle} foreign key`,
+          ariaLabel: `${e.source}.${e.sourceHandle} referenced key to ${e.target}.${e.targetHandle} foreign key`,
         };
       });
     },
@@ -175,26 +265,22 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
   );
 
   return (
+    <KeyRoutesReadyContext.Provider value={readyRevision === schemaRevision}>
     <ReactFlow
-      key={`${schemaDef.id}-${schema.map((table) => table.name).join(',')}`}
+      key={`${schemaDef.id}-${schemaRevision}`}
       defaultNodes={nodes}
       defaultEdges={edges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
-      fitView
-      fitViewOptions={{
-        // Wide screens: clear the left panel column and the playback dock.
-        padding: isWide
-          ? { left: '360px', right: '32px', top: '16px', bottom: '110px' }
-          : { x: '16px', top: '16px', bottom: '90px' },
-      }}
-      minZoom={0.15}
+      fitViewOptions={fitOptions}
+      minZoom={0.02}
       maxZoom={2}
       proOptions={{ hideAttribution: true }}
       nodesConnectable={false}
       deleteKeyCode={null}
       panActivationKeyCode={null}
-      className="!bg-canvas"
+      className={`!bg-canvas ${readyRevision === schemaRevision ? '' : '[&_.react-flow__nodes]:opacity-0 [&_.react-flow__edges]:opacity-0'}`}
+      data-layout-ready={readyRevision === schemaRevision}
     >
       {/* Drafting paper: a fine minor grid with a fainter major grid over it. */}
       <Background
@@ -214,9 +300,10 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
       <Controls
         position="bottom-right"
         showInteractive={false}
+        fitViewOptions={fitOptions}
         className="!hidden !border-line-strong !bg-panel lg:!block [&>button]:!border-line [&>button]:!bg-panel [&>button]:!fill-ink-dim [&>button:hover]:!bg-white/5"
       />
-      <NodeDataSync nodes={nodes} />
+      <CanvasSync nodes={nodes} edges={edges} handLayout={!!schemaDef.positions} fitOptions={fitOptions} onReady={onReady} />
       <Panel position="top-center">
         <TracePin />
       </Panel>
@@ -225,5 +312,6 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
         <StateLegend />
       </Panel>
     </ReactFlow>
+    </KeyRoutesReadyContext.Provider>
   );
 });

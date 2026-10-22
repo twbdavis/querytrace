@@ -1,12 +1,16 @@
 'use client';
 
-import { memo, useMemo } from 'react';
-import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
+import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Handle, Position, useReactFlow, useStore, type NodeProps, type Node } from '@xyflow/react';
 import { useAppStore, useCurrentStep, useHighlight, type Selection } from '@/store/useAppStore';
 import type { TableMeta } from '@/lib/schemas';
 import { accents, rowStates, surfaces } from '@/styles/theme';
 import type { Stage } from '@/lib/traceEngine';
 import { CheckIcon } from './Icons';
+import { ownValue } from '@/lib/records';
+import { TABLE_FULL_ROWS, TABLE_ROW_HEIGHT, tableRowWindow, tableSceneRowLimit, widestTableValues } from '@/lib/tableRowWindow';
+import { formatValue } from '@/lib/formatValue';
+import { useSafeUpdateNodeInternals } from '@/lib/useSafeUpdateNodeInternals';
 
 export interface TableNodeData extends Record<string, unknown> {
   meta: TableMeta;
@@ -33,6 +37,7 @@ const STAGE_COL_ACCENT: Record<Stage, string> = {
   select: 'border-b-accent-result text-accent-result',
   orderLimit: 'border-b-ink-dim text-ink-dim',
   modify: 'border-b-accent-result text-accent-result',
+  create: 'border-b-accent-result text-accent-result',
 };
 
 const STAGE_CELL_ACCENT: Record<Stage, string> = {
@@ -46,17 +51,12 @@ const STAGE_CELL_ACCENT: Record<Stage, string> = {
   select: 'bg-accent-result/20',
   orderLimit: 'bg-ink-dim/20',
   modify: 'bg-accent-result/20',
+  create: 'bg-accent-result/20',
 };
 
 function hexToRgba(hex: string, alpha: number): string {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
-
-function fmt(v: unknown): string {
-  if (v === null || v === undefined) return 'NULL';
-  if (typeof v === 'number' && !Number.isInteger(v)) return v.toFixed(2);
-  return String(v);
 }
 
 // A hover should update the affected row styles, not rebuild every data cell.
@@ -99,6 +99,7 @@ const TableRow = memo(function TableRow({
       title={dimmed ? 'Eliminated at this stage' : 'Click to trace this row everywhere it contributes'}
       className={`col-span-full my-px grid grid-cols-subgrid rounded-sm border-l-4 transition-[background-color,opacity,border-color] duration-150 ${dimmed ? 'cursor-default' : 'cursor-pointer'}`}
       style={{
+        height: TABLE_ROW_HEIGHT - 2,
         backgroundColor: dimmed ? TRANSPARENT : bg,
         opacity: dimmed ? 0.3 : 1,
         borderLeftColor: dimmed ? TRANSPARENT : leftBorder,
@@ -124,22 +125,90 @@ const TableRow = memo(function TableRow({
           {ci === 0 && inspecting && !dimmed && (
             <CheckIcon size={11} strokeWidth={3} className="absolute left-1 top-1/2 -translate-y-1/2 text-accent-result" />
           )}
-          {fmt(v)}
+          {formatValue(v)}
         </div>
       ))}
     </div>
   );
 });
 
-function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
+function TableNodeInner({ id, data }: NodeProps<TableFlowNode>) {
   const { meta, columns, rows, rids } = data;
+  const updateNodeInternals = useSafeUpdateNodeInternals();
+  const flow = useReactFlow<TableFlowNode>();
+  const geometry = useStore((state) => {
+    const node = state.nodeLookup.get(id);
+    const position = node?.internals.positionAbsolute ?? { x: 0, y: 0 };
+    const [tx, ty, zoom] = state.transform;
+    const tables = state.nodes.flatMap((candidate) => {
+      const internal = state.nodeLookup.get(candidate.id);
+      const absolute = internal?.internals.positionAbsolute ?? candidate.position;
+      const width = candidate.measured?.width;
+      const height = candidate.measured?.height;
+      // Unknown sizes participate in the initial budget, before expensive DOM measurement.
+      const visible = !width || !height || (absolute.x * zoom + tx < state.width && (absolute.x + width) * zoom + tx > 0 && absolute.y * zoom + ty < state.height && (absolute.y + height) * zoom + ty > 0);
+      return visible ? [{ rows: Array.isArray(candidate.data.rows) ? candidate.data.rows.length : 0, columns: Array.isArray(candidate.data.columns) ? candidate.data.columns.length : 0 }] : [];
+    });
+    const budget = tableSceneRowLimit(tables);
+    const allTables = state.nodes.map((candidate) => ({ rows: Array.isArray(candidate.data.rows) ? candidate.data.rows.length : 0, columns: Array.isArray(candidate.data.columns) ? candidate.data.columns.length : 0 }));
+    const sceneWindowed = tableSceneRowLimit(allTables).windowed;
+    return [tx, ty, zoom, state.width, state.height, position.x, position.y, node?.measured.width ?? 0, budget.limit, sceneWindowed] as const;
+  }, (a, b) => a.every((value, i) => value === b[i]));
+  const fkEdges = useAppStore((s) => s.fkEdges);
   const step = useCurrentStep();
   const highlight = useHighlight();
   const selection = useAppStore((s) => s.selection);
   const selectRow = useAppStore((s) => s.selectRow);
   const setHoveredRow = useAppStore((s) => s.setHoveredRow);
+  const [fontsReady, setFontsReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void document.fonts.ready.then(() => { if (active) setFontsReady(true); });
+    return () => { active = false; };
+  }, []);
 
   const table = meta.name;
+  const virtual = rows.length > TABLE_FULL_ROWS || geometry[9];
+  const selectedIndex = selection?.table === table ? rids.indexOf(selection.rid) : undefined;
+  const visibleIndices = tableRowWindow({
+    count: rows.length, nodeX: geometry[5], nodeY: geometry[6], width: geometry[7], bodyOffset: 62,
+    transform: [geometry[0], geometry[1], geometry[2]], viewportWidth: geometry[3], viewportHeight: geometry[4],
+    pinned: selectedIndex,
+    rowLimit: geometry[8], windowed: virtual,
+  });
+  const widthProbes = useMemo(() => {
+    if (!virtual) return [];
+    const context = document.createElement('canvas').getContext('2d');
+    if (context) {
+      const family = getComputedStyle(document.body).getPropertyValue('--font-data');
+      context.font = `11px ${family || 'ui-monospace'}, monospace`;
+    }
+    return widestTableValues(rows, columns.length, formatValue, context ? (text) => context.measureText(text).width : undefined);
+  }, [rows, columns.length, virtual, fontsReady]);
+  useEffect(() => {
+    if (!virtual || selectedIndex === undefined || selectedIndex < 0) return;
+    const node = flow.getInternalNode(id);
+    if (!node) return;
+    const viewport = flow.getViewport();
+    const y = node.internals.positionAbsolute.y + 62 + (selectedIndex + 0.5) * TABLE_ROW_HEIGHT;
+    const key = node.internals.handleBounds?.source?.[0];
+    const x = node.internals.positionAbsolute.x + (key ? key.x + key.width / 2 : Math.min((node.measured.width ?? 180) / 2, 240));
+    const screenY = y * viewport.zoom + viewport.y;
+    const screenX = x * viewport.zoom + viewport.x;
+    if (viewport.zoom < 0.4 || screenY < 40 || screenY > geometry[4] - 160 || screenX < 40 || screenX > geometry[3] - 40) {
+      void flow.setCenter(x, y, { zoom: Math.max(viewport.zoom, 0.8), duration: 0 });
+    }
+  }, [selection, selectedIndex, virtual, id, flow, geometry[3], geometry[4]]);
+  const referencedColumns = useMemo(
+    () => new Set(fkEdges.filter((edge) => edge.source === table).map((edge) => edge.sourceHandle)),
+    [fkEdges, table]
+  );
+  useEffect(() => {
+    // Columns can trade width while the table's total size stays unchanged.
+    // React Flow's outer ResizeObserver cannot see that movement, so measure
+    // the key handles again after the displayed table content changes.
+    updateNodeInternals(id);
+  }, [id, meta, columns, rows, referencedColumns, widthProbes, updateNodeInternals]);
   const pkIndices = useMemo(
     () => new Set(columns.map((column, index) => (meta.columns.find((c) => c.name === column)?.pk ? index : -1)).filter((index) => index >= 0)),
     [columns, meta]
@@ -164,13 +233,37 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
 
   const rowState = (rid: number): { kind: RowKind; color?: string } => {
     if (!step) return { kind: 'neutral' };
-    if (step.dimmedRows[table]?.has(rid)) return { kind: 'dimmed' };
-    const groupColor = step.groupColors?.[table]?.[rid];
+    if (ownValue(step.dimmedRows, table)?.has(rid)) return { kind: 'dimmed' };
+    const groupColor = ownValue(ownValue(step.groupColors, table), rid);
     if (groupColor) return { kind: 'group', color: groupColor };
-    if (step.nullExtendedRows?.[table]?.has(rid)) return { kind: 'nullext' };
-    if (step.litRows[table]?.has(rid)) return { kind: 'lit' };
+    if (ownValue(step.nullExtendedRows, table)?.has(rid)) return { kind: 'nullext' };
+    if (ownValue(step.litRows, table)?.has(rid)) return { kind: 'lit' };
     return { kind: 'neutral' };
   };
+
+  const rowElements: ReactNode[] = [];
+  let nextRow = 0;
+  const spacer = (first: number, end: number) => (
+    <div key={`gap-${first}`} aria-hidden="true" data-table-spacer className="col-span-full relative overflow-hidden" style={{ height: (end - first) * TABLE_ROW_HEIGHT }}>
+      {geometry[2] < 0.5 && end - first > 20 && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 whitespace-nowrap text-ink-mute" title={`Zoom and pan to inspect rows ${first + 1}–${end}`} style={{ fontSize: 11 / geometry[2] }}>
+          Zoom in
+        </span>
+      )}
+    </div>
+  );
+  for (const ri of visibleIndices) {
+    if (ri > nextRow) rowElements.push(spacer(nextRow, ri));
+    const rid = rids[ri];
+    const { kind, color } = rowState(rid);
+    const inHighlight = ownValue(highlight?.rows, table)?.has(rid) ?? false;
+    const isPinned = (selection?.table === table && selection.rid === rid) || (ownValue(highlight?.pinnedRows, table)?.has(rid) ?? false);
+    rowElements.push(<TableRow key={rid} row={rows[ri]} ri={ri} rid={rid} table={table} kind={kind} color={color}
+      inHighlight={inHighlight} isPinned={isPinned} traceActive={!!step} pkIndices={pkIndices}
+      activeColumnIndices={activeColumnIndices} cellAccent={cellAccent} selectRow={selectRow} setHoveredRow={setHoveredRow} />);
+    nextRow = ri + 1;
+  }
+  if (virtual && nextRow < rows.length) rowElements.push(spacer(nextRow, rows.length));
 
   return (
     <div
@@ -224,7 +317,7 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
             >
               {/* Invisible handles measure each key column's horizontal center.
                   The wire projects that center to the table's top/bottom border. */}
-              {c.pk && (
+              {(c.pk || referencedColumns.has(c.name)) && (
                 <Handle
                   id={c.name}
                   type="source"
@@ -288,33 +381,12 @@ function TableNodeInner({ data }: NodeProps<TableFlowNode>) {
           ))}
         </div>
 
-        {rows.map((row, ri) => {
-          const rid = rids[ri];
-          const { kind, color } = rowState(rid);
-          const inHighlight = highlight?.rows[table]?.has(rid) ?? false;
-          const isPinned =
-            (selection?.table === table && selection.rid === rid) ||
-            (highlight?.pinnedRows[table]?.has(rid) ?? false);
-          return (
-            <TableRow
-              key={rid}
-              row={row}
-              ri={ri}
-              rid={rid}
-              table={table}
-              kind={kind}
-              color={color}
-              inHighlight={inHighlight}
-              isPinned={isPinned}
-              traceActive={!!step}
-              pkIndices={pkIndices}
-              activeColumnIndices={activeColumnIndices}
-              cellAccent={cellAccent}
-              selectRow={selectRow}
-              setHoveredRow={setHoveredRow}
-            />
-          );
-        })}
+        {virtual && (
+          <div aria-hidden="true" className="col-span-full grid h-0 grid-cols-subgrid overflow-hidden pointer-events-none border-l-4 border-transparent">
+            {widthProbes.map((text, ci) => <div key={ci} className={`whitespace-nowrap border-r border-transparent last:border-r-0 px-1.5 ${ci === 0 ? 'pl-5' : ''}`}>{text}</div>)}
+          </div>
+        )}
+        {rowElements}
       </div>
     </div>
   );

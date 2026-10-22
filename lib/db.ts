@@ -1,4 +1,4 @@
-import type { Database, SqlJsStatic } from 'sql.js';
+import type { Database, SqlJsStatic, Statement } from 'sql.js';
 import type { FkEdgeDef, TableMeta } from './schemas';
 import {
   convertBackslashEscapes,
@@ -6,7 +6,9 @@ import {
   convertEscapeStringLiterals,
   hasUnterminatedLiteral,
   maskSql,
+  matchingParen,
   normalizePastedText,
+  operandStart,
   quoteIdent,
   replaceOutsideLiterals,
   splitSqlStatements,
@@ -18,8 +20,7 @@ import {
 import { registerCompatFunctions } from './compatFunctions';
 import { translateCasts } from './dialect';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
-
-export { quoteIdent, splitSqlStatements } from './sqlText';
+import { accountResultRow, ResourceLimitError, resultBudget } from './resourceLimits';
 
 /** A custom-schema build failure that can name the statement responsible. */
 export class SchemaBuildError extends Error {
@@ -93,7 +94,7 @@ const IGNORED_STATEMENT = new RegExp(
       'SELECT\\s+(?:pg_catalog\\.)?setval\\b',
       // SQL Server: ALTER TABLE t CHECK CONSTRAINT fk (enables a constraint that already exists)
       'ALTER\\s+TABLE\\b[^;]*?\\s(?:WITH\\s+)?(?:NO)?CHECK\\s+CONSTRAINT\\b',
-      'ALTER\\s+TABLE\\s+(?:ONLY\\s+)?(?:IF\\s+EXISTS\\s+)?\\S+\\s+(?:OWNER\\s+TO|ENGINE\\s*=|AUTO_INCREMENT\\s*=|(?:DEFAULT\\s+)?(?:CHARSET|CHARACTER\\s+SET|COLLATE)|ENABLE|DISABLE|CLUSTER|SET\\s+\\()',
+      'ALTER\\s+TABLE\\s+(?:ONLY\\s+)?(?:IF\\s+EXISTS\\s+)?\\S+\\s+(?:OWNER\\s+TO|ENGINE\\s*=|(?:DEFAULT\\s+)?(?:CHARSET|CHARACTER\\s+SET|COLLATE)|ENABLE|DISABLE|CLUSTER|SET\\s+\\()',
       'GO$',
     ].join('|') +
     ')',
@@ -115,6 +116,7 @@ const TABLE_OPTION_ITEM =
 const TABLE_OPTIONS_TAIL = new RegExp(`\\)\\s*(?:${TABLE_OPTION_ITEM}\\s*,?\\s*)+$`, 'i');
 
 const INTEGER_TYPES = '(?:TINYINT|SMALLINT|MEDIUMINT|BIGINT|INTEGER|INT)';
+const AUTO_KEY_MARKER = '/*__qt_automatic_key__*/';
 
 /** Keywords after which a `schema.` prefix names a table (never a column). */
 const TABLE_POSITION = new RegExp(
@@ -145,6 +147,10 @@ function stripPrefixLengths(text: string): string {
  */
 function normalizeColumnDefinitions(input: string): string {
   let text = input;
+  for (const options of maskSql(text).matchAll(/\bIDENTITY\s*\(([^)]*)\)/gi)) {
+    const defaults = options[1].trim() === '1,1' || options[1].trim().replace(/\bSTART\s+(?:WITH\s+)?1\b|\bINCREMENT\s+(?:BY\s+)?1\b/gi, '').trim() === '';
+    if (!defaults) throw new SchemaBuildError('Custom identity START / INCREMENT options are not supported. Use the default START WITH 1 INCREMENT BY 1, or supply explicit key values.');
+  }
   const sub = (pattern: RegExp, replacement: string | ((original: string, match: RegExpMatchArray) => string)) => {
     text = replaceOutsideLiterals(text, pattern, replacement);
   };
@@ -159,7 +165,7 @@ function normalizeColumnDefinitions(input: string): string {
     ),
     'INTEGER'
   );
-  sub(/\bAUTO_INCREMENT\b(?!\s*=)/gi, '');
+  sub(/\bAUTO_INCREMENT\b(?!\s*=)/gi, AUTO_KEY_MARKER);
   // SQL Server column-level "FOREIGN KEY REFERENCES parent(id)": SQLite spells the column form without FOREIGN KEY.
   sub(/\bFOREIGN\s+KEY\s+(?=REFERENCES\b)/gi, '');
   // MySQL Workbench 8 appends VISIBLE / INVISIBLE to every index.
@@ -173,12 +179,12 @@ function normalizeColumnDefinitions(input: string): string {
   // PostgreSQL 10+ / Oracle 12c identity columns: "GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]".
   sub(
     new RegExp(`\\b${INTEGER_TYPES}\\b\\s+(?:NOT\\s+NULL\\s+)?GENERATED\\s+(?:ALWAYS|BY\\s+DEFAULT)(?:\\s+ON\\s+NULL)?\\s+AS\\s+IDENTITY\\b(?:\\s*\\([^)]*\\))?`, 'gi'),
-    (original) => (/\bNOT\s+NULL\b/i.test(original) ? 'INTEGER NOT NULL' : 'INTEGER')
+    (original) => `${/\bNOT\s+NULL\b/i.test(original) ? 'INTEGER NOT NULL' : 'INTEGER'} ${AUTO_KEY_MARKER}`
   );
-  sub(/\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)(?:\s+ON\s+NULL)?\s+AS\s+IDENTITY\b(?:\s*\([^)]*\))?/gi, '');
-  sub(new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'), 'INTEGER');
-  sub(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, '');
-  sub(/\b(?:BIG|SMALL)?SERIAL\b/gi, 'INTEGER');
+  sub(/\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)(?:\s+ON\s+NULL)?\s+AS\s+IDENTITY\b(?:\s*\([^)]*\))?/gi, AUTO_KEY_MARKER);
+  sub(new RegExp(`\\b${INTEGER_TYPES}\\b\\s+IDENTITY\\s*(?:\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?`, 'gi'), `INTEGER ${AUTO_KEY_MARKER}`);
+  sub(/\bIDENTITY\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?/gi, AUTO_KEY_MARKER);
+  sub(/\b(?:BIG|SMALL)?SERIAL\b/gi, `INTEGER ${AUTO_KEY_MARKER}`);
   // A DECIMAL(8,2) column must divide like a decimal (24.00 / 7 = 3.43). SQLite's
   // NUMERIC affinity would store 24.00 as the integer 24 and divide to 3, so
   // the type gets a REAL marker (the canvas shows the declared type without it).
@@ -194,7 +200,7 @@ function normalizeColumnDefinitions(input: string): string {
     "DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))))"
   );
   // Any other function-call default needs SQLite's parentheses: DEFAULT (expr).
-  sub(/\bDEFAULT\s+(?!\()([A-Za-z_]\w*\s*\((?:[^()]|\([^()]*\))*\))/gi, (original, match) => `${original.slice(0, original.length - match[1].length)}(${match[1]})`);
+  sub(/\bDEFAULT\s+(?!\()([A-Za-z_]\w*\s*\((?:[^()]|\([^()]*\))*\))/gi, (original, match) => `${original.slice(0, original.length - match[1].length)}(${original.slice(-match[1].length)})`);
   // Type spellings SQLite's "TYPE(n)" grammar rejects.
   sub(/\(\s*MAX\s*\)/gi, ''); // NVARCHAR(MAX)
   // PostgreSQL "timestamp(3) with time zone": SQLite wants the size last, and keeps no zone.
@@ -231,6 +237,15 @@ function normalizeColumnDefinitions(input: string): string {
  */
 function normalizeStatement(statement: SqlStatement): string {
   let text = statement.text;
+  // Preserve boolean conversions before the remaining type decorations are removed.
+  for (;;) {
+    const masked = maskSql(text);
+    const cast = masked.match(/::\s*BOOL(?:EAN)?\b/i);
+    if (!cast || cast.index === undefined) break;
+    const start = operandStart(masked, cast.index);
+    if (start === cast.index) throw new SchemaBuildError('A BOOLEAN cast needs a value before ::boolean.', statement.text);
+    text = `${text.slice(0, start)}QT_BOOLEAN(${text.slice(start, cast.index).trim()})${text.slice(cast.index + cast[0].length)}`;
+  }
   const sub = (pattern: RegExp, replacement: string | ((original: string, match: RegExpMatchArray) => string)) => {
     text = replaceOutsideLiterals(text, pattern, replacement);
   };
@@ -271,6 +286,7 @@ function normalizeStatement(statement: SqlStatement): string {
   if (head(/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b/i)) {
     // Temporary tables live outside the schema the canvas reads; make them ordinary.
     sub(/^CREATE\s+TEMP(?:ORARY)?\s+TABLE\b/i, 'CREATE TABLE');
+    text = translateCasts(text);
     text = normalizeColumnDefinitions(text);
     // Inline secondary indexes: SQLite only accepts them as separate CREATE
     // INDEX statements, and the canvas does not draw them anyway. A column
@@ -300,7 +316,7 @@ function normalizeStatement(statement: SqlStatement): string {
     text = text.replace(/('\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2})'/g, "$1:00'");
   }
   // CAST(N'2024-01-01' AS Date) and CONVERT(...) in row data.
-  if (head(/^(?:INSERT|REPLACE|UPDATE)\b/i) && /\b(?:CAST|CONVERT)\s*\(/i.test(maskSql(text))) {
+  if (head(/^(?:CREATE\s+TABLE|INSERT|REPLACE|UPDATE)\b/i) && /\b(?:CAST|CONVERT)\s*\(/i.test(maskSql(text))) {
     try {
       text = translateCasts(text);
     } catch {
@@ -378,11 +394,15 @@ export interface PreparedStatement {
   summary: string;
   /** The statement as the author wrote it, so an error can point at it. */
   source: string;
+  /** Internal sequence settings to apply immediately after CREATE TABLE. */
+  initializers?: string[];
+  initializerTable?: string;
 }
 
 interface Classified extends PreparedStatement {
   kind: 'create' | 'insert' | 'update' | 'delete' | 'index' | 'alter';
   table: string;
+  automaticKeySeed?: number;
 }
 
 const CREATE_TABLE_HEAD = new RegExp(`^CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${TABLE_NAME}`, 'i');
@@ -429,7 +449,8 @@ function classify(sql: string, source: string): Classified {
     if (/\bLIKE\b/i.test(masked) && !/\(/.test(masked)) {
       reject(`CREATE TABLE ... LIKE is not supported here. Declare the columns of ${table} explicitly.`);
     }
-    return { sql, source, summary: `CREATE TABLE ${table}`, kind: 'create', table };
+    const seed = maskSql(source).match(/\bAUTO_INCREMENT\s*=\s*(\d+)\b/i);
+    return { sql, source, summary: `CREATE TABLE ${table}`, kind: 'create', table, automaticKeySeed: seed ? Number(seed[1]) : undefined };
   }
   if ((match = masked.match(INSERT_HEAD))) {
     const table = captured(sql, match, 1);
@@ -495,6 +516,12 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
       // SQL Server: ALTER TABLE t WITH CHECK ADD CONSTRAINT ...
       const action = rawAction.replace(/^WITH\s+(?:NO)?CHECK\s+/i, '');
       const masked = maskSql(action);
+      const seed = masked.match(/^AUTO_INCREMENT\s*=\s*(\d+)\s*$/i);
+      if (seed) {
+        if (!create) throw new SchemaBuildError(`${statement.summary}: AUTO_INCREMENT needs a table created in this script.`, statement.source);
+        create.automaticKeySeed = Number(seed[1]);
+        continue;
+      }
       // SQL Server scripts a column default as its own constraint.
       const defaultFor = masked.match(new RegExp(`^ADD\\s+(?:CONSTRAINT\\s+${QUOTED_OR_WORD}\\s+)?DEFAULT\\s+`, 'i'));
       if (defaultFor) {
@@ -587,19 +614,78 @@ function foldAlterStatements(statements: Classified[]): Classified[] {
 
 /** Swap a CREATE TABLE column's definition (its own line) for a new one; null when the column is not found. */
 function replaceColumnDefinition(createSql: string, column: string, definition: string): string | null {
-  const name = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`^([ \\t]*)(?:"${name}"|\`${name}\`|\\[${name}\\]|${name})\\s+[^,\\n]*?(,?)[ \\t]*$`, 'im');
-  if (!pattern.test(createSql)) return null;
-  return createSql.replace(pattern, (_, indent: string, comma: string) => `${indent}${quoteIdent(column)} ${definition}${comma}`);
+  const body = createBody(createSql);
+  if (!body) return null;
+  const index = body.parts.findIndex((part) => columnName(part)?.toLowerCase() === column.toLowerCase());
+  if (index === -1) return null;
+  // MySQL MODIFY replaces the type/attributes while existing keys remain attached.
+  if (/\bPRIMARY\s+KEY\b/i.test(maskSql(body.parts[index])) && !/\bPRIMARY\s+KEY\b/i.test(maskSql(definition))) definition += ' PRIMARY KEY';
+  if (/\bUNIQUE\b/i.test(maskSql(body.parts[index])) && !/\bUNIQUE\b/i.test(maskSql(definition))) definition += ' UNIQUE';
+  body.parts[index] = `${quoteIdent(column)} ${definition}`;
+  return rebuildCreate(createSql, body);
 }
 
 /** Give a CREATE TABLE column a DEFAULT when its definition has none. */
 function addColumnDefault(createSql: string, column: string, value: string): string {
-  const name = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`^([ \\t]*(?:"${name}"|\`${name}\`|\\[${name}\\]|${name})\\s+[^,\\n]*?)(,?)[ \\t]*$`, 'im');
-  return createSql.replace(pattern, (line, definition: string, comma: string) =>
-    /\bDEFAULT\b/i.test(definition) ? line : `${definition} DEFAULT ${value}${comma}`
-  );
+  const body = createBody(createSql);
+  if (!body) return createSql;
+  const index = body.parts.findIndex((part) => columnName(part)?.toLowerCase() === column.toLowerCase());
+  if (index === -1 || /\bDEFAULT\b/i.test(maskSql(body.parts[index]))) return createSql;
+  body.parts[index] += ` DEFAULT ${value}`;
+  return rebuildCreate(createSql, body);
+}
+
+function createBody(sql: string): { open: number; close: number; parts: string[] } | null {
+  const masked = maskSql(sql);
+  const open = masked.indexOf('(');
+  const close = open === -1 ? -1 : matchingParen(masked, open);
+  return close === -1 ? null : { open, close, parts: splitTopLevel(sql.slice(open + 1, close)) };
+}
+
+function columnName(part: string): string | undefined {
+  const match = maskSql(part).match(new RegExp(`^(${QUOTED_OR_WORD})\\s+`, 'i'));
+  if (!match || /^(?:CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK)\b/i.test(maskSql(part))) return undefined;
+  return unquoteIdent(part.slice(0, match[1].length));
+}
+
+function rebuildCreate(sql: string, body: { open: number; close: number; parts: string[] }): string {
+  return `${sql.slice(0, body.open + 1)}\n  ${body.parts.join(',\n  ')}\n${sql.slice(body.close)}`;
+}
+
+function finalizeAutomaticKeys(statement: Classified): Classified {
+  if (statement.kind !== 'create') return statement;
+  if (!statement.sql.includes(AUTO_KEY_MARKER)) {
+    if ((statement.automaticKeySeed ?? 1) > 1) throw new SchemaBuildError('An AUTO_INCREMENT seed requires an automatic INTEGER PRIMARY KEY column.', statement.source);
+    return statement;
+  }
+  const body = createBody(statement.sql);
+  if (!body) return statement;
+  const automatic = body.parts.filter((part) => part.includes(AUTO_KEY_MARKER));
+  if (automatic.length !== 1) throw new SchemaBuildError('Automatic keys require one INTEGER PRIMARY KEY column per table.', statement.source);
+  const column = columnName(automatic[0]);
+  const index = body.parts.indexOf(automatic[0]);
+  const primary = body.parts.findIndex((part) => new RegExp(`^(?:CONSTRAINT\\s+${QUOTED_OR_WORD}\\s+)?PRIMARY\\s+KEY\\b`, 'i').test(maskSql(part)));
+  const primaryColumns = primary === -1 ? [] : splitTopLevel(body.parts[primary].slice(body.parts[primary].indexOf('(') + 1, body.parts[primary].lastIndexOf(')'))).map((name) => unquoteIdent(name.trim().replace(/\s+(?:ASC|DESC)\s*$/i, '').replace(new RegExp(`\\s+COLLATE\\s+${QUOTED_OR_WORD}\\s*$`, 'i'), '')));
+  const inline = /\bPRIMARY\s+KEY\b/i.test(maskSql(body.parts[index]));
+  if (!inline && (primaryColumns.length !== 1 || primaryColumns[0].toLowerCase() !== column?.toLowerCase())) {
+    throw new SchemaBuildError(`Automatic key ${column ?? ''} needs to be the table's single INTEGER PRIMARY KEY. Add PRIMARY KEY to that column, or supply explicit values.`, statement.source);
+  }
+  let definition = body.parts[index].replace(AUTO_KEY_MARKER, '').trim();
+  definition = inline ? definition.replace(/\bPRIMARY\s+KEY\b/i, 'PRIMARY KEY AUTOINCREMENT') : `${definition} PRIMARY KEY AUTOINCREMENT`;
+  body.parts[index] = definition;
+  if (!inline) body.parts.splice(primary, 1);
+  const sql = rebuildCreate(statement.sql, body);
+  const seed = statement.automaticKeySeed;
+  let initializers: string[] | undefined;
+  if (seed !== undefined && seed > 1) {
+    if (!Number.isSafeInteger(seed)) throw new SchemaBuildError('AUTO_INCREMENT seed must be a safe whole number.', statement.source);
+    const tableLiteral = `'${unquoteIdent(statement.table).replace(/'/g, "''")}'`;
+    initializers = [
+      `UPDATE sqlite_sequence SET seq = MAX(seq, ${seed - 1}) WHERE name = ${tableLiteral}`,
+      `INSERT INTO sqlite_sequence(name, seq) SELECT ${tableLiteral}, ${seed - 1} WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = ${tableLiteral})`,
+    ];
+  }
+  return { ...statement, sql, initializers, initializerTable: initializers ? unquoteIdent(statement.table) : undefined };
 }
 
 /**
@@ -680,7 +766,48 @@ export function prepareCustomDdl(ddl: string): PreparedStatement[] {
     // Drop leading whitespace so the first keyword is at index 0.
     return classify(normalized.slice(maskSql(normalized).match(/^\s*/)![0].length), statement.text);
   });
-  return foldAlterStatements(classified).map(({ sql, summary, source }) => ({ sql, summary, source }));
+  return foldAlterStatements(classified).map(finalizeAutomaticKeys).map(({ sql, summary, source, initializers, initializerTable }) => ({ sql, summary, source, initializers, initializerTable }));
+}
+
+export interface QueryDdl {
+  sql: string;
+  /** Name of the created table or index, without identifier quotes. */
+  object: string;
+  type: 'table' | 'index';
+  /** Created table, or the table an index belongs to. */
+  table: string;
+  initializers?: string[];
+}
+
+/** Normalize one supported CREATE from the query editor using the schema-import rules. */
+export function prepareQueryDdl(input: string): QueryDdl {
+  const statements = splitSqlStatements(normalizePastedText(input));
+  if (statements.length !== 1) throw new SchemaBuildError('Run one CREATE statement at a time.');
+  const masked = statements[0].masked.trim();
+  if (/^CREATE\s+TEMP(?:ORARY)?\s+TABLE\b/i.test(masked)) {
+    throw new SchemaBuildError('Temporary tables are not displayed. Use CREATE TABLE for a table that appears on the canvas.');
+  }
+  if (!/^CREATE\s+(?:TABLE\b|(?:UNIQUE\s+)?INDEX\b)/i.test(masked)) {
+    throw new SchemaBuildError('The query editor supports CREATE TABLE and CREATE INDEX. Views, triggers and other CREATE objects are not displayed.');
+  }
+  if (/^CREATE\s+TABLE\b/i.test(masked) && /\bAS\s+(?:SELECT|WITH|VALUES)\b/i.test(masked)) {
+    throw new SchemaBuildError('CREATE TABLE ... AS SELECT is not supported here. Declare the columns explicitly, then use INSERT INTO ... SELECT.');
+  }
+  const prepared = prepareCustomDdl(input);
+  if (prepared.length !== 1) throw new SchemaBuildError('Run one CREATE TABLE or CREATE INDEX statement at a time.');
+  const { sql } = prepared[0];
+  const normalized = maskSql(sql);
+  const table = normalized.match(CREATE_TABLE_HEAD);
+  if (table) {
+    const name = unquoteIdent(captured(sql, table, 1));
+    return { sql, object: name, type: 'table', table: name, initializers: prepared[0].initializers };
+  }
+  const index = normalized.match(new RegExp(`^(CREATE\\s+(?:UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+)${TABLE_NAME}\\s+ON\\s+${TABLE_NAME}`, 'i'));
+  if (index) {
+    const name = unquoteIdent(sql.slice(index[1].length, index[1].length + index[2].length));
+    return { sql, object: name, type: 'index', table: unquoteIdent(captured(sql, index, 3)) };
+  }
+  throw new SchemaBuildError('Use CREATE TABLE with explicit columns or CREATE INDEX ... ON table (columns).');
 }
 
 /* ------------------------------------------------------------------------ */
@@ -723,6 +850,9 @@ export function enforceCustomSchemaLimits(db: Exec, schema: TableMeta[]): void {
       throw new Error(`Table "${table.name}" exceeds the ${MAX_CUSTOM_ROWS_PER_TABLE}-row limit.`);
     }
     totalRows += count;
+    // Validate values before a mutation commits, not only when the canvas
+    // later reads them. The shared trace budget also bounds repeated snapshots.
+    queryAll(db, `SELECT _rowid_, * FROM ${quoteIdent(table.name)}`);
   }
   if (totalColumns > MAX_CUSTOM_TOTAL_COLUMNS) {
     throw new Error(`Custom schemas are limited to ${MAX_CUSTOM_TOTAL_COLUMNS} total columns.`);
@@ -736,7 +866,11 @@ export function enforceCustomSchemaLimits(db: Exec, schema: TableMeta[]): void {
 function runStatements(db: Database, statements: PreparedStatement[]): void {
   for (const statement of statements) {
     try {
+      const existed = statement.initializerTable
+        ? db.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '${statement.initializerTable.replace(/'/g, "''")}' COLLATE NOCASE`).length > 0
+        : false;
       db.run(statement.sql);
+      if (!existed) for (const initializer of statement.initializers ?? []) db.run(initializer);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new SchemaBuildError(`${statement.summary}: ${message}`, statement.source);
@@ -766,7 +900,11 @@ function describeForeignKeyViolation(db: Database): string | null {
 
 /** Per-connection settings: the memory bound, referential integrity, and the dialect function library. */
 function applyConnectionSettings(db: Database, foreignKeys: boolean): void {
-  db.run(`PRAGMA max_page_count = 16384; PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'};`);
+  // Heap allocations (sorts, blobs, printf, joins) are separate from stored
+  // database pages. Bound both, including SQLite built-in scalar functions.
+  db.run('PRAGMA hard_heap_limit = 67108864;');
+  const pageSize = Number(db.exec('PRAGMA page_size')[0].values[0][0]);
+  db.run(`PRAGMA max_page_count = ${Math.floor(MAX_PERSISTED_DATABASE_BYTES / pageSize)}; PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'};`);
   registerCompatFunctions(db);
 }
 
@@ -866,11 +1004,65 @@ export interface QueryResult {
 
 interface Exec {
   exec(sql: string): Array<{ columns: string[]; values: unknown[][] }>;
+  prepare?(sql: string): Pick<Statement, 'getColumnNames' | 'free'> & Partial<Pick<Statement, 'step'>> & {
+    // sql.js supports this config, but the installed type declarations omit it.
+    get?(params?: undefined, config?: { useBigInt: boolean }): unknown[];
+  };
+}
+
+const MIN_TRACE_INTEGER = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_TRACE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** Keep INTEGER values exact until their suitability for numeric row identities is known. */
+function traceValue(value: unknown): unknown {
+  if (typeof value !== 'bigint') return value;
+  if (value < MIN_TRACE_INTEGER || value > MAX_TRACE_INTEGER) {
+    throw new ResourceLimitError(
+      'SQLite INTEGER values must be between -9007199254740991 and 9007199254740991 for exact browser tracing. Store larger identifiers as TEXT, or CAST a query result AS TEXT.'
+    );
+  }
+  return Number(value);
 }
 
 export function queryAll(db: Exec, sql: string): QueryResult {
+  const budget = resultBudget(db);
+  if (db.prepare) {
+    let first: QueryResult | undefined;
+    let metadataOnly = false;
+    for (const part of splitSqlStatements(sql)) {
+      const statement = db.prepare(part.text);
+      try {
+        // Minimal fake executors in engine tests can expose metadata only.
+        if (!statement.step || !statement.get) { metadataOnly = true; break; }
+        const columns = statement.getColumnNames();
+        const rows: unknown[][] = [];
+        while (statement.step()) {
+          // REAL values remain numbers; only INTEGER values become bigint.
+          const row = statement.get(undefined, { useBigInt: true }).map(traceValue);
+          accountResultRow(budget, row, rows.length + 1);
+          rows.push(row);
+        }
+        if (columns.length && !first) first = { columns, rows };
+      } finally {
+        statement.free();
+      }
+    }
+    // Every internal transaction cleanup statement has also been executed.
+    if (!metadataOnly) return first ?? { columns: [], rows: [] };
+  }
   const res = db.exec(sql);
-  if (res.length === 0) return { columns: [], rows: [] };
+  if (res.length === 0) {
+    // sql.js exec() omits a result set entirely when it has no rows. Read
+    // its metadata without stepping (or re-executing a mutation).
+    const statement = db.prepare?.(sql);
+    if (!statement) return { columns: [], rows: [] };
+    try {
+      return { columns: statement.getColumnNames(), rows: [] };
+    } finally {
+      statement.free();
+    }
+  }
+  res[0].values.forEach((row, i) => accountResultRow(budget, row, i + 1));
   return { columns: res[0].columns, rows: res[0].values };
 }
 
@@ -897,8 +1089,9 @@ export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEd
       );
     }
 
-    const info = queryAll(db, `PRAGMA table_info(${quoteIdent(table)})`);
-    // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+    const info = queryAll(db, `PRAGMA table_xinfo(${quoteIdent(table)})`);
+    // table_xinfo includes generated columns, which SELECT * also exposes.
+    // cid, name, type, notnull, dflt_value, pk, hidden
     const columns = info.rows.map((r) => ({
       name: String(r[1]),
       // The REAL marker in front of a decimal type (see normalizeColumnDefinitions) is an affinity hint, not the declared type.
@@ -919,12 +1112,15 @@ export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEd
     for (const f of fks.rows) {
       const parent = String(f[2]);
       const from = String(f[3]);
-      const to = f[4] === null ? null : String(f[4]);
+      const parentKeys = f[4] === null
+        ? queryAll(db, `PRAGMA table_xinfo(${quoteIdent(parent)})`).rows.filter((row) => Number(row[5]) > 0).sort((a, b) => Number(a[5]) - Number(b[5]))
+        : [];
+      const to = f[4] === null ? String(parentKeys[Number(f[1])]?.[1] ?? from) : String(f[4]);
       const col = columns.find((c) => c.name.toLowerCase() === from.toLowerCase());
       if (col) {
         col.fk = {
           table: parent,
-          column: to ?? from,
+          column: to,
           onUpdate: String(f[5] ?? 'NO ACTION'),
           onDelete: String(f[6] ?? 'NO ACTION'),
         };
@@ -941,10 +1137,9 @@ export function introspectSchema(db: Exec): { schema: TableMeta[]; fkEdges: FkEd
       const parent = schema.find((s) => s.name.toLowerCase() === c.fk!.table.toLowerCase());
       if (!parent) continue;
       c.fk.table = parent.name;
-      const parentPk = parent.columns.find((pc) => pc.pk);
-      if (!parent.columns.some((pc) => pc.name.toLowerCase() === c.fk!.column.toLowerCase())) {
-        c.fk.column = parentPk?.name ?? c.fk.column;
-      }
+      const parentColumn = parent.columns.find((pc) => pc.name.toLowerCase() === c.fk!.column.toLowerCase());
+      if (!parentColumn) continue;
+      c.fk.column = parentColumn.name;
       // Drawn PK -> FK: tail at the parent's PK column, arrowhead landing on
       // the dependent table's FK column.
       fkEdges.push({

@@ -14,7 +14,7 @@ async function verifyConnections(page: Page) {
       const point = points[i ? points.length - 1 : 0];
       const endpoint = new DOMPoint(point.x, point.y).matrixTransform(matrix);
       const side = connection.getAttribute(i ? 'data-target-side' : 'data-source-side');
-      return { x: endpoint.x, y: endpoint.y, expectedX: (cell.left + cell.right) / 2, expectedY: side === 'top' ? rect.top : rect.bottom };
+      return { x: endpoint.x, y: endpoint.y, side, expectedX: (cell.left + cell.right) / 2, expectedY: side === 'top' ? rect.top : rect.bottom };
     });
     return { points, ends, path: path.getAttribute('d') };
   }));
@@ -26,6 +26,7 @@ async function verifyConnections(page: Page) {
       expect(before.x === after.x || before.y === after.y).toBe(true);
     }
     for (const end of wire.ends) {
+      expect(['top', 'bottom']).toContain(end.side);
       expect(Math.abs(end.x - end.expectedX)).toBeLessThan(2);
       expect(Math.abs(end.y - end.expectedY)).toBeLessThan(2);
     }
@@ -34,8 +35,8 @@ async function verifyConnections(page: Page) {
 
 test('key wires use square bends and stay aligned with column borders when tables move', async ({ page }, testInfo) => {
   await page.goto('/trace');
+  await expect(page.locator('.react-flow')).toHaveAttribute('data-layout-ready', 'true');
   await expect(page.locator('.key-connection')).toHaveCount(3);
-  await expect(page.locator('.key-connection[data-target-side="bottom"]').first()).toBeAttached();
   await verifyConnections(page);
   if ((page.viewportSize()?.width ?? 0) >= 1024) {
     const node = page.getByTestId('rf__node-OBSERVATION');

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { useModalDialog } from '@/lib/useModalDialog';
 import { LESSONS } from '@/lib/lessons';
 import { PRELOADED_SCHEMAS } from '@/lib/schemas';
 import {
@@ -148,7 +149,7 @@ const TIPS = [
   'Queries written the MySQL, PostgreSQL, SQL Server or Oracle way are translated to SQLite. The rewrite appears under the editor so you learn both spellings.',
   'INSERT, UPDATE and DELETE run against the loaded tables and show the rows before and after the change.',
   'Drag tables to rearrange the schema. Pinch or scroll to zoom the canvas.',
-  'On larger screens, collapse the query and result panels to give the schema more room.',
+  'On larger screens, drag the panels’ right border to widen query and results, or the divider between them to adjust their heights. Either mouse button works. Collapse a panel to give the schema more room.',
   'Run a lesson, then edit its query one clause at a time and run it again. Watching a single change move through the stages is the fastest way to build intuition.',
 ];
 
@@ -221,14 +222,7 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
   const navRef = useRef<HTMLElement>(null);
   const [active, setActive] = useState(SECTIONS[0].id);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  const dialogRef = useModalDialog(open, onClose);
 
   // Track which section is under the reader so the navigation follows along.
   // A clicked target stays selected until its scroll settles or the reader takes over.
@@ -299,8 +293,12 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
   if (!open) return null;
 
   return (
-    <div
-      className="modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
+    <dialog
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Help"
+      className="app-modal modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
       // Close only for a press that starts and ends on the backdrop, so a
       // drag that begins inside the dialog (selecting text) never closes it.
       onMouseDown={(e) => {
@@ -313,9 +311,6 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
       }}
     >
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Help"
         className="modal-dialog-enter flex max-h-[88vh] w-full max-w-5xl flex-col rounded-md border border-line-strong bg-panel max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none max-sm:border-0"
       >
         <div className="flex items-center justify-between border-b border-line px-4 py-3 max-sm:min-h-14 max-sm:px-3 max-sm:pt-[calc(0.75rem+env(safe-area-inset-top))]">
@@ -659,6 +654,12 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
                 available. That storage belongs to this browser profile on this device. Clearing site data removes it,
                 and a private window starts fresh. If you want to keep a schema, keep the script.
               </Body>
+              <Body>
+                After a lesson, choose RESUME SAVED SCHEMA in Schema settings to return to your custom tables with
+                their saved changes. Building the script again replaces those tables with the script&apos;s starting
+                data. If another tab saves newer changes, QueryTrace restores that saved version and tells you to
+                review it before retrying your change.
+              </Body>
             </Section>
 
             {/* ------------------------------------------------ limits */}
@@ -720,6 +721,6 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

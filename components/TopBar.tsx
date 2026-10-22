@@ -13,6 +13,7 @@ interface TopBarProps {
 
 export function TopBar({ onOpenSchema, onOpenLessons, onOpenHelp, showRun = false }: TopBarProps) {
   const dbReady = useAppStore((state) => state.dbReady);
+  const schemaLoading = useAppStore((state) => state.schemaLoading);
   const runQuery = useAppStore((state) => state.runQuery);
 
   const chromeBtn =
@@ -29,7 +30,7 @@ export function TopBar({ onOpenSchema, onOpenLessons, onOpenHelp, showRun = fals
       <div className="flex shrink-0 items-center gap-2 max-sm:gap-1.5">
         {showRun && (
           <button
-            disabled={!dbReady}
+            disabled={!dbReady || schemaLoading}
             onClick={() => void runQuery()}
             className="panel-enter inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent-active bg-accent-active/10 px-2.5 py-1 font-ui text-[10px] font-bold tracking-wider text-accent-active transition-colors hover:bg-accent-active/20 disabled:cursor-wait disabled:opacity-40"
             aria-label="Run query"

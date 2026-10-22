@@ -3,10 +3,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 interface RevealProps {
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
-  /** Stagger offset in ms, applied as a transition delay. */
-  delay?: number;
 }
 
 type Phase = 'static' | 'hidden' | 'shown';
@@ -18,7 +16,7 @@ type Phase = 'static' | 'hidden' | 'shown';
  * fold, is it hidden and then revealed by an IntersectionObserver. So a slow
  * hydration can never leave the page blank.
  */
-export function Reveal({ children, className = '', delay = 0 }: RevealProps) {
+export function Reveal({ children, className = '' }: RevealProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>('static');
 
@@ -49,7 +47,6 @@ export function Reveal({ children, className = '', delay = 0 }: RevealProps) {
     <div
       ref={ref}
       className={`${motionClass} ${className}`}
-      style={delay && phase !== 'static' ? { transitionDelay: `${delay}ms` } : undefined}
     >
       {children}
     </div>

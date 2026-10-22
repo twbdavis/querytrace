@@ -1,16 +1,21 @@
+import { emptyRecord, ownValue } from './records';
 // Deep import: sqlite-only build, see lib/parser.ts.
 import { Parser } from 'node-sql-parser/build/sqlite';
+import type { Statement } from 'sql.js';
+import { queryAll } from './db';
+import { restoreOrderedAggregates } from './orderedAggregates';
 import type { AstExpr, FromItem, MutationAst, ParseOutcome, SelectAst } from './parser';
 import { cteItems, cteNames, containsAggregate, groupByExprs, hasNestedSelect, queryTableNames } from './parser';
 import { tidyIntegerCasts, tidyWindowSql, type DialectNote } from './dialect';
 import { rewriteDateArithmeticInSelect } from './dateArithmetic';
 import type { TableMeta } from './schemas';
-import { maskSql, quoteIdent } from './sqlText';
+import { maskSql, quoteIdent, stripComments, topLevelMatches } from './sqlText';
 import { GROUP_PALETTE } from '../styles/theme';
 
 /** Minimal executor interface so the engine is pure and unit-testable. */
 export interface SqlExec {
   exec(sql: string): Array<{ columns: string[]; values: unknown[][] }>;
+  prepare?(sql: string): Pick<Statement, 'getColumnNames' | 'free'> & Partial<Pick<Statement, 'step' | 'get'>>;
 }
 
 export type Stage =
@@ -23,6 +28,7 @@ export type Stage =
   | 'union'
   | 'select'
   | 'orderLimit'
+  | 'create'
   | 'modify';
 
 export interface ColumnRef {
@@ -116,12 +122,12 @@ function exprSql(expr: AstExpr): string {
     limit: null,
   };
   const sql = sqlifyParser.sqlify(dummy as never, SQLIFY_OPT);
-  return tidyWindowSql(sql.replace(/^SELECT\s+/i, ''));
+  return restoreOrderedAggregates(tidyWindowSql(sql.replace(/^SELECT\s+/i, '')));
 }
 
 /** Render a whole SELECT (with any CTEs) back to SQLite text. */
 function selectSql(ast: SelectAst): string {
-  return tidyWindowSql(sqlifyParser.sqlify(ast as never, SQLIFY_OPT));
+  return restoreOrderedAggregates(tidyWindowSql(sqlifyParser.sqlify(ast as never, SQLIFY_OPT)));
 }
 
 /** Collect every column_ref in an expression tree. Table is alias-or-null here. */
@@ -221,22 +227,21 @@ function fromClause(ctx: EngineCtx, k: number): string {
 }
 
 function exec(ctx: EngineCtx, sql: string): { columns: string[]; rows: unknown[][] } {
-  let res: Array<{ columns: string[]; values: unknown[][] }>;
+  let res: { columns: string[]; rows: unknown[][] };
   try {
-    res = ctx.db.exec(sql);
+    res = queryAll(ctx.db, sql);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new TraceError(`SQL error: ${msg}`);
   }
-  if (res.length === 0) return { columns: [], rows: [] };
   // A blob is shown by its size: the bytes mean nothing in a table cell and
   // a large one would be copied to the page for nothing.
-  const rows = res[0].values.map((row) =>
+  const rows = res.rows.map((row) =>
     row.some((value) => value instanceof Uint8Array)
       ? row.map((value) => (value instanceof Uint8Array ? `BLOB(${value.length} bytes)` : value))
       : row
   );
-  return { columns: res[0].columns, rows };
+  return { columns: res.columns, rows };
 }
 
 /** Read values and provenance together: separate SELECTs can use different scan orders. */
@@ -251,8 +256,8 @@ function execPipeline(ctx: EngineCtx, k: number, where: string | null) {
   const sources: Array<Record<string, number[]>> = [];
   const displayRows: unknown[][] = [];
   const tuples = rows.map((row) => {
-    const tuple: Record<string, number | null> = {};
-    const source: Record<string, number[]> = {};
+    const tuple: Record<string, number | null> = emptyRecord();
+    const source: Record<string, number[]> = emptyRecord();
     for (let i = 0; i <= k; i++) {
       const v = row[displayWidth + i];
       const rid = v === null || v === undefined ? null : Number(v);
@@ -270,7 +275,7 @@ function execPipeline(ctx: EngineCtx, k: number, where: string | null) {
 }
 
 function litFromTuples(ctx: EngineCtx, tuples: Array<Record<string, number | null>>): Record<string, Set<number>> {
-  const lit: Record<string, Set<number>> = {};
+  const lit: Record<string, Set<number>> = emptyRecord();
   for (const tuple of tuples) {
     for (const [alias, pk] of Object.entries(tuple)) {
       if (pk === null) continue;
@@ -286,7 +291,7 @@ function nullExtendedFromTuples(
   ctx: EngineCtx,
   tuples: Array<Record<string, number | null>>
 ): Record<string, Set<number>> | undefined {
-  const out: Record<string, Set<number>> = {};
+  const out: Record<string, Set<number>> = emptyRecord();
   let found = false;
   for (const tuple of tuples) {
     const hasNull = Object.values(tuple).some((v) => v === null);
@@ -302,9 +307,9 @@ function nullExtendedFromTuples(
 }
 
 function diffSets(prev: Record<string, Set<number>>, next: Record<string, Set<number>>): Record<string, Set<number>> {
-  const dimmed: Record<string, Set<number>> = {};
+  const dimmed: Record<string, Set<number>> = emptyRecord();
   for (const [table, pks] of Object.entries(prev)) {
-    const kept = next[table] ?? new Set<number>();
+    const kept = ownValue(next, table) ?? new Set<number>();
     const gone = new Set<number>();
     pks.forEach((pk) => {
       if (!kept.has(pk)) gone.add(pk);
@@ -444,10 +449,7 @@ function resultKey(row: unknown[]): string {
 
 function directExec(db: SqlExec, sql: string): { columns: string[]; rows: unknown[][] } {
   try {
-    const result = db.exec(sql);
-    return result.length
-      ? { columns: result[0].columns, rows: result[0].values }
-      : { columns: [], rows: [] };
+    return queryAll(db, sql);
   } catch (error) {
     throw new TraceError(`SQL error: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -714,7 +716,7 @@ function diffSnapshots(before: TableSnapshot, after: TableSnapshot): TableDiff {
 }
 
 /** Turn SQLite's constraint messages into a sentence a learner can act on. */
-function explainMutationError(message: string, statement: string, table: string): string {
+export function explainMutationError(message: string, statement: string, table: string): string {
   const verb = statement.toUpperCase();
   if (/FOREIGN KEY constraint failed/i.test(message)) {
     return statement === 'delete'
@@ -829,9 +831,11 @@ function buildMutationTrace(
   });
 
   // INSERT ... SELECT shows the rows it reads first.
-  const source = maskSql(sql).match(/^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+\S+(?:\s*\([^)]*\))?\s+(?=(?:SELECT|WITH)\b)/i);
+  const source = maskSql(sql).match(/^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(?:"[^"]*"|`[^`]*`|\[[^\]]*\]|\w+)(?:\s*\([^)]*\))?\s+(?=(?:SELECT|WITH)\b)/i);
   if (statement === 'insert' && source) {
-    const partialResult = limitPreview(directExec(db, sql.slice(source[0].length)));
+    const sourceSql = sql.slice(source[0].length);
+    const suffix = topLevelMatches(maskSql(sourceSql), /\bRETURNING\b|\bON\s+CONFLICT\b/gi)[0];
+    const partialResult = limitPreview(directExec(db, suffix ? sourceSql.slice(0, suffix.index) : sourceSql));
     steps.push({
       stage: 'subquery',
       label: `SOURCE SELECT - ${rowCountLabel(partialResult.rows.length)}`,
@@ -848,11 +852,23 @@ function buildMutationTrace(
 
   let matched: number[] = tableBefore.rids;
   if (statement !== 'insert') {
-    const whereSql = ast?.where ? exprSql(ast.where) : null;
+    const clauses = topLevelMatches(maskSql(sql), /\bFROM\b|\bWHERE\b|\bRETURNING\b/gi);
+    const clauseText = (keyword: string) => {
+      const index = clauses.findIndex((clause) => clause[0].toUpperCase() === keyword);
+      if (index < 0) return null;
+      const clause = clauses[index];
+      return sql.slice(clause.index! + clause[0].length, clauses[index + 1]?.index ?? sql.length).trim().replace(/;+\s*$/, '');
+    };
+    const whereSql = ast?.where ? exprSql(ast.where) : clauseText('WHERE');
+    const updateFrom = statement === 'update' ? clauseText('FROM') : null;
+    const targetHead = maskSql(sql).match(/^\s*UPDATE(?:\s+OR\s+\w+)?\s+(?:"[^"]*"|`[^`]*`|\w+)(?:\s+(?:AS\s+)?("[^"]*"|`[^`]*`|\w+))?\s+SET\b/i);
+    const aliasText = targetHead?.[1] ? sql.slice(targetHead[0].lastIndexOf(targetHead[1]), targetHead[0].lastIndexOf(targetHead[1]) + targetHead[1].length) : null;
+    const alias = ast?.table?.[0]?.as ?? (aliasText ? aliasText.replace(/^["`]|["`]$/g, '') : null);
+    const fromSql = alias ? `${quoteIdent(table)} AS ${quoteIdent(alias)}` : quoteIdent(table);
+    if (whereSql || updateFrom) {
+      matched = exec({ db } as EngineCtx, `SELECT DISTINCT ${quoteIdent(alias ?? table)}._rowid_ FROM ${fromSql}${updateFrom ? `, ${updateFrom}` : ''}${whereSql ? ` WHERE ${whereSql}` : ''}`).rows.map((row) => Number(row[0]));
+    }
     if (whereSql) {
-      const alias = ast?.table?.[0]?.as;
-      const fromSql = alias ? `${quoteIdent(table)} AS ${quoteIdent(alias)}` : quoteIdent(table);
-      matched = exec({ db } as EngineCtx, `SELECT _rowid_ FROM ${fromSql} WHERE ${whereSql}`).rows.map((row) => Number(row[0]));
       const kept = new Set(matched);
       const dimmed = new Set([...allRids].filter((rid) => !kept.has(rid)));
       steps.push({
@@ -860,10 +876,10 @@ function buildMutationTrace(
         label: `WHERE ${whereSql} - ${rowCountLabel(matched.length)} ${matched.length === 1 ? 'matches' : 'match'}`,
         narration: `The condition ${whereSql} picks the rows the ${statement.toUpperCase()} will touch: ${rowCountLabel(matched.length)} ${matched.length === 1 ? 'matches' : 'match'}, ${dimmed.size} ${dimmed.size === 1 ? 'is' : 'are'} left alone.`,
         activeTables: [table],
-        activeColumns: resolveColumnRefs(
+        activeColumns: ast?.where ? resolveColumnRefs(
           { schema, refs: [{ table, alias: alias ?? table }], aliasToTable: { [table.toLowerCase()]: table, ...(alias ? { [alias.toLowerCase()]: table } : {}) } } as EngineCtx,
-          ast!.where
-        ),
+          ast.where
+        ) : [],
         activeEdges: [],
         litRows: { [table]: kept },
         dimmedRows: dimmed.size ? { [table]: dimmed } : {},
@@ -876,27 +892,43 @@ function buildMutationTrace(
     } else {
       steps.push({
         stage: 'where',
-        label: `(no WHERE) - all ${rowCountLabel(matched.length)} selected`,
-        narration: `There is no WHERE clause, so every row of ${table} is affected. Add WHERE key = value to change only specific rows.`,
+        label: updateFrom ? `FROM match - ${rowCountLabel(matched.length)} selected` : `(no WHERE) - all ${rowCountLabel(matched.length)} selected`,
+        narration: updateFrom ? `The FROM sources select ${rowCountLabel(matched.length)} from ${table} for this UPDATE.` : `There is no WHERE clause, so every row of ${table} is affected. Add WHERE key = value to change only specific rows.`,
         activeTables: [table],
         activeColumns: [],
         activeEdges: [],
-        litRows: { [table]: new Set(allRids) },
+        litRows: { [table]: new Set(matched) },
         dimmedRows: {},
         tuples: tuplesFor(matched),
         tupleTables,
-        partialResult: { columns: tableBefore.columns, rows: tableBefore.rows },
+        partialResult: { columns: tableBefore.columns, rows: rowsFor(tableBefore, matched) },
         resultRowSources: sourcesFor(matched),
         tableSnapshots: before,
       });
     }
   }
 
+  // RETURNING is the actual statement result, including unchanged UPDATE
+  // rows. Carry its rowids in the same execution to preserve result order.
+  const hasReturning = topLevelMatches(maskSql(sql), /\bRETURNING\b/gi).length > 0;
+  const mutationSql = hasReturning
+    ? `${stripComments(sql).trim().replace(/;+\s*$/, '')}, _rowid_ AS __qt_returning_rid`
+    : sql;
+  let returned: { columns: string[]; rows: unknown[][] } | undefined;
+  let returnedRids: number[] = [];
+
   // Apply inside a savepoint so a rejected statement leaves nothing behind.
   directExec(db, 'SAVEPOINT qt_mutation');
   try {
-    directExec(db, sql);
+    const result = directExec(db, mutationSql);
+    if (hasReturning) {
+      returned = { columns: result.columns.slice(0, -1), rows: result.rows.map((row) => row.slice(0, -1)) };
+      returnedRids = result.rows.map((row) => Number(row.at(-1)));
+    }
     options.enforce?.();
+    // Deferred foreign keys are checked when the outermost savepoint is
+    // released. Keep that check in the rollback boundary too.
+    directExec(db, 'RELEASE qt_mutation');
   } catch (error) {
     directExec(db, 'ROLLBACK TO qt_mutation; RELEASE qt_mutation');
     // SQLite's own messages keep their "SQL error" prefix unless a friendlier
@@ -906,7 +938,6 @@ function buildMutationTrace(
     const explained = explainMutationError(message, statement, table);
     throw new TraceError(fromSqlite && explained.startsWith(message.replace(/\.\s*$/, '')) ? `SQL error: ${explained}` : explained);
   }
-  directExec(db, 'RELEASE qt_mutation');
 
   const after = snapshotAll(db, schema);
   const diffs = Object.fromEntries(schema.map((t) => [t.name, diffSnapshots(before[t.name], after[t.name])]));
@@ -915,7 +946,7 @@ function buildMutationTrace(
     return diff.inserted.length + diff.deleted.length + diff.modified.length > 0;
   });
   const main = diffs[table];
-  const lit: Record<string, Set<number>> = {};
+  const lit: Record<string, Set<number>> = emptyRecord();
   for (const name of changedTables) {
     const touched = [...diffs[name].inserted, ...diffs[name].modified];
     if (touched.length) lit[name] = new Set(touched);
@@ -929,15 +960,18 @@ function buildMutationTrace(
     return `${name}: ${parts.join(', ') || 'no change'}`;
   };
   const cascades = changedTables.filter((name) => name !== table);
+  // Changing an INTEGER PRIMARY KEY moves its SQLite rowid. That is still
+  // an UPDATE, even though the before/after identity diff is delete + insert.
+  const updatedCount = main.modified.length + Math.min(main.inserted.length, main.deleted.length);
   const summary =
     statement === 'insert'
       ? `${rowCountLabel(main.inserted.length)} added${main.modified.length ? `, ${rowCountLabel(main.modified.length)} replaced` : ''}`
       : statement === 'update'
-        ? `${rowCountLabel(main.modified.length)} changed`
+        ? `${rowCountLabel(updatedCount)} changed`
         : `${rowCountLabel(main.deleted.length)} removed`;
   const unchangedNote =
-    statement === 'update' && matched.length > main.modified.length
-      ? ` ${matched.length - main.modified.length} matched ${matched.length - main.modified.length === 1 ? 'row' : 'rows'} already held the new values.`
+    statement === 'update' && matched.length > updatedCount
+      ? ` ${matched.length - updatedCount} matched ${matched.length - updatedCount === 1 ? 'row' : 'rows'} already held the new values.`
       : '';
   const cascadeNote = cascades.length
     ? ` Foreign-key rules also changed ${cascades.map((name) => describe(name, diffs[name])).join('; ')}.`
@@ -948,6 +982,8 @@ function buildMutationTrace(
 
   const shown = statement === 'delete' ? main.deleted : [...main.inserted, ...main.modified];
   const shownSnapshot = statement === 'delete' ? tableBefore : after[table];
+  const resultRids = returned ? returnedRids : shown;
+  if (returned && statement !== 'delete' && returnedRids.length) lit[table] = new Set(returnedRids);
   steps.push({
     stage: 'modify',
     label: `${verb} - ${summary}`,
@@ -965,10 +1001,10 @@ function buildMutationTrace(
     activeEdges: [],
     litRows: lit,
     dimmedRows: {},
-    tuples: statement === 'delete' ? undefined : tuplesFor(shown),
+    tuples: statement === 'delete' ? undefined : tuplesFor(resultRids),
     tupleTables,
-    partialResult: { columns: shownSnapshot.columns, rows: rowsFor(shownSnapshot, shown) },
-    resultRowSources: statement === 'delete' ? undefined : sourcesFor(shown),
+    partialResult: returned ?? { columns: shownSnapshot.columns, rows: rowsFor(shownSnapshot, shown) },
+    resultRowSources: statement === 'delete' ? undefined : sourcesFor(resultRids),
     queryRange: { start: 0, end: originalSql.length },
   });
 
@@ -993,6 +1029,16 @@ export function traceStatement(
     step.label = tidyIntegerCasts(step.label);
     step.narration = tidyIntegerCasts(step.narration);
     if (step.partialResult) step.partialResult.columns = step.partialResult.columns.map(tidyIntegerCasts);
+    // Keep the public/worker API ordinary objects with own SQL-name keys.
+    // Internal accumulation uses null prototypes; worker structuredClone
+    // likewise restores ordinary prototypes, so consumers use own-key reads.
+    step.litRows = Object.fromEntries(Object.entries(step.litRows));
+    step.dimmedRows = Object.fromEntries(Object.entries(step.dimmedRows));
+    if (step.nullExtendedRows) step.nullExtendedRows = Object.fromEntries(Object.entries(step.nullExtendedRows));
+    if (step.tupleTables) step.tupleTables = Object.fromEntries(Object.entries(step.tupleTables));
+    if (step.tuples) step.tuples = step.tuples.map((tuple) => Object.fromEntries(Object.entries(tuple)));
+    if (step.resultRowSources) step.resultRowSources = step.resultRowSources.map((source) => Object.fromEntries(Object.entries(source)));
+    if (step.groupColors) step.groupColors = Object.fromEntries(Object.entries(step.groupColors).map(([table, colors]) => [table, Object.fromEntries(Object.entries(colors))]));
   }
   return trace;
 }
@@ -1273,7 +1319,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     table: resolveTable(schema, f.table!).name,
     alias: f.as ?? f.table!,
   }));
-  const aliasToTable: Record<string, string> = {};
+  const aliasToTable: Record<string, string> = emptyRecord();
   refs.forEach((r) => {
     aliasToTable[r.alias.toLowerCase()] = r.table;
     aliasToTable[r.table.toLowerCase()] = r.table;
@@ -1400,7 +1446,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     count: number;
   }
   let groups: GroupInfo[] | null = null;
-  let groupColorByKey: Record<string, string> = {};
+  let groupColorByKey: Record<string, string> = emptyRecord();
 
   if (ctx.groupExprSqls) {
     const gN = ctx.groupExprSqls.length;
@@ -1415,7 +1461,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       return rows.map((row, gi) => {
         const keyValues = row.slice(0, gN);
         const key = JSON.stringify(keyValues);
-        const pksPerTable: Record<string, number[]> = {};
+        const pksPerTable: Record<string, number[]> = emptyRecord();
         refs.forEach((r, ri) => {
           pksPerTable[r.table] = Array.from(
             new Set([...(pksPerTable[r.table] ?? []), ...parsePkList(row[gN + ri])])
@@ -1436,11 +1482,11 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
       groupColorByKey[g.key] = g.color;
     });
 
-    const groupColors: Record<string, Record<number, string>> = {};
+    const groupColors: Record<string, Record<number, string>> = emptyRecord();
     for (const g of groups) {
       for (const [table, pks] of Object.entries(g.pksPerTable)) {
         for (const pk of pks) {
-          (groupColors[table] ??= {})[pk] = g.color;
+          (groupColors[table] ??= emptyRecord<string>())[pk] = g.color;
         }
       }
     }
@@ -1465,19 +1511,18 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
     if (ctx.havingSql) {
       const survivors = readGroups(`${baseSql} HAVING ${ctx.havingSql}`);
-      const surviving = new Set(survivors.map((g) => g.key));
       // Keep the colors assigned in the GROUP BY step.
       survivors.forEach((g) => {
         g.color = groupColorByKey[g.key] ?? g.color;
       });
 
-      const keptLit: Record<string, Set<number>> = {};
-      const keptColors: Record<string, Record<number, string>> = {};
+      const keptLit: Record<string, Set<number>> = emptyRecord();
+      const keptColors: Record<string, Record<number, string>> = emptyRecord();
       for (const g of survivors) {
         for (const [table, pks] of Object.entries(g.pksPerTable)) {
           for (const pk of pks) {
             (keptLit[table] ??= new Set()).add(pk);
-            (keptColors[table] ??= {})[pk] = g.color;
+            (keptColors[table] ??= emptyRecord<string>())[pk] = g.color;
           }
         }
       }
@@ -1535,7 +1580,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     const displayColumns = columns.slice(0, nSel);
     const displayRows = rows.map((r) => r.slice(0, nSel));
     const sources: Array<Record<string, number[]>> = rows.map((r) => {
-      const src: Record<string, number[]> = {};
+      const src: Record<string, number[]> = emptyRecord();
       refs.forEach((ref, ri) => {
         const v = r[nSel + ri];
         const pks = groupedProvenance
@@ -1556,7 +1601,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     const sourceByRow = new Map<string, Record<string, Set<number>>>();
     baseProj.displayRows.forEach((row, index) => {
       const key = resultKey(row);
-      const merged = sourceByRow.get(key) ?? {};
+      const merged = sourceByRow.get(key) ?? emptyRecord<Set<number>>();
       for (const [table, pks] of Object.entries(baseProj.sources[index] ?? {})) {
         const target = (merged[table] ??= new Set<number>());
         pks.forEach((pk) => target.add(pk));
@@ -1578,7 +1623,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   };
 
   const proj = ast.distinct ? attachDistinctSources(displayProjectionSql) : baseProj;
-  const projLit: Record<string, Set<number>> = {};
+  const projLit: Record<string, Set<number>> = emptyRecord();
   proj.sources.forEach((src) => {
     for (const [table, pks] of Object.entries(src)) {
       pks.forEach((pk) => (projLit[table] ??= new Set()).add(pk));
@@ -1614,7 +1659,7 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
     const finalRes = ast.distinct
       ? attachDistinctSources(`${displayProjectionSql}${ob}${lim}`)
       : readResult(`${projectionSql}${ob}${lim}`);
-    const finalLit: Record<string, Set<number>> = {};
+    const finalLit: Record<string, Set<number>> = emptyRecord();
     finalRes.sources.forEach((src) => {
       for (const [table, pks] of Object.entries(src)) {
         pks.forEach((pk) => (finalLit[table] ??= new Set()).add(pk));
@@ -1649,10 +1694,10 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
   return steps;
 
   function colorsFromGroups(gs: GroupInfo[]): Record<string, Record<number, string>> {
-    const colors: Record<string, Record<number, string>> = {};
+    const colors: Record<string, Record<number, string>> = emptyRecord();
     for (const g of gs) {
       for (const [table, pks] of Object.entries(g.pksPerTable)) {
-        for (const pk of pks) (colors[table] ??= {})[pk] = g.color;
+        for (const pk of pks) (colors[table] ??= emptyRecord<string>())[pk] = g.color;
       }
     }
     return colors;

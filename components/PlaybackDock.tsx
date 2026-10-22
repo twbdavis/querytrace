@@ -32,6 +32,7 @@ const STAGE_META: Record<string, { short: string; Icon: ComponentType<{ size?: n
   select: { short: 'SELECT', Icon: ColumnsIcon },
   orderLimit: { short: 'ORDER', Icon: SortIcon },
   modify: { short: 'APPLY', Icon: EditIcon },
+  create: { short: 'CREATE', Icon: DatabaseIcon },
 };
 
 /** Narration stage badge, tinted by the stage's role accent. */
@@ -46,6 +47,7 @@ const STAGE_BADGE: Record<string, string> = {
   select: 'border-accent-result text-accent-result',
   orderLimit: 'border-line-strong text-ink-dim',
   modify: 'border-accent-result text-accent-result',
+  create: 'border-accent-result text-accent-result',
 };
 
 const SPEEDS: Speed[] = [0.5, 1, 2];
@@ -64,7 +66,7 @@ function fromTextInput(e: KeyboardEvent): boolean {
 
 interface PlaybackDockProps {
   /** Left inset so the dock centers within the canvas beside the panel column. */
-  leftClass?: string;
+  leftInset?: number;
 }
 
 /**
@@ -72,7 +74,7 @@ interface PlaybackDockProps {
  * the schema keeps the full viewport; collapses gracefully on narrow screens
  * (stage labels, speed and counter drop away, chips scroll horizontally).
  */
-export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
+export function PlaybackDock({ leftInset = 0 }: PlaybackDockProps) {
   const trace = useAppStore((s) => s.trace);
   const currentStep = useAppStore((s) => s.currentStep);
   const playing = useAppStore((s) => s.playing);
@@ -142,7 +144,8 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
 
   return (
     <div
-      className={`pointer-events-none absolute bottom-2 right-0 z-30 flex justify-center px-2 max-sm:bottom-1.5 max-sm:px-1.5 sm:bottom-3 ${leftClass}`}
+      className="pointer-events-none absolute bottom-2 right-0 z-30 flex justify-center px-2 max-sm:bottom-1.5 max-sm:px-1.5 sm:bottom-3 lg:right-12"
+      style={{ left: leftInset }}
     >
       <div className="pointer-events-auto flex min-w-0 max-w-full flex-col rounded-md border border-line-strong bg-panel px-2 py-1.5 max-sm:w-full max-sm:px-1.5 sm:px-3 sm:py-2">
         <div className="flex min-w-0 items-center gap-1.5 max-sm:gap-1 sm:gap-2">
@@ -332,7 +335,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
               {step.narration}
             </p>
             <div className="mt-2 flex justify-end border-t border-line/60 pt-2 font-ui text-ink-dim">
-              <PoweredByPlatmatics site="querytrace.net" variant="inline" />
+              <PoweredByPlatmatics site="querytrace.net" />
             </div>
           </div>
         )}

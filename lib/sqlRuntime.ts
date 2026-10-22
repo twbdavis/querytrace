@@ -1,4 +1,7 @@
+import { emptyRecord } from './records';
 import type { Database } from 'sql.js';
+import { runCreateStatement } from './createStatement';
+import { normalizePastedText, splitSqlStatements } from './sqlText';
 import { assignQueryRanges } from './clauseRanges';
 import {
   createDatabase,
@@ -13,7 +16,9 @@ import {
 import type { DialectNote } from './dialect';
 import { parseQuery, queryTableNames } from './parser';
 import type { FkEdgeDef, SchemaDef, TableMeta } from './schemas';
-import { traceStatement, TraceError, type TraceStep } from './traceEngine';
+import { explainMutationError, traceStatement, TraceError, type TraceStep } from './traceEngine';
+import { withResultBudget } from './resourceLimits';
+import { snapshotAfterCommit } from './sqlRecovery';
 
 const MAX_QUERY_CHARS = 20_000;
 /** Row combinations a trace may materialize: every intermediate join stage is kept for scrubbing. */
@@ -23,7 +28,7 @@ export interface LoadedSchema {
   schema: TableMeta[];
   fkEdges: FkEdgeDef[];
   tableData: Record<string, TableData>;
-  /** Only custom databases are exported; built-ins are cheaper to rebuild from their tiny DDL. */
+  /** Recovery snapshot; custom schemas also persist these bytes between visits. */
   databaseBytes?: Uint8Array;
 }
 
@@ -32,10 +37,12 @@ export interface QueryRun {
   trace: TraceStep[];
   /** How the learner's dialect was rewritten for SQLite, for display beside the result. */
   notes: DialectNote[];
-  /** Present when the statement changed rows: refreshed tables and, for custom schemas, the bytes to save. */
+  /** Present after data or structure changes: refreshed tables and custom database bytes. */
   mutation?: {
     tableData: Record<string, TableData>;
     changedTables: string[];
+    schema?: TableMeta[];
+    fkEdges?: FkEdgeDef[];
     databaseBytes?: Uint8Array;
   };
 }
@@ -61,24 +68,23 @@ export class SqlRuntime {
       : await createDatabase(def.ddl, isCustom);
 
     try {
-      const { schema, fkEdges } = introspectSchema(nextDb);
-      if (schema.length === 0) {
-        throw new SchemaBuildError('No tables were created. Add at least one CREATE TABLE statement.');
-      }
-      const tableData: Record<string, TableData> = {};
-      for (const table of schema) tableData[table.name] = getTableData(nextDb, table.name);
-
+      const loaded = withResultBudget(nextDb, () => {
+        const { schema, fkEdges } = introspectSchema(nextDb);
+        if (schema.length === 0) {
+          throw new SchemaBuildError('No tables were created. Add at least one CREATE TABLE statement.');
+        }
+        const tableData = emptyRecord<TableData>();
+        for (const table of schema) tableData[table.name] = getTableData(nextDb, table.name);
+        // Export before replacing the working connection: an unsuccessful
+        // payload/snapshot build must leave the previous session intact.
+        return { schema, fkEdges, tableData: Object.fromEntries(Object.entries(tableData)), databaseBytes: exportDatabase(nextDb) };
+      });
       this.db?.close();
       this.db = nextDb;
-      this.schema = schema;
-      this.tableData = tableData;
+      this.schema = loaded.schema;
+      this.tableData = loaded.tableData;
       this.isCustom = isCustom;
-      return {
-        schema,
-        fkEdges,
-        tableData,
-        databaseBytes: isCustom ? exportDatabase(nextDb) : undefined,
-      };
+      return loaded;
     } catch (error) {
       nextDb.close();
       throw error;
@@ -87,8 +93,21 @@ export class SqlRuntime {
 
   runQuery(sql: string): QueryRun {
     if (!this.db) throw new Error('SQLite is still starting. Try again in a moment.');
+    return withResultBudget(this.db, () => this.runBoundedQuery(sql));
+  }
+
+  private runBoundedQuery(sql: string): QueryRun {
+    if (!this.db) throw new Error('SQLite is still starting. Try again in a moment.');
     if (sql.length > MAX_QUERY_CHARS) {
       throw new Error(`Queries are limited to ${MAX_QUERY_CHARS.toLocaleString()} characters.`);
+    }
+
+    const statement = splitSqlStatements(normalizePastedText(sql))[0];
+    if (statement && /^CREATE\b/i.test(statement.masked.trim())) {
+      const run = runCreateStatement(this.db, sql, this.schema, this.isCustom);
+      this.schema = run.mutation!.schema!;
+      this.tableData = run.mutation!.tableData;
+      return run;
     }
 
     const parsed = parseQuery(sql, { schema: this.schema });
@@ -111,10 +130,27 @@ export class SqlRuntime {
     }
 
     const db = this.db;
-    const { steps, mutation, notes: engineNotes } = traceStatement(parsed, sql, db, this.schema, {
-      enforce: this.isCustom ? () => enforceCustomSchemaLimits(db, this.schema) : undefined,
-      persistent: this.isCustom,
-    });
+    // Result/snapshot limits can fail after the mutation's own trace stage.
+    // Keep the entire trace atomic until all intermediate results are bounded.
+    const writing = parsed.kind === 'mutation';
+    if (writing) db.run('SAVEPOINT qt_request');
+    let traced: ReturnType<typeof traceStatement>;
+    try {
+      traced = traceStatement(parsed, sql, db, this.schema, {
+        enforce: () => enforceCustomSchemaLimits(db, this.schema),
+        persistent: this.isCustom,
+      });
+      if (writing) {
+        try { db.run('RELEASE qt_request'); }
+        catch (error) {
+          throw new TraceError(explainMutationError(error instanceof Error ? error.message : String(error), parsed.statement, parsed.table));
+        }
+      }
+    } catch (error) {
+      if (writing) db.run('ROLLBACK TO qt_request; RELEASE qt_request');
+      throw error;
+    }
+    const { steps, mutation, notes: engineNotes } = traced;
     assignQueryRanges(steps, sql);
     const notes = [...parsed.notes, ...(engineNotes ?? [])];
 
@@ -126,7 +162,7 @@ export class SqlRuntime {
       mutation: {
         tableData: mutation.tableData,
         changedTables: mutation.changedTables,
-        databaseBytes: this.isCustom ? exportDatabase(db) : undefined,
+        databaseBytes: this.isCustom ? snapshotAfterCommit(() => exportDatabase(db)) : undefined,
       },
     };
   }
@@ -136,6 +172,12 @@ export class SqlRuntime {
     this.db = null;
     this.schema = [];
     this.tableData = {};
+  }
+
+  /** Last acknowledged state lets the client recover after terminating a busy worker. */
+  exportSnapshot(): Uint8Array {
+    if (!this.db) throw new Error('No database is loaded.');
+    return exportDatabase(this.db);
   }
 }
 

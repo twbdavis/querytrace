@@ -6,7 +6,7 @@
  * expressions become the DATEDIFF / DATE_ADD calls the trace already supports.
  */
 import type { DialectNote } from './dialect';
-import { cteItems, type AstExpr, type MutationAst, type SelectAst } from './parser';
+import { cteItems, type AstExpr, type SelectAst } from './parser';
 import type { TableMeta } from './schemas';
 
 interface Scope {
@@ -161,16 +161,4 @@ export function rewriteDateArithmeticInSelect(ast: SelectAst, schema: TableMeta[
   const root: Scope = { tables: new Map(), parent: null };
   schemaByScope.set(root, schema);
   return rewriteSelect(ast, root, notes, schema);
-}
-
-/** Rewrite date arithmetic in the SET values and WHERE clause of a data change. */
-export function rewriteDateArithmeticInMutation(ast: MutationAst, table: TableMeta | undefined, alias: string | null | undefined, notes: DialectNote[]): MutationAst {
-  if (!table) return ast;
-  const scope: Scope = { tables: new Map([[(alias ?? table.name).toLowerCase(), table], [table.name.toLowerCase(), table]]), parent: null };
-  const out: MutationAst = {
-    ...ast,
-    set: ast.set ? ast.set.map((assignment) => ({ ...assignment, value: rewriteExpr(assignment.value, scope, notes) as AstExpr })) : ast.set,
-    where: ast.where ? (rewriteExpr(ast.where, scope, notes) as AstExpr) : ast.where,
-  };
-  return out;
 }

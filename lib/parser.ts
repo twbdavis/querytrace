@@ -3,7 +3,8 @@
 import { Parser } from 'node-sql-parser/build/sqlite';
 import { COMPAT_FUNCTION_NAMES, COMPAT_FUNCTION_NOTES } from './compatFunctions';
 import { DialectError, splitCompound, statementKind, translateQuery, type DialectNote } from './dialect';
-import { maskSql, splitSqlStatements, unquoteIdent } from './sqlText';
+import { maskSql, replaceOutsideLiterals, splitSqlStatements, topLevelMatches, unquoteIdent } from './sqlText';
+import { ORDERED_GROUP_CONCAT_MARKER, prepareOrderedAggregates } from './orderedAggregates';
 import type { TableMeta } from './schemas';
 
 /** The loaded schema, when the caller shares it, for checks that need keys and columns. */
@@ -199,7 +200,7 @@ function restoreJoinKinds(ast: SelectAst, kinds: string[]): void {
 }
 
 /** Aggregates the sqlite grammar reads as ordinary function calls. */
-const AGGREGATE_FUNCTION_NAMES = new Set(['GROUP_CONCAT', 'STRING_AGG', 'TOTAL', 'JSON_GROUP_ARRAY', 'JSON_GROUP_OBJECT']);
+const AGGREGATE_FUNCTION_NAMES = new Set(['GROUP_CONCAT', 'STRING_AGG', 'TOTAL', 'JSON_GROUP_ARRAY', 'JSON_GROUP_OBJECT', ORDERED_GROUP_CONCAT_MARKER]);
 
 function functionName(obj: Record<string, unknown>): string | null {
   const raw = obj.name as { name?: Array<{ value?: string }> } | string | undefined;
@@ -457,7 +458,6 @@ function validateCourseSemantics(ast: SelectAst): string | null {
   }
 
   for (const column of columns) {
-    if (containsAggregate(column.expr)) continue;
     const refs = collectColumnsOutsideAggregates(column.expr);
     if (hasAggregate && groupExprs.length === 0 && refs.size > 0) {
       return 'A scalar aggregate cannot be selected with individual columns unless those columns are grouped.';
@@ -498,12 +498,11 @@ function validateCourseSemantics(ast: SelectAst): string | null {
   }
 
   if (ast.having) {
-    const selectedColumns = collectAllColumns(columns.map((column) => column.expr));
     const invalidHavingColumn = [...collectColumnsOutsideAggregates(ast.having)].find(
-      (ref) => ![...selectedColumns].some((selected) => sameColumn(ref, selected))
+      (ref) => ![...groupColumns].some((grouped) => sameColumn(ref, grouped)) && !dependsOnGroupedKey(ref, ast, groupColumns)
     );
     if (invalidHavingColumn) {
-      return `HAVING column ${invalidHavingColumn} must also be included in the SELECT list.`;
+      return `The non-aggregate HAVING column ${invalidHavingColumn} must appear in the GROUP BY clause.`;
     }
   }
 
@@ -657,7 +656,15 @@ const parser = new Parser();
 
 function astify(sql: string): { ok: true; ast: unknown } | { ok: false; error: string } {
   try {
-    return { ok: true, ast: parser.astify(sql, { database: 'sqlite' }) };
+    // The parser reserves common function names and FULL even when SQLite
+    // accepts them as output aliases. Quote just these aliases for parsing.
+    let parserSql = replaceOutsideLiterals(prepareOrderedAggregates(sql), /\bAS(\s+)(COUNT|SUM|AVG|MIN|MAX|FULL)\b/gi,
+      (_original, match) => `AS${match[1]}"${match[2]}"`);
+    // GENERATED is an ordinary table name in SQLite/PostgreSQL, but the
+    // parser reserves it for column definitions even in table positions.
+    parserSql = replaceOutsideLiterals(parserSql, /\b(FROM|JOIN|UPDATE|INTO)(\s+)(GENERATED)\b/gi,
+      (_original, match) => `${match[1]}${match[2]}"${match[3]}"`);
+    return { ok: true, ast: parser.astify(parserSql, { database: 'sqlite' }) };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `SQL syntax error: ${msg}` };
@@ -745,7 +752,14 @@ function parseQueryInner(input: string): ParseOutcome {
     const head = maskSql(sql).match(DML_HEAD);
     if (!head) return { ok: false, error: `SQL syntax error: could not read the table name in this ${kind.toUpperCase()} statement.` };
     const table = unquoteIdent(sql.slice(head.index! + head[0].length - head[1].length, head.index! + head[0].length).split('.').pop()!.trim());
-    const raw = astify(sql);
+    let raw = astify(sql);
+    if (!raw.ok) {
+      // The parser cannot read RETURNING after INSERT ... SELECT. Parse its
+      // data-changing body for trace validation; SQLite validates the full
+      // RETURNING projection when the statement executes.
+      const returning = topLevelMatches(maskSql(sql), /\bRETURNING\b/gi)[0];
+      if (returning) raw = astify(sql.slice(0, returning.index));
+    }
     let ast: MutationAst | null = null;
     if (raw.ok) {
       const node = Array.isArray(raw.ast) ? raw.ast[0] : raw.ast;
@@ -757,7 +771,9 @@ function parseQueryInner(input: string): ParseOutcome {
         if (error) return { ok: false, error };
       }
       notes.push(...functionNotes(ast));
-    } else if (!/\bON\s+CONFLICT\b/i.test(maskSql(sql)) && !(kind === 'update' && /\bSET\b[\s\S]*\bFROM\b/i.test(maskSql(sql)))) {
+    } else if (!/\bON\s+CONFLICT\b/i.test(maskSql(sql))
+      && !(kind === 'insert' && /\bDEFAULT\s+VALUES\b/i.test(maskSql(sql)))
+      && !(kind === 'update' && /\bSET\b[\s\S]*\bFROM\b/i.test(maskSql(sql)))) {
       // The sqlite grammar reads every plain INSERT / UPDATE / DELETE form; an
       // unparseable statement is a real syntax error unless it is the upsert
       // clause or the UPDATE ... FROM join the grammar lacks, which SQLite

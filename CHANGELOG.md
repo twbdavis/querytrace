@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Remove unused runtime helpers, obsolete landing screenshot tools, and unused UI/style branches; reject unused TypeScript locals and parameters during release checks.
+- Restore original lesson rows even when an earlier write is still pending, and prevent a delayed Resume request from overriding a later lesson or schema choice.
+- Remove the vulnerable development dependency chain by moving to Tailwind 4, preserve the existing theme, and require a clean audit of all dependencies without exceptions. Supported browsers are Chrome/Edge 111+, Firefox 128+, and Safari 16.4+.
+- Replace the landing scene's old screenshot fallback with a static diagram of the current join, without requiring WebGL or loading a screenshot.
+- Make release checks work from a clean checkout by generating Next.js declarations before type-checking.
+- Resume saved custom databases after lessons, detect conflicting saves across tabs, and preserve queries and newer drafts during schema changes.
+- Reject integers outside the exact browser tracing range before imports or mutations commit, including hidden row identities.
+- Keep keyboard focus inside dialogs and restore the invoking control when they close.
+- Keep the homepage usable if its optional animation fails, and respect live reduced-motion preferences without showing animation controls.
+- Replace the homepage's crossfading screenshots with a three.js scene: SCREENING and VENUE built from row slabs that rise into place, joined on VENUE_ID with the tracer's wire, pulses and lit rows, and the selected cells flying together into the result table. It plays once and holds; reduced motion shows the finished frame, and browsers without WebGL get a static join diagram.
+- Let `next dev` accept its own "Network:" address so the page hydrates when opened over the LAN.
 - Accept `ORDER BY alias` (standard SQL), replace an alias in `GROUP BY` / `HAVING` by its expression, and explain why an alias cannot be used in `WHERE`. Double-quoted and bracketed names in `ORDER BY` are identifiers; only `ORDER BY 'text'` is refused.
 - Allow bare columns of a table whose whole primary key is grouped (`GROUP BY v.venue_id` with `v.venue_name` selected), as PostgreSQL does.
 - Rewrite `JOIN ... USING (a, b)` to its `ON` condition when the select list is explicit; honour `WITH name(a, b) AS (...)` column lists; accept `ORDER BY 3` with `SELECT *`; resolve quoted names such as `d."Sku Code"` from derived tables; accept `rowid` / `_rowid_` / `oid` as implicit columns.

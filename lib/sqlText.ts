@@ -359,6 +359,12 @@ export function matchingParen(masked: string, open: number): number {
 }
 
 const OPERAND_CHAR = /[\w.$]/;
+// A parenthesized operand may follow a clause keyword (`SELECT (n)`),
+// while these reserved names really do own their following argument list.
+const RESERVED_FUNCTION_NAMES = new Set([
+  'CAST', 'LEFT', 'RIGHT', 'IF', 'REPLACE', 'REGEXP', 'GLOB', 'MATCH', 'RAISE', 'EXISTS',
+  'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP',
+]);
 
 /**
  * Start index of the operand that ends just before `end` (exclusive) in
@@ -383,7 +389,10 @@ export function operandStart(masked: string, end: number): number {
     while (k > 0 && /\s/.test(masked[k - 1])) k--;
     let nameStart = k;
     while (nameStart > 0 && /[\w.]/.test(masked[nameStart - 1])) nameStart--;
-    return nameStart < k && /[A-Za-z_]/.test(masked[nameStart]) ? nameStart : j;
+    const name = masked.slice(nameStart, k).toUpperCase();
+    const isFunction = nameStart < k && /[A-Za-z_]/.test(masked[nameStart]) &&
+      (!RESERVED_WORDS.has(name) || RESERVED_FUNCTION_NAMES.has(name));
+    return isFunction ? nameStart : j;
   }
   if (last === "'" || last === '"' || last === '`') {
     const open = masked.lastIndexOf(last, i - 2);
@@ -392,6 +401,35 @@ export function operandStart(masked: string, end: number): number {
   let j = i;
   while (j > 0 && OPERAND_CHAR.test(masked[j - 1])) j--;
   return j < i ? j : end;
+}
+
+/** Start of the left-associated multiplication/division chain ending at `end`. */
+export function operandProductStart(masked: string, end: number): number {
+  const withUnary = (start: number): number => {
+    for (;;) {
+      let sign = start;
+      while (sign > 0 && /\s/.test(masked[sign - 1])) sign--;
+      if (sign === 0 || !/[+-]/.test(masked[sign - 1])) return start;
+      let before = sign - 1;
+      while (before > 0 && /\s/.test(masked[before - 1])) before--;
+      const prefixWord = masked.slice(0, before).match(/([A-Za-z_][\w]*)$/)?.[1]?.toUpperCase();
+      const unary = before === 0 || /[(,=<>*/%+-]/.test(masked[before - 1]) ||
+        (prefixWord !== undefined && RESERVED_WORDS.has(prefixWord));
+      if (!unary) return start;
+      start = sign - 1;
+    }
+  };
+  let start = operandStart(masked, end);
+  if (start === end) return end;
+  start = withUnary(start);
+  for (;;) {
+    let operator = start;
+    while (operator > 0 && /\s/.test(masked[operator - 1])) operator--;
+    if (operator === 0 || !/[*/%]/.test(masked[operator - 1])) return start;
+    const left = operandStart(masked, operator - 1);
+    if (left === operator - 1) return start;
+    start = withUnary(left);
+  }
 }
 
 /**
@@ -412,7 +450,10 @@ export function operandEnd(masked: string, start: number): number {
     const close = masked.indexOf(first, i + 1);
     return close === -1 ? start : close + 1;
   }
-  if (first === '-' || first === '+') i++;
+  if (first === '-' || first === '+') {
+    const operand = operandEnd(masked, i + 1);
+    return operand === i + 1 ? start : operand;
+  }
   let j = i;
   while (j < masked.length && OPERAND_CHAR.test(masked[j])) j++;
   if (j === i) return start;

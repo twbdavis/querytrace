@@ -5,11 +5,12 @@
 
    Run with: npx tsx scripts/fuzzTrace.ts [--verbose] [--json path] */
 import type { Database } from 'sql.js';
-import { createDatabase, type TableData } from '../lib/db';
+import { createDatabase, introspectSchema, prepareQueryDdl, queryAll, type TableData } from '../lib/db';
 import { PRELOADED_SCHEMAS, type SchemaDef, type TableMeta } from '../lib/schemas';
 import { SqlRuntime } from '../lib/sqlRuntime';
 import { TraceError, type TraceStep } from '../lib/traceEngine';
 import { parseQuery } from '../lib/parser';
+import { maskSql } from '../lib/sqlText';
 import { CUSTOM_SCHEMAS, type FuzzSchema } from './fuzzSchemas';
 import { queriesFor } from './fuzzQueries';
 
@@ -43,11 +44,14 @@ const norm = (v: unknown): unknown =>
 const rowKey = (row: unknown[]) => JSON.stringify(row.map(norm));
 
 function dump(db: Database): string {
-  const names = db
-    .exec("SELECT type || ':' || name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY 1")[0]
-    ?.values.map((r) => String(r[0])) ?? [];
+  const objects = db
+    .exec("SELECT type || ':' || name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY 1")[0]
+    ?.values ?? [];
+  const names = objects.map((row) => String(row[0]));
   const temp = db.exec('SELECT name FROM sqlite_temp_master ORDER BY 1')[0]?.values.map((r) => String(r[0])) ?? [];
-  const parts = [names.join('|'), `temp=${temp.join('|')}`];
+  // Empty CREATE objects must compare their definitions too: matching names
+  // and no rows do not establish matching columns, keys or index expressions.
+  const parts = [objects.map(rowKey).join('|'), `temp=${temp.join('|')}`];
   for (const entry of names) {
     if (!entry.startsWith('table:')) continue;
     const table = entry.slice(6);
@@ -154,7 +158,8 @@ async function main() {
       console.log(`\n=== ${key}: SCHEMA FAILED TO LOAD\n      ${detail.slice(0, 400)}`);
       continue;
     }
-    const { runtime, oracle, schema, tableData } = pair;
+    const { runtime, oracle, tableData } = pair;
+    let schema = pair.schema;
     const queries = queriesFor(key, schema, tableData);
     console.log(`\n=== ${key} (${schema.length} tables, ${queries.length} queries)`);
 
@@ -171,8 +176,10 @@ async function main() {
       };
 
       const parsed = parseQuery(sql, { schema });
-      const isMutation = parsed.ok && parsed.kind === 'mutation';
-      const before = dump(oracle);
+      const isCreate = /^CREATE\b/i.test(maskSql(sql).trim());
+      const isMutation = isCreate || (parsed.ok && parsed.kind === 'mutation');
+      const runtimeDb = (runtime as unknown as { db: Database }).db;
+      const runtimeBefore = dump(runtimeDb);
 
       // Oracle: SQLite's own answer to the translated text, or its error.
       let oracleRows: unknown[][] | null = null;
@@ -180,12 +187,22 @@ async function main() {
       let oracleError: string | null = null;
       if (q.skipOracle) {
         // nothing: SQLite's own run would be too expensive here
-      } else if (parsed.ok) {
+      } else if (parsed.ok || isCreate) {
         oracle.run('SAVEPOINT fz');
         try {
-          const res = oracle.exec(parsed.sql);
-          oracleColumns = res[0]?.columns ?? [];
-          oracleRows = res[0]?.values ?? [];
+          // CREATE uses the schema importer rather than the SELECT/DML AST
+          // parser. SQLite independently executes the normalized structure.
+          const oracleSql = isCreate ? prepareQueryDdl(sql).sql : parsed.ok ? parsed.sql : '';
+          if (isCreate) {
+            // DDL has no row result. Preparing the same CREATE again after
+            // exec would fail because its object now exists.
+            oracle.run(oracleSql);
+            oracleRows = [];
+          } else {
+            const res = queryAll(oracle, oracleSql);
+            oracleColumns = res.columns;
+            oracleRows = res.rows;
+          }
           oracle.run('RELEASE fz');
         } catch (e) {
           oracleError = e instanceof Error ? e.message : String(e);
@@ -224,14 +241,13 @@ async function main() {
         }
         // A refused mutation must leave the database as it was.
         if (isMutation) {
-          const rt = (runtime as unknown as { db: Database }).db;
-          if (dump(rt) !== before) record('leak', 'refused statement changed the database', ms);
+          if (dump(runtimeDb) !== runtimeBefore) record('leak', 'refused statement changed the database', ms);
         }
         continue;
       }
 
       if (!steps) continue;
-      if (oracleError && !isMutation) {
+      if (oracleError) {
         if (q.lenient) {
           record('ok', `accepted on purpose; SQLite says: ${oracleError}`, ms);
           continue;
@@ -240,7 +256,8 @@ async function main() {
         continue;
       }
 
-      const rowids = rowidsOf((runtime as unknown as { db: Database }).db, schema);
+      if (isCreate) schema = introspectSchema(runtimeDb).schema;
+      const rowids = rowidsOf(runtimeDb, schema);
       const inv = checkInvariants(steps, schema, rowids, sql.length);
       if (inv) {
         record('invariant', inv, ms);
@@ -272,13 +289,12 @@ async function main() {
         }
       }
 
-      const rt = (runtime as unknown as { db: Database }).db;
       if (isMutation) {
-        if (!q.skipOracle && dump(rt) !== dump(oracle)) {
+        if (!q.skipOracle && dump(runtimeDb) !== dump(oracle)) {
           record('mismatch', 'database differs from SQLite after the statement', ms);
           continue;
         }
-      } else if (dump(rt) !== before) {
+      } else if (dump(runtimeDb) !== runtimeBefore) {
         record('leak', 'read-only statement changed the database', ms);
         continue;
       }
@@ -317,7 +333,7 @@ async function main() {
     writeFileSync(jsonPath, JSON.stringify(findings, null, 1));
     console.log(`  report: ${jsonPath}`);
   }
-  const bad = counts.crash + counts.mismatch + counts['accepted-invalid'] + counts.invariant + counts.leak + counts.nondeterministic;
+  const bad = counts.refused + counts.crash + counts.mismatch + counts['accepted-invalid'] + counts.invariant + counts.leak + counts.nondeterministic;
   process.exit(bad > 0 ? 1 : 0);
 }
 

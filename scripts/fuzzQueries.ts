@@ -233,7 +233,7 @@ const HAND: Record<string, FuzzQuery[]> = {
     either("ATTACH DATABASE 'x.db' AS x"),
     either("SELECT load_extension('x')"),
     either('DROP TABLE OBSERVATION'),
-    either('CREATE TABLE NEW_T (ID INTEGER PRIMARY KEY)'),
+    q('CREATE TABLE NEW_T (ID INTEGER PRIMARY KEY)'),
     either('ALTER TABLE TARGET ADD COLUMN NOTE TEXT'),
     either('SELECT randomblob(10000000)'),
     { sql: 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20) SELECT x FROM c', expect: 'either' },
