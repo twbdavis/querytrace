@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import { useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
+import { usePanelLayout } from '@/lib/usePanelLayout';
 import { LESSONS } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
 import { TopBar } from '@/components/TopBar';
@@ -14,6 +15,7 @@ import { SqlEditor } from '@/components/SqlEditor';
 import { HelpModal } from '@/components/HelpModal';
 import { LessonsModal } from '@/components/LessonsModal';
 import { SchemaModal } from '@/components/SchemaModal';
+import { PanelResizeHandle } from '@/components/PanelResizeHandle';
 import { TableIcon, TerminalIcon } from '@/components/Icons';
 
 // React Flow is browser-only; skip SSR entirely.
@@ -111,14 +113,15 @@ export default function Home() {
   const [lessonsOpen, setLessonsOpen] = useState(false);
   const [schemaOpen, setSchemaOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [queryOpen, setQueryOpen] = useState(true);
-  const [resultsOpen, setResultsOpen] = useState(true);
+  const panels = usePanelLayout();
+  const { queryOpen, setQueryOpen, resultsOpen, setResultsOpen } = panels;
   // Two UIs: a floating left column (query stacked over results) beside a
   // full-bleed canvas (laptop and up), or a full-screen canvas with a stacked
   // bottom sheet (anything narrower). Query and results are always visible
   // together so the clause highlighting can be read against the arriving rows.
   const isWide = useMediaQuery('(min-width: 1024px)');
   const columnOpen = queryOpen || resultsOpen;
+  const canvasLeftInset = isWide && columnOpen ? panels.leftInset : 0;
 
   useEffect(() => {
     // Let the shell/editor paint before compiling SQLite WASM. This keeps the
@@ -188,7 +191,7 @@ export default function Home() {
           )}
           {/* The schema owns the entire viewport; everything else floats. */}
           <div className="absolute inset-0">
-            <SchemaCanvas />
+            <SchemaCanvas leftInset={canvasLeftInset} />
           </div>
 
           {isWide && (
@@ -196,14 +199,16 @@ export default function Home() {
               {columnOpen && (
                 <div
                   key="panel-column"
+                  ref={panels.columnRef}
+                  style={panels.columnStyle}
                   className="panel-enter absolute bottom-2 left-2 top-2 z-20 flex w-[19rem] flex-col gap-2 xl:bottom-3 xl:left-3 xl:top-3 xl:w-[21rem] 2xl:w-[24rem]"
                 >
                   {queryOpen ? (
                     <section
+                      id="sql-editor-panel"
                       aria-label="SQL editor panel"
-                      className={`${panelShell} ${
-                        resultsOpen ? 'h-[42%] max-h-[420px] min-h-[200px]' : 'min-h-0 flex-1'
-                      }`}
+                      className={`${panelShell} min-h-0 ${resultsOpen ? 'shrink-0' : 'flex-1'}`}
+                      style={resultsOpen ? { height: panels.queryHeight } : undefined}
                     >
                       <SqlEditor onCollapse={() => setQueryOpen(false)} />
                     </section>
@@ -215,7 +220,7 @@ export default function Home() {
                     />
                   )}
                   {resultsOpen ? (
-                    <section aria-label="Results panel" className={`${panelShell} min-h-0 flex-1`}>
+                    <section id="results-panel" aria-label="Results panel" className={`${panelShell} min-h-0 flex-1`}>
                       <ResultPanel onCollapse={() => setResultsOpen(false)} />
                     </section>
                   ) : (
@@ -224,6 +229,27 @@ export default function Home() {
                       badge={rowCount}
                       icon={<TableIcon size={12} />}
                       onClick={() => setResultsOpen(true)}
+                    />
+                  )}
+                  <PanelResizeHandle
+                    label="Resize query and results panels"
+                    orientation="vertical"
+                    controls={[queryOpen && 'sql-editor-panel', resultsOpen && 'results-panel'].filter(Boolean).join(' ')}
+                    value={panels.width}
+                    min={panels.minWidth}
+                    max={panels.maxWidth}
+                    onChange={panels.setWidth}
+                  />
+                  {queryOpen && resultsOpen && (
+                    <PanelResizeHandle
+                      label="Resize query and results split"
+                      orientation="horizontal"
+                      controls="sql-editor-panel results-panel"
+                      value={panels.queryHeight}
+                      min={panels.minQueryHeight}
+                      max={panels.maxQueryHeight}
+                      onChange={panels.setQueryHeight}
+                      style={{ top: panels.queryHeight + 4 }}
                     />
                   )}
                 </div>
@@ -251,11 +277,7 @@ export default function Home() {
           )}
 
           {/* Keep the dock centered in the canvas area left free by the column. */}
-          <PlaybackDock
-            leftClass={
-              isWide && columnOpen ? 'left-[20rem] xl:left-[22.5rem] 2xl:left-[25.5rem]' : 'left-0'
-            }
-          />
+          <PlaybackDock leftInset={canvasLeftInset} />
         </div>
 
         {!isWide && <BottomSheet editor={<SqlEditor bare />} results={<ResultPanel />} />}

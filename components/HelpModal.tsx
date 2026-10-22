@@ -149,7 +149,7 @@ const TIPS = [
   'Queries written the MySQL, PostgreSQL, SQL Server or Oracle way are translated to SQLite. The rewrite appears under the editor so you learn both spellings.',
   'INSERT, UPDATE and DELETE run against the loaded tables and show the rows before and after the change.',
   'Drag tables to rearrange the schema. Pinch or scroll to zoom the canvas.',
-  'On larger screens, collapse the query and result panels to give the schema more room.',
+  'On larger screens, drag the panels’ right border to widen query and results, or the divider between them to adjust their heights. Either mouse button works. Collapse a panel to give the schema more room.',
   'Run a lesson, then edit its query one clause at a time and run it again. Watching a single change move through the stages is the fastest way to build intuition.',
 ];
 

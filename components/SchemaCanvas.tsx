@@ -183,7 +183,7 @@ function TracePin() {
   ) : null;
 }
 
-export const SchemaCanvas = memo(function SchemaCanvas() {
+export const SchemaCanvas = memo(function SchemaCanvas({ leftInset = 0 }: { leftInset?: number }) {
   // On wide screens the floating panels cover the canvas edges, so the
   // initial fit targets the visible middle instead of the full viewport.
   const isWide = useMediaQuery('(min-width: 1024px)');
@@ -201,9 +201,9 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
     minZoom: 0.02,
     // Keep the row-tracing chip clear of the first table, including on phones.
     padding: isWide
-      ? { left: '360px', right: '32px', top: '56px', bottom: '110px' }
+      ? { left: `${leftInset + 24}px`, right: '32px', top: '56px', bottom: '110px' }
       : { x: '16px', top: '56px', bottom: '90px' },
-  }), [isWide]);
+  }), [isWide, leftInset]);
 
   const nodes = useMemo<TableFlowNode[]>(
     () => {
@@ -300,6 +300,7 @@ export const SchemaCanvas = memo(function SchemaCanvas() {
       <Controls
         position="bottom-right"
         showInteractive={false}
+        fitViewOptions={fitOptions}
         className="!hidden !border-line-strong !bg-panel lg:!block [&>button]:!border-line [&>button]:!bg-panel [&>button]:!fill-ink-dim [&>button:hover]:!bg-white/5"
       />
       <CanvasSync nodes={nodes} edges={edges} handLayout={!!schemaDef.positions} fitOptions={fitOptions} onReady={onReady} />
