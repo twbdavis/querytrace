@@ -20,9 +20,7 @@ import {
 import { registerCompatFunctions } from './compatFunctions';
 import { translateCasts } from './dialect';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
-import { accountResultRow, resultBudget } from './resourceLimits';
-
-export { quoteIdent, splitSqlStatements } from './sqlText';
+import { accountResultRow, ResourceLimitError, resultBudget } from './resourceLimits';
 
 /** A custom-schema build failure that can name the statement responsible. */
 export class SchemaBuildError extends Error {
@@ -854,7 +852,7 @@ export function enforceCustomSchemaLimits(db: Exec, schema: TableMeta[]): void {
     totalRows += count;
     // Validate values before a mutation commits, not only when the canvas
     // later reads them. The shared trace budget also bounds repeated snapshots.
-    queryAll(db, `SELECT * FROM ${quoteIdent(table.name)}`);
+    queryAll(db, `SELECT _rowid_, * FROM ${quoteIdent(table.name)}`);
   }
   if (totalColumns > MAX_CUSTOM_TOTAL_COLUMNS) {
     throw new Error(`Custom schemas are limited to ${MAX_CUSTOM_TOTAL_COLUMNS} total columns.`);
@@ -1006,7 +1004,24 @@ export interface QueryResult {
 
 interface Exec {
   exec(sql: string): Array<{ columns: string[]; values: unknown[][] }>;
-  prepare?(sql: string): Pick<Statement, 'getColumnNames' | 'free'> & Partial<Pick<Statement, 'step' | 'get'>>;
+  prepare?(sql: string): Pick<Statement, 'getColumnNames' | 'free'> & Partial<Pick<Statement, 'step'>> & {
+    // sql.js supports this config, but the installed type declarations omit it.
+    get?(params?: undefined, config?: { useBigInt: boolean }): unknown[];
+  };
+}
+
+const MIN_TRACE_INTEGER = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_TRACE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** Keep INTEGER values exact until their suitability for numeric row identities is known. */
+function traceValue(value: unknown): unknown {
+  if (typeof value !== 'bigint') return value;
+  if (value < MIN_TRACE_INTEGER || value > MAX_TRACE_INTEGER) {
+    throw new ResourceLimitError(
+      'SQLite INTEGER values must be between -9007199254740991 and 9007199254740991 for exact browser tracing. Store larger identifiers as TEXT, or CAST a query result AS TEXT.'
+    );
+  }
+  return Number(value);
 }
 
 export function queryAll(db: Exec, sql: string): QueryResult {
@@ -1022,7 +1037,8 @@ export function queryAll(db: Exec, sql: string): QueryResult {
         const columns = statement.getColumnNames();
         const rows: unknown[][] = [];
         while (statement.step()) {
-          const row = statement.get();
+          // REAL values remain numbers; only INTEGER values become bigint.
+          const row = statement.get(undefined, { useBigInt: true }).map(traceValue);
           accountResultRow(budget, row, rows.length + 1);
           rows.push(row);
         }

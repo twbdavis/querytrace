@@ -1,12 +1,26 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
-const editorFor = (page: import('@playwright/test').Page) => page.getByLabel('SQL query editor');
-const runButton = (page: import('@playwright/test').Page) => page.getByRole('button', { name: 'RUN', exact: true }).first();
+const editorFor = (page: Page) => page.getByLabel('SQL query editor');
+const runButton = (page: Page) => page.getByRole('button', { name: 'RUN', exact: true }).first();
+
+async function replaceSql(page: Page, sql: string) {
+  const editor = editorFor(page);
+  const value = () => editor.evaluate((element) => element instanceof HTMLTextAreaElement
+    ? element.value : [...element.querySelectorAll('.cm-line')].map((line) => line.textContent ?? '').join('\n'));
+  // Use the editor's keyboard selection before filling. WebKit can lose a
+  // native contenteditable fill selection during CodeMirror's first focus.
+  await editor.focus();
+  await editor.press('ControlOrMeta+A');
+  await editor.press('Backspace');
+  await expect.poll(value).toBe('');
+  await editor.fill(sql);
+  await expect.poll(value).toBe(sql);
+}
 
 test('date compatibility functions keep correct week and month-end results in the browser worker', async ({ page }) => {
   await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
-  await editorFor(page).fill("SELECT WEEK('2008-02-20', 1) AS week_number, WEEK('2000-01-01', 2) AS prior_year, DATEPART(week, '2023-01-01') AS first_week, ADD_MONTHS('2025-02-28', 1) AS month_end");
+  await replaceSql(page, "SELECT WEEK('2008-02-20', 1) AS week_number, WEEK('2000-01-01', 2) AS prior_year, DATEPART(week, '2023-01-01') AS first_week, ADD_MONTHS('2025-02-28', 1) AS month_end");
   await runButton(page).click();
   await expect(page.getByRole('tab').last()).toBeVisible();
   await page.getByRole('tab').last().click();
@@ -17,7 +31,7 @@ test('date compatibility functions keep correct week and month-end results in th
 test('MySQL and SQL Server spellings run and are explained beside the result', async ({ page }) => {
   await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
-  await editorFor(page).fill("SELECT TOP 3 `GIVEN_NAME`, YEAR('2026-03-12') AS yr FROM `ASTRONOMER` WHERE HOME_CITY ILIKE 'tucson' OR `HOME_CITY` <=> 'Flagstaff' ORDER BY GIVEN_NAME");
+  await replaceSql(page, "SELECT TOP 3 `GIVEN_NAME`, YEAR('2026-03-12') AS yr FROM `ASTRONOMER` WHERE HOME_CITY ILIKE 'tucson' OR `HOME_CITY` <=> 'Flagstaff' ORDER BY GIVEN_NAME");
   await runButton(page).click();
   const stages = page.getByRole('tab');
   await expect(stages).toHaveCount(4);
@@ -32,7 +46,7 @@ test('MySQL and SQL Server spellings run and are explained beside the result', a
   await expect(notes).toContainText('ILIKE');
   await expect(notes).toContainText('YEAR()');
   // Editing the query clears the notes with the trace.
-  await editorFor(page).fill('SELECT GIVEN_NAME FROM ASTRONOMER');
+  await replaceSql(page, 'SELECT GIVEN_NAME FROM ASTRONOMER');
   await expect(notes).toBeHidden();
 });
 
@@ -52,7 +66,7 @@ test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the a
   const customers = page.getByTestId('rf__node-customers');
   await expect(customers.locator('[data-table-row]')).toHaveCount(2);
 
-  await editorFor(page).fill("UPDATE customers SET status = 'Closed' WHERE customer_id = 'C2'");
+  await replaceSql(page, "UPDATE customers SET status = 'Closed' WHERE customer_id = 'C2'");
   await runButton(page).click();
   const stages = page.getByRole('tab');
   await expect(stages).toHaveCount(3);
@@ -67,7 +81,7 @@ test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the a
   await expect(customers).not.toContainText('Inactive');
   await expect(page.getByRole('table', { name: 'Query results' })).toContainText('Closed');
 
-  await editorFor(page).fill("DELETE FROM customers WHERE customer_id = 'C1'");
+  await replaceSql(page, "DELETE FROM customers WHERE customer_id = 'C1'");
   await runButton(page).click();
   await expect(stages).toHaveCount(3);
   await stages.last().click();
@@ -77,7 +91,7 @@ test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the a
   await expect(page.getByRole('region', { name: 'Stage explanation' })).toContainText('equipment: 1 row removed');
 
   // A rejected statement rolls back and explains itself; nothing changes on the canvas.
-  await editorFor(page).fill("INSERT INTO equipment VALUES ('E9', 'C404', 'Ghost')");
+  await replaceSql(page, "INSERT INTO equipment VALUES ('E9', 'C404', 'Ghost')");
   await runButton(page).click();
   await expect(page.getByRole('alert').filter({ hasText: 'rejected' })).toContainText('foreign-key value does not match any row in the parent table');
   await expect(page.getByTestId('rf__node-equipment').locator('[data-table-row]')).toHaveCount(1);
@@ -92,7 +106,7 @@ test('INSERT, UPDATE and DELETE trace a before state, the matched rows and the a
 test('a lesson restores the bundled rows after a data change in the same schema', async ({ page }) => {
   await page.goto('/trace');
   await expect(runButton(page)).toBeEnabled();
-  await editorFor(page).fill("DELETE FROM OBSERVATION WHERE ASTRONOMER_ID = 1");
+  await replaceSql(page, "DELETE FROM OBSERVATION WHERE ASTRONOMER_ID = 1");
   await runButton(page).click();
   await page.getByRole('tab').last().click();
   await expect(page.getByTestId('rf__node-OBSERVATION').locator('[data-table-row]')).toHaveCount(8);

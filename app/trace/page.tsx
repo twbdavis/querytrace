@@ -99,6 +99,7 @@ const panelShell = 'flex flex-col overflow-hidden rounded-md border border-line-
 
 export default function Home() {
   const dbReady = useAppStore((s) => s.dbReady);
+  const schemaLoading = useAppStore((s) => s.schemaLoading);
   const dbError = useAppStore((s) => s.dbError);
   const init = useAppStore((s) => s.init);
   const loadSchema = useAppStore((s) => s.loadSchema);
@@ -176,13 +177,13 @@ export default function Home() {
         />
 
         <div className="relative min-h-0 flex-1">
-          {!dbReady && (
+          {(!dbReady || schemaLoading) && (
             <div
               role="status"
               className="pointer-events-none absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line-strong bg-panel px-3 py-1.5 font-ui text-[9px] font-bold tracking-[0.18em] text-ink-dim"
             >
               <span className="h-2.5 w-2.5 animate-spin rounded-full border border-line-strong border-t-accent-active" />
-              STARTING SQLITE
+              {dbReady ? 'LOADING SCHEMA' : 'STARTING SQLITE'}
             </div>
           )}
           {/* The schema owns the entire viewport; everything else floats. */}

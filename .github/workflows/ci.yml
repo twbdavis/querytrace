@@ -33,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies with strict production checks and expiring build-only exception
+      - name: Audit all production and development dependencies without exceptions
         run: npm run audit:release
 
       - name: Run complete release checks and production build

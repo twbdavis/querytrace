@@ -19,7 +19,6 @@ export interface QuerySequenceCase {
   requiredStages?: string[];
 }
 
-const accountColumns = ['code', 'name', 'region', 'active'];
 const purchaseColumns = ['id', 'account_code', 'amount', 'note', 'posted_on'];
 const account = (rid: number): SequenceSources => ({ account: [rid] });
 const purchase = (...rids: number[]): SequenceSources => ({ purchase: rids });
@@ -234,7 +233,3 @@ export const QUERY_SEQUENCE_CASES: QuerySequenceCase[] = [
     requiredStages: ['join', 'orderLimit'],
   },
 ];
-
-// Keep the fixture's account columns available to browser tests checking the
-// imported schema without deriving expected values from engine output.
-export const QUERY_SEQUENCE_ACCOUNT_COLUMNS = accountColumns;

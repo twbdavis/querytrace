@@ -11,7 +11,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test:trace": "tsx scripts/testTrace.ts",
     "test:routes": "tsx scripts/testKeyRoutes.ts && tsx scripts/testKeyRouteSnapshots.ts",
     "test:layout": "tsx scripts/testSchemaLayout.ts && tsx scripts/testTableRowWindow.ts",
@@ -33,6 +33,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "sql.js": "^1.14.2",
+    "three": "^0.186.1",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
@@ -41,19 +42,17 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/sql.js": "^1.4.9",
-    "autoprefixer": "^10.6.1",
+    "@types/three": "^0.186.0",
+    "@tailwindcss/postcss": "4.3.3",
     "postcss": "^8.5.28",
-    "tailwindcss": "^3.4.13",
+    "tailwindcss": "4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^5.6.0"
-  },
-  "overrides": {
-    "postcss-selector-parser": "7.1.6"
   },
   "browserslist": [
     "chrome 111",
     "edge 111",
-    "firefox 111",
+    "firefox 128",
     "safari 16.4"
   ]
 }

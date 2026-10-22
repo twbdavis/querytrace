@@ -1,12 +1,24 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss' source(none);
+@config '../tailwind.config.ts';
 
-/* Blueprint theme tokens - mirrors styles/theme.ts (the TS source of truth). */
+/* Preserve the existing base appearance while using Tailwind 4's compiler.
+   Utility scanning remains limited to the paths in tailwind.config.ts. */
+@layer base {
+  *, ::before, ::after, ::backdrop, ::file-selector-button {
+    border-color: #e5e7eb;
+  }
+  input::placeholder, textarea::placeholder {
+    color: #9ca3af;
+  }
+  button:not(:disabled), [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* Blueprint tokens used by CSS, shared with styles/theme.ts. */
 :root {
   /* Surfaces - canvas pushed darker so nodes float above it */
   --bg-app: #090d18; /* page chrome background */
-  --bg-canvas: #0c1122; /* React Flow canvas */
   --bg-node: #171e38; /* table node body */
   --bg-node-header: #26305a; /* table node header bar */
   --bg-panel: #10152b; /* side panels, editor bg, playback pill */
@@ -19,21 +31,15 @@
   /* Text - near-white primary, faint indigo cast only */
   --text-primary: #eef2ff;
   --text-secondary: #a5b1d8;
-  --text-muted: #626e9d;
 
   /* Role accents */
   --accent-active: #8b98ff; /* periwinkle: active tables, join keys, edges */
   --accent-pulse: #c7d2fe; /* brighter periwinkle: traveling edge pulses */
   --accent-filter: #fcd34d; /* gold: WHERE columns, null-extended rows */
-  --accent-group: #f0abfc; /* orchid: GROUP BY column highlight */
   --accent-result: #5eead4; /* mint: projection columns, result rows, inspect */
-  --accent-error: #fb7185; /* rose: errors */
 
   /* Row state backgrounds (pre-mixed, don't compute at runtime) */
   --row-lit-bg: rgba(139, 152, 255, 0.3);
-  --row-lit-border: #8b98ff;
-  --row-null-border: #fcd34d; /* dashed */
-  --row-inspect-bg: rgba(94, 234, 212, 0.32);
   --motion-enter: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -51,7 +57,7 @@ body {
 *:focus-visible {
   outline: 2px solid var(--accent-active);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: 0;
 }
 
 /* invisible scrollbar for the playback dock's stage-chip strip */
@@ -73,16 +79,27 @@ body {
 }
 *::-webkit-scrollbar-thumb {
   background: var(--border-default);
-  border-radius: 4px;
+  border-radius: 0;
 }
 *::-webkit-scrollbar-track {
   background: transparent;
 }
 
+/* Blueprint: square corners everywhere, including React Flow's own chrome
+   (controls, handles, attribution), whose stylesheet rounds them. */
+.react-flow .react-flow__controls,
+.react-flow .react-flow__controls-button,
+.react-flow .react-flow__handle,
+.react-flow .react-flow__attribution,
+.react-flow .react-flow__node,
+.react-flow .react-flow__panel {
+  border-radius: 0;
+}
+
 /* clause of the query currently being executed by the trace animation */
 .queryExecHighlight {
   background: var(--row-lit-bg);
-  border-radius: 3px;
+  border-radius: 0;
   transition: background 0.3s;
 }
 
@@ -127,6 +144,16 @@ body {
 .panel-enter { animation: panel-enter 180ms var(--motion-enter) backwards; }
 .modal-backdrop-enter { animation: modal-backdrop-enter 150ms ease-out both; }
 .modal-dialog-enter { animation: modal-dialog-enter 200ms var(--motion-enter) backwards; }
+.app-modal {
+  margin: 0;
+  width: 100%;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  border: 0;
+  color: inherit;
+}
+.app-modal::backdrop { background: transparent; }
 .result-row-enter { animation: result-row-enter 180ms var(--motion-enter) backwards; }
 
 /* Matches ResultTable's scroll window math; cells stay single-line. */

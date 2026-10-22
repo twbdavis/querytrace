@@ -1,6 +1,8 @@
 /* QueryTrace landing: "the quiet instrument". One narrow column within
    balanced page margins, small exact demonstrations, and composed emptiness.
-   Square corners, no rules, no shadows, no gradients. Tokens from globals.css. */
+   Square corners, no rules, no shadows, no gradients, except on the stage: the
+   three.js join scene under the headline is the one place the page glows, and
+   it needs a scrim so the words stay legible over it. Tokens from globals.css. */
 
 .page {
   --ground: var(--bg-app);
@@ -12,18 +14,12 @@
   --on-accent: var(--bg-app);
   --mint: var(--accent-result);
   --gold: var(--accent-filter);
-  --orchid: var(--accent-group);
-  --tint-join: #30375d;
-  --tint-where: #524828;
-  --tint-group: #4e3c5d;
 
   /* One-inch desktop gutters, with comfortable smaller margins on phones. */
   --edge: 24px;
-  --col: 100%;
 
   --step-small: clamp(0.875rem, 0.85rem + 0.1vw, 0.9375rem);
   --step-body: clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem);
-  --step-lead: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
   --step-head: clamp(1.625rem, 1.4rem + 1vw, 2rem);
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -62,12 +58,6 @@
 .page p { text-wrap: pretty; }
 .page h1, .page h2 { text-wrap: balance; }
 
-/* Everything sits on the column's left edge. */
-.col {
-  width: var(--col);
-  max-width: 100%;
-}
-
 .inner {
   margin-left: 0;
 }
@@ -103,7 +93,140 @@
 /* ------------------------------------------------------------- hero */
 
 .hero {
-  padding-top: 12svh;
+  padding-top: 0;
+}
+
+/* The stage runs edge to edge; the scene fills it and the words sit over
+   its quiet front-left corner. */
+.stage {
+  position: relative;
+  display: grid;
+  margin: 20px calc(-1 * var(--edge)) 0;
+  min-height: min(80svh, 900px);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.scene {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--ground);
+}
+
+.sceneVisual {
+  position: absolute;
+  inset: 0;
+}
+
+.sceneControl {
+  position: absolute;
+  right: var(--edge);
+  bottom: 20px;
+  z-index: 1;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  background: var(--ground);
+  color: var(--soft);
+  font: inherit;
+  font-size: var(--step-small);
+  cursor: pointer;
+}
+
+.sceneControl:hover:not(:disabled) { color: var(--ink); }
+.sceneControl:disabled { cursor: default; }
+
+/* Vignette and a floor scrim for the text. */
+.scene::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(110% 95% at 50% 42%, transparent 52%, var(--ground) 100%),
+    linear-gradient(to top, var(--ground) 0%, rgba(9, 13, 24, 0.75) 14%, transparent 42%);
+}
+
+.canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  opacity: 0;
+  transition: opacity 900ms var(--ease-soft);
+}
+
+.canvasOn { opacity: 1; }
+
+/* The same join drawn in SVG when the live scene cannot run. */
+.staticJoin {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border-default) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-default) 1px, transparent 1px);
+  background-size: 48px 48px;
+  background-color: var(--ground);
+}
+
+.staticJoin::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--ground);
+  opacity: 0.8;
+}
+
+.staticLandscape,
+.staticPortrait {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.staticLandscape { display: block; }
+.staticPortrait { display: none; }
+.staticWire { fill: none; stroke: var(--accent); stroke-width: 2; }
+.staticResultWire { stroke: var(--mint); }
+.staticTableName { fill: var(--ink); font: 500 12px var(--font-ui), sans-serif; }
+.staticRowCount { fill: var(--soft); font: 10px var(--font-data), monospace; }
+.staticColumn { font: 700 9.5px var(--font-data), monospace; }
+.staticCell { fill: var(--ink); font: 11px var(--font-data), monospace; }
+
+/* The vectors already leave room for the headline/query; keep every row clear. */
+.scene[data-mode='fallback']::after { background: none; }
+
+@media (max-width: 599px) {
+  .scene[data-mode='fallback'] { height: max(58svh, 172.5vw); }
+  .staticLandscape { display: none; }
+  .staticPortrait { display: block; }
+}
+
+.stageText {
+  position: relative;
+  z-index: 2;
+  align-self: end;
+  max-width: 680px;
+  padding: 10svh var(--edge) 60px;
+  pointer-events: none;
+}
+
+.stageText a,
+.stageText button {
+  pointer-events: auto;
+}
+
+/* The headline sits over the stage's top-left corner, above SCREENING. */
+.stageTitle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  padding: 44px var(--edge) 0;
+  pointer-events: none;
 }
 
 .headline {
@@ -112,12 +235,6 @@
   line-height: 1.2;
   letter-spacing: -0.03em;
   max-width: 24ch;
-}
-
-.lede {
-  margin-top: 18px;
-  color: var(--soft);
-  max-width: 44ch;
 }
 
 .actions {
@@ -167,57 +284,19 @@
 .textLink:hover { color: var(--accent-2); }
 .textLink:hover .textLabel { text-decoration-thickness: 2px; }
 
-.quietLink {
-  color: var(--ink);
-  font-weight: 500;
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  text-underline-offset: 5px;
-  text-decoration-thickness: 1px;
-  transition: text-decoration-color var(--t-hover) ease, color var(--t-hover) ease;
-}
-
-.quietLink:hover { text-decoration-color: currentColor; }
-
-/* The demonstration: real frames of the tracer, crossfading slowly. */
-.demo {
-  display: grid;
-  gap: 24px;
-  max-width: 1248px;
-  margin-top: 88px;
-}
-
-.demoQuery { min-width: 0; }
-
-.frame {
-  position: relative;
-  display: block;
+/* The query the scene is playing, one line per clause, with a caption that
+   follows the animation. It sits under the headline, where the lede was. */
+.demoQuery {
   min-width: 0;
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  overflow: hidden;
-  background: var(--surface);
+  max-width: 640px;
 }
-
-.frameImg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: 0% 0%;
-  opacity: 0;
-  transition: opacity 1600ms var(--ease-soft);
-}
-
-.frameOn { opacity: 1; }
 
 /* The real query, one line per clause. Code is where monospace belongs. */
 .sql {
   margin: 0;
-  padding: 18px 0;
+  padding: 8px 0 10px;
   font-family: var(--font-data), ui-monospace, monospace;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.7;
   color: var(--ink);
   white-space: pre-wrap;
@@ -232,46 +311,25 @@
   margin: 0 -12px;
 }
 
-.clause {
-  display: block;
-  width: calc(100% + 24px);
-  margin: 0 -12px;
-  padding: 1px 12px;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  cursor: pointer;
-  transition: background-color var(--t-hover) ease;
-}
-
-.clause:hover { background: var(--surface); }
-.on.join, .on.order { background: var(--tint-join); }
-.on.where { background: var(--tint-where); }
-.on.group { background: var(--tint-group); }
-
 .kw { color: var(--accent); }
-.kwWhere { color: var(--gold); }
-.kwGroup { color: var(--orchid); }
 .kwResult { color: var(--mint); }
-.str { color: var(--mint); }
 
-.caption {
-  margin-top: 6px;
-  min-height: 1.5lh;
-  color: var(--soft);
-  transition: color var(--t-hover) ease;
-}
-
-.captionOn { color: var(--ink); }
+.stageText .actions { margin-top: 22px; }
 
 /* --------------------------------------------------------- sections */
 
 .section {
-  padding-top: 140px;
+  padding-top: 120px;
+}
+
+/* Section labels, set in the data face. */
+.eyebrow {
+  margin-bottom: 14px;
+  font-family: var(--font-data), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--soft);
 }
 
 .heading {
@@ -281,42 +339,8 @@
   line-height: 1.2;
 }
 
-/* One row, four states: the RESERVATION table at true size. */
-.states {
-  display: grid;
-  gap: 56px;
-  margin-top: 64px;
-}
-
-.state {
-  display: grid;
-  grid-template-columns: var(--col);
-  row-gap: 10px;
-  align-items: start;
-}
-
-.stateWord {
-  font-size: var(--step-body);
-  color: var(--ink);
-  font-weight: 500;
-  line-height: 1.3;
-}
-
-.statePic {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 1.6 / 1;
-  overflow: hidden;
-  background: var(--surface);
-}
-
-.statePic img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
+/* Sections that run as wide as the stage. */
+.wide { max-width: 1248px; }
 
 /* Two-ended rows. */
 .rows {
@@ -324,13 +348,13 @@
   margin-top: 32px;
 }
 
+/* Each group of lessons stands apart from the one before. */
+.rows > * + * { margin-top: 48px; }
+
 .groupWord {
-  margin-top: 40px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   color: var(--soft);
 }
-
-.groupWord:first-child { margin-top: 0; }
 
 .row {
   display: flex;
@@ -359,6 +383,11 @@
   font-size: var(--step-body);
 }
 
+/* Lessons: one column on phones, two on desktop. */
+.lessonGrid {
+  display: grid;
+}
+
 .rowValue {
   flex: none;
   color: var(--soft);
@@ -374,37 +403,144 @@
 
 .prose + .prose { margin-top: 12px; }
 
-.picture {
-  position: relative;
-  margin-top: 40px;
-  aspect-ratio: 1.6 / 1;
-  overflow: hidden;
-  background: var(--surface);
+/* A link that shows on every screen size, underlined under the words only. */
+.inlineLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 28px;
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: none;
+  transition: color var(--t-hover) ease;
 }
 
-.picture img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: 0% 0%;
+.inlineLink:hover { color: var(--accent-2); }
+.inlineLink:hover .textLabel { text-decoration-thickness: 2px; }
+
+/* ------------------------------------------------------------ schema */
+
+/* Words on one side, a pasted export on the other. */
+.schema {
+  display: grid;
+  gap: 40px;
+}
+
+.facts {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+  max-width: 46ch;
+  color: var(--soft);
+}
+
+.facts li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.facts .dot { position: relative; top: 1px; align-self: auto; }
+
+.schemaCode {
+  min-width: 0;
+  margin: 0;
+  padding: 22px 26px 22px;
+  background: var(--surface);
+  align-self: start;
+}
+
+.codeLabel {
+  font-family: var(--font-data), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--soft);
+}
+
+.schemaCode .sql {
+  padding: 12px 0 16px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.type { color: var(--soft); }
+
+.dialects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chip {
+  padding: 5px 9px;
+  border: 1px solid var(--border-default);
+  font-family: var(--font-data), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--soft);
 }
 
 /* ------------------------------------------------------------- close */
 
 .close {
-  padding-top: 22svh;
-  padding-bottom: 10svh;
+  padding-top: 120px;
+}
+
+/* One panel: the invitation on the left, the button on the right. */
+.closePanel {
+  display: grid;
+  gap: 32px;
+  padding: 40px 24px;
+  background: var(--surface);
+}
+
+.closeTitle {
+  font-size: var(--step-head);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
 }
 
 .closeLine {
-  font-size: var(--step-lead);
-  line-height: 1.35;
-  max-width: 34ch;
+  margin-top: 14px;
+  color: var(--soft);
+  max-width: 40ch;
 }
 
-.close .actions { margin-top: 24px; }
+.closeActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+}
+
+.closeActions .inlineLink { margin-top: 0; }
+
+/* The one button that shows on every screen size. */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 22px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--step-body);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color var(--t-hover) ease, transform var(--t-press) var(--ease-out);
+}
+
+.cta:hover { background: var(--accent-2); }
+.cta:active { transform: scale(0.98); }
 
 /* ------------------------------------------------------------ footer */
 
@@ -412,7 +548,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12svh 0 24px;
+  padding: 72px 0 24px;
   font-size: var(--step-small);
   color: var(--soft);
 }
@@ -443,7 +579,7 @@
 /* ------------------------------------------------------------ motion */
 
 @media (prefers-reduced-motion: no-preference) {
-  :global(html.js) [data-rise] {
+  :global(html.js) .page [data-rise] {
     opacity: 0;
     transform: translateY(14px);
     animation: rise 800ms var(--ease-out) forwards;
@@ -458,8 +594,6 @@
 @media (min-width: 1024px) {
   .page {
     --edge: 96px;
-    --col: 520px;
-    --label: 200px;
   }
 
   .top {
@@ -470,36 +604,35 @@
   .button { display: none; }
   .textLink { display: inline-flex; }
 
-  .demo {
-    grid-template-columns: minmax(0, 13fr) minmax(0, 17fr);
-    align-items: center;
+  .stage { margin-top: 28px; }
+  .stageTitle { padding-top: 52px; }
+
+  .lessonGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     column-gap: 48px;
   }
 
-  .state {
-    grid-template-columns: var(--label) var(--col);
-    column-gap: 32px;
-    row-gap: 10px;
+  .schema {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    column-gap: 64px;
+    align-items: center;
   }
 
-  .stateWord {
-    grid-column: 1;
-    grid-row: 1;
-    text-align: right;
-    font-size: var(--step-lead);
-    font-weight: 400;
-    color: var(--soft);
-    padding-top: 2px;
-  }
+  .close { padding-top: 150px; }
 
-  .statePic { grid-column: 2; grid-row: 1; }
+  .closePanel {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 48px;
+    padding: 56px 64px;
+  }
 
   .foot {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
     align-items: baseline;
     gap: 24px;
-    padding: 14svh 0 30px;
+    padding: 96px 0 30px;
     margin-left: 0;
   }
 
@@ -509,13 +642,38 @@
 @media (max-width: 1023px) {
   .page { padding: 0 var(--edge); }
   .inner { margin-left: 0; }
-  .hero { padding-top: 9svh; }
-  .demo { margin-top: 64px; }
+  .hero { padding-top: 0; }
+
+  /* Phones: the words first, then the scene at a fixed height beneath them. */
+  .stage {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin-top: 0;
+  }
+
+  .stageTitle {
+    position: relative;
+    order: 0;
+    padding: 6svh var(--edge) 20px;
+  }
+
+  .stageText {
+    order: 1;
+    align-self: auto;
+    max-width: none;
+    padding: 0 var(--edge) 32px;
+  }
+
+  .scene {
+    order: 2;
+    position: relative;
+    height: 58svh;
+    min-height: 360px;
+  }
+
   .section { padding-top: 104px; }
-  .states { gap: 48px; margin-top: 40px; }
-  .state { grid-template-columns: 1fr; }
-  .stateWord { order: 2; }
   .row { min-height: 44px; flex-wrap: wrap; }
   .rowValue { flex-basis: 100%; padding-left: 18px; }
-  .close { padding-top: 18svh; padding-bottom: 10svh; }
+  .close { padding-top: 104px; }
 }

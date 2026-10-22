@@ -160,6 +160,17 @@ change also discard the worker and restore the last acknowledged checkpoint.
 Editing the next query cancels the obsolete trace without discarding a successful
 write's canvas data or saved custom database.
 
+The application queues database operations through their persistence acknowledgment.
+Queries cannot start while a schema replacement is pending. Preparing a lesson always
+queues its original schema, including when a previous write has not acknowledged yet.
+Successful builds clear only the draft that was submitted, preserving any later edits.
+Schema settings can resume the saved custom checkpoint after a lesson without rebuilding
+its original DDL. Resume reserves its request order before waiting for writes or storage;
+a later lesson or schema choice cancels that resume before it can dispatch an old choice.
+Custom database saves compare a revision inside one IndexedDB transaction. A stale
+tab's write is rejected and its worker restores the latest durable checkpoint with
+an explicit conflict message. Lesson and draft saves patch only their own fields.
+
 Database files are bounded to 16 MiB and SQLite allocations to 64 MiB. Each trace
 has a cumulative budget of 500,000 cells or 8 MiB of raw values, with no more than
 50,000 rows in any intermediate result. These are value budgets, not total
@@ -168,6 +179,13 @@ is limited to 100,000 characters and a binary value to 100,000 bytes. Result row
 are read incrementally so an oversized result fails before it is fully retained.
 Mutation and CREATE validation includes these limits before committing. Bundled
 and custom sessions both enforce table/row/column capacity limits on edits.
+
+SQLite INTEGER values, including hidden rowids, must fit the exact JavaScript integer
+range (-9,007,199,254,740,991 through 9,007,199,254,740,991). They are read as BigInt before
+validation, then converted to numbers. Out-of-range imports, results, and writes are
+rejected; writes roll back. Store larger identifiers as TEXT, or explicitly CAST a
+query result AS TEXT to retain every digit. REAL values keep SQLite's floating-point
+semantics.
 
 Compatibility functions check allocation sizes before padding/repetition and
 before decoding binary arguments. REGEXP accepts a conservative subset: at most

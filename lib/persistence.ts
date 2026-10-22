@@ -10,6 +10,8 @@ const STATE_VERSION = 3;
 
 export interface PersistedAppState {
   version: typeof STATE_VERSION;
+  /** Increased only when the saved custom database changes, across every tab. */
+  customRevision: number;
   lastSchemaId: string;
   customSchema?: SchemaDef;
   customDatabase?: Uint8Array;
@@ -21,6 +23,36 @@ export interface PersistedAppState {
 let openPromise: Promise<IDBDatabase> | null = null;
 let persistenceAvailable = typeof indexedDB !== 'undefined';
 let writeQueue = Promise.resolve();
+
+export class PersistenceConflictError extends Error {
+  constructor(readonly current: PersistedAppState) {
+    super('Another tab changed the saved custom schema. This change was not saved.');
+    this.name = 'PersistenceConflictError';
+  }
+}
+
+export type PersistedStatePatch = Partial<Omit<PersistedAppState, 'version' | 'customRevision'>>;
+
+function normalizeState(value: unknown): PersistedAppState | null {
+  if (!value || typeof value !== 'object') return null;
+  const saved = value as Omit<Partial<PersistedAppState>, 'version'> & { version?: number };
+  if (![1, 2, STATE_VERSION].includes(saved.version ?? -1) || typeof saved.lastSchemaId !== 'string') return null;
+  const ranLessons = Object.fromEntries(Object.entries(saved.ranLessons ?? {}).filter(
+    (entry): entry is [string, boolean] => typeof entry[1] === 'boolean'
+  ));
+  const customSchema = saved.customSchema?.id === 'custom' && typeof saved.customSchema.ddl === 'string'
+    ? saved.customSchema : undefined;
+  const currentCurriculum = saved.version === STATE_VERSION;
+  return {
+    version: STATE_VERSION,
+    customRevision: Number.isSafeInteger(saved.customRevision) && saved.customRevision! >= 0 ? saved.customRevision! : 0,
+    lastSchemaId: currentCurriculum || (saved.lastSchemaId === 'custom' && customSchema) ? saved.lastSchemaId : 'observatory',
+    customSchema,
+    customDatabase: normalizeBytes(saved.customDatabase),
+    customDdlDraft: typeof saved.customDdlDraft === 'string' ? saved.customDdlDraft : undefined,
+    ranLessons: currentCurriculum ? ranLessons : {},
+  };
+}
 
 function openDatabase(): Promise<IDBDatabase> {
   if (!persistenceAvailable) return Promise.reject(new Error('IndexedDB is unavailable.'));
@@ -57,32 +89,7 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
-    if (!value || typeof value !== 'object') return null;
-    const saved = value as Omit<Partial<PersistedAppState>, 'version'> & { version?: number };
-    if (![1, 2, STATE_VERSION].includes(saved.version ?? -1) || typeof saved.lastSchemaId !== 'string') {
-      return null;
-    }
-    const ranLessons = Object.fromEntries(
-      Object.entries(saved.ranLessons ?? {}).filter(
-        (entry): entry is [string, boolean] => typeof entry[1] === 'boolean'
-      )
-    );
-    const customSchema =
-      saved.customSchema?.id === 'custom' && typeof saved.customSchema.ddl === 'string'
-        ? saved.customSchema
-        : undefined;
-    const currentCurriculum = saved.version === STATE_VERSION;
-    return {
-      version: STATE_VERSION,
-      lastSchemaId:
-        currentCurriculum || (saved.lastSchemaId === 'custom' && customSchema)
-          ? saved.lastSchemaId
-          : 'observatory',
-      customSchema,
-      customDatabase: normalizeBytes(saved.customDatabase),
-      customDdlDraft: typeof saved.customDdlDraft === 'string' ? saved.customDdlDraft : undefined,
-      ranLessons: currentCurriculum ? ranLessons : {},
-    };
+    return normalizeState(value);
   } catch {
     // Safari private mode and restrictive embedding policies can deny storage.
     // The app remains fully usable as an in-memory session in that case.
@@ -91,27 +98,54 @@ export async function loadPersistedAppState(): Promise<PersistedAppState | null>
   }
 }
 
-async function writeState(state: PersistedAppState): Promise<void> {
+async function writeState(patch: PersistedStatePatch, expectedCustomRevision?: number): Promise<PersistedAppState> {
   const database = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<PersistedAppState>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, 'readwrite');
-    transaction.objectStore(STORE_NAME).put(state, STATE_KEY);
-    transaction.oncomplete = () => resolve();
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(STATE_KEY);
+    let next: PersistedAppState;
+    let conflict: PersistenceConflictError | undefined;
+    request.onsuccess = () => {
+      const current = normalizeState(request.result) ?? {
+        version: STATE_VERSION, customRevision: 0, lastSchemaId: 'observatory', ranLessons: {},
+      };
+      // The read and write share one IndexedDB transaction, so competing tabs
+      // cannot both commit a mutation based on the same saved checkpoint.
+      if (expectedCustomRevision !== undefined && current.customRevision !== expectedCustomRevision) {
+        conflict = new PersistenceConflictError(current);
+        transaction.abort();
+        return;
+      }
+      next = {
+        ...current, ...patch,
+        customRevision: current.customRevision + (expectedCustomRevision === undefined ? 0 : 1),
+        ranLessons: { ...current.ranLessons, ...patch.ranLessons },
+      };
+      store.put(next, STATE_KEY);
+    };
+    transaction.oncomplete = () => resolve(next);
     transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
+    transaction.onabort = () => reject(conflict ?? transaction.error);
   });
 }
 
-/** Queue whole-state writes so rapid lesson runs cannot overwrite newer progress. */
+/** Patch only changed fields; database writes also require the caller's revision. */
 export function savePersistedAppState(
-  state: Omit<PersistedAppState, 'version'>
-): Promise<void> {
-  if (!persistenceAvailable) return Promise.resolve();
-  const snapshot: PersistedAppState = { version: STATE_VERSION, ...state };
-  writeQueue = writeQueue.then(() => writeState(snapshot)).catch(() => {
+  patch: PersistedStatePatch,
+  expectedCustomRevision?: number
+): Promise<PersistedAppState | null> {
+  if (!persistenceAvailable) return Promise.resolve(null);
+  if (('customSchema' in patch || 'customDatabase' in patch) && expectedCustomRevision === undefined) {
+    return Promise.reject(new Error('Saving a custom database requires its checkpoint revision.'));
+  }
+  const queued = writeQueue.then(() => writeState(patch, expectedCustomRevision)).catch((error: unknown) => {
+    if (error instanceof PersistenceConflictError) throw error;
     persistenceAvailable = false;
+    return null;
   });
-  return writeQueue;
+  writeQueue = queued.then(() => undefined, () => undefined);
+  return queued;
 }
 
 /** Best effort only: browsers may decline, especially Safari private browsing. */

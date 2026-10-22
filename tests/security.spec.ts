@@ -101,13 +101,13 @@ test('production pages and assets carry isolation and content security headers w
   expect(headers['x-content-type-options']).toBe('nosniff');
   expect(headers['x-frame-options']).toBe('DENY');
   expect(headers['strict-transport-security']).toContain('max-age=63072000');
-  for (const path of ['/landing/hero-join.png', '/fonts/switzer-400.woff2']) {
+  for (const path of ['/icon.svg', '/fonts/switzer-400.woff2']) {
     const asset = await request.get(path);
     expect(asset.ok()).toBe(true);
     expect(asset.headers()['cross-origin-resource-policy']).toBe('same-origin');
     expect(asset.headers()['x-content-type-options']).toBe('nosniff');
   }
-  for (const path of ['/.env', '/package-lock.json', '/SECURITY.md', '/.git/config']) {
+  for (const path of ['/.env', '/package-lock.json', '/SECURITY.md', '/.git/config', '/landing/hero-join.png']) {
     expect((await request.get(path)).status()).toBe(404);
   }
 });

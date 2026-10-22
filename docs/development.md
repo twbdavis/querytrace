@@ -16,7 +16,8 @@ npx playwright install
 npm run test:browsers
 ```
 
-The check command runs TypeScript checks, tracing tests, key-route and schema-layout tests, the
+The check command rejects unused TypeScript locals and parameters, and generates Next.js declarations before TypeScript checks, so it also works
+on a clean checkout without `next-env.d.ts` or `.next`. It then runs tracing tests, key-route and schema-layout tests, the
 trace-engine fuzz battery, dialect regressions, the consecutive-query acceptance
 test, schema/transaction and resource-containment regressions, and a production build. Run `npm run test:sequence` for eight rejection and
 rollback checks followed by twenty-five consecutive MySQL, MariaDB, and PostgreSQL
@@ -39,9 +40,9 @@ Run `npm run test:security` for bounded SQL results and allocations, mutation
 rollback after resource failures, regular-expression limits, worker deadlines and
 checkpoint recovery, and the dependency audit policy. Browser recovery tests
 exercise the actual worker lifecycle and deadline.
-`npm run audit:release` requires a clean production dependency audit and applies
-the narrow, expiring build-only exception documented in [Security](../SECURITY.md).
-An ordinary full `npm audit` continues to report that unpatched build-tool risk.
+`npm run audit:release` requires zero reported vulnerabilities across all dependencies,
+including development, optional, and peer dependencies. There are no exceptions;
+all severities and invalid registry responses fail the check. See [Security](../SECURITY.md).
 The fuzz battery
 (`npm run test:fuzz`) runs about 2,500 generated and hand-written queries against
 the bundled schemas and four vendor-style custom schemas (MySQL Workbench, pg_dump,
@@ -55,6 +56,9 @@ to another port to start a fresh test server alongside an existing preview; an
 explicit port disables server reuse.
 
 ## Hosting
+
+The supported browser minimums are Chrome/Edge 111, Firefox 128, and Safari 16.4.
+The Tailwind 4 build uses modern CSS features and does not target older Firefox versions.
 
 The documented deployment is Next.js on Vercel. Import this repository and use
 the standard Next.js build settings. For a local production server, run
@@ -81,6 +85,10 @@ tests verify bounded rendering, row provenance, and motion behavior.
 
 ## Release audit: October 14, 2026
 
+This section records the October 14 results. The subsequent October 21 remediation
+migrated to Tailwind 4, removed the vulnerable development dependency chain and its
+exception, and made CI require a clean audit of all dependencies.
+
 The local release audit covered dependency advisories, SQL execution and import
 boundaries, worker failure recovery, mutation atomicity, persistence races,
 identifier handling, HTML rendering, public assets and secrets, production
@@ -91,8 +99,8 @@ Confirmed issues corrected during the audit:
 - Vulnerable production/build dependencies were updated: Next.js 16.3.8,
   sharp 0.35.5, source-map-js 1.2.2 and postcss-selector-parser 7.1.6.
   The Tailwind selector-parser override preserved the representative generated
-  CSS byte for byte. The remaining development-only advisory and expiring CI
-  exception are documented in [Security](../SECURITY.md).
+  CSS byte for byte. A development-only advisory was temporarily excepted at that
+  time; the October 21 Tailwind 4 migration removed the affected dependency chain.
 - Worker requests now have deadlines and retain the last acknowledged database.
   Crashes, snapshot failures and response-delivery failures discard unconfirmed
   changes and recover on the next request, including bundled-schema edits.
@@ -121,8 +129,8 @@ independently audited. CSP inline-script compatibility and unencrypted local
 browser storage remain the documented product/deployment boundaries.
 
 The initial dependency audit reported ten affected package entries (eight high,
-two moderate). The remaining five high entries all belong to the one unpatched
-development-only `braces` advisory chain; none are production dependencies.
+two moderate). At the end of that audit, five high entries belonged to the unpatched
+development-only `braces` advisory chain. The later Tailwind 4 migration removed them.
 
 The final `npm run check` passed TypeScript, tracing, routing (including 437
 React Flow hook wrappers sharing one routing snapshot), 250 varied layout cases,

@@ -63,7 +63,6 @@ function hexToRgba(hex: string, alpha: number): string {
 const TableRow = memo(function TableRow({
   row, ri, rid, table, kind, color, isPinned, inHighlight, traceActive,
   pkIndices, activeColumnIndices, cellAccent, selectRow, setHoveredRow,
-  virtual,
 }: {
   row: unknown[];
   ri: number;
@@ -79,7 +78,6 @@ const TableRow = memo(function TableRow({
   cellAccent: string;
   selectRow: (selection: Selection | null) => void;
   setHoveredRow: (selection: Selection | null) => void;
-  virtual: boolean;
 }) {
   const dimmed = kind === 'dimmed';
   const inspecting = isPinned || inHighlight;
@@ -262,7 +260,7 @@ function TableNodeInner({ id, data }: NodeProps<TableFlowNode>) {
     const isPinned = (selection?.table === table && selection.rid === rid) || (ownValue(highlight?.pinnedRows, table)?.has(rid) ?? false);
     rowElements.push(<TableRow key={rid} row={rows[ri]} ri={ri} rid={rid} table={table} kind={kind} color={color}
       inHighlight={inHighlight} isPinned={isPinned} traceActive={!!step} pkIndices={pkIndices}
-      activeColumnIndices={activeColumnIndices} cellAccent={cellAccent} selectRow={selectRow} setHoveredRow={setHoveredRow} virtual={virtual} />);
+      activeColumnIndices={activeColumnIndices} cellAccent={cellAccent} selectRow={selectRow} setHoveredRow={setHoveredRow} />);
     nextRow = ri + 1;
   }
   if (virtual && nextRow < rows.length) rowElements.push(spacer(nextRow, rows.length));

@@ -1,4 +1,3 @@
-import Image from 'next/image';
 import Link from 'next/link';
 import localFont from 'next/font/local';
 import type { CSSProperties } from 'react';
@@ -8,11 +7,6 @@ import { Hero } from '@/components/landing/Hero';
 import { Reveal } from '@/components/landing/Reveal';
 import PoweredByPlatmatics from '@/components/badge/PoweredByPlatmatics';
 import s from '@/components/landing/landing.module.css';
-import rowJoined from '@/public/landing/row-joined.png';
-import rowFiltered from '@/public/landing/row-filtered.png';
-import rowGrouped from '@/public/landing/row-grouped.png';
-import rowTraced from '@/public/landing/row-traced.png';
-import schemaCrop from '@/public/landing/schema-crop.png';
 
 /* Switzer, self-hosted: the font CSP allows same-origin files only. */
 const text = localFont({
@@ -26,14 +20,14 @@ const text = localFont({
 
 const REPO_URL = 'https://github.com/twbdavis/querytrace';
 
-/* The RESERVATION table of lesson 15, cropped from the real tracer at four
-   moments. Same table, same rows, four states. */
-const STATES = [
-  { word: 'Joined', src: rowJoined, alt: 'The RESERVATION table at the JOIN stage with matched rows lit.' },
-  { word: 'Filtered', src: rowFiltered, alt: 'The RESERVATION table at the WHERE stage with failing rows faded.' },
-  { word: 'Grouped', src: rowGrouped, alt: 'The RESERVATION table at the GROUP BY stage, each row tinted by venue.' },
-  { word: 'Traced', src: rowTraced, alt: 'The RESERVATION table with the five rows behind one result outlined in mint.' },
+/* What pasting a schema gets you, in the order a visitor asks. */
+const FACTS = [
+  { text: 'Exports from PostgreSQL, SQL Server, MySQL and Oracle paste in as they are.', tone: 'var(--accent)' },
+  { text: 'Everything runs on SQLite compiled to WebAssembly, inside the tab.', tone: 'var(--mint)' },
+  { text: 'Nothing you type is sent anywhere.', tone: 'var(--gold)' },
 ];
+
+const DIALECTS = ['PostgreSQL', 'SQL Server', 'MySQL', 'Oracle', 'SQLite'];
 
 const SECTION_TONE: Record<Lesson['section'], string> = {
   Foundations: 'var(--accent)',
@@ -73,39 +67,20 @@ export default function LandingPage() {
 
       <main id="main">
         <section className={s.hero} aria-labelledby="headline">
-          <div className={s.inner}>
-            <h1 id="headline" className={`${s.headline} ${s.col}`} data-rise style={{ '--i': 0 } as CSSProperties}>
-              Watch a SQL Query run.
-            </h1>
-            <p className={`${s.lede} ${s.col}`} data-rise style={{ '--i': 1 } as CSSProperties}>
-              QueryTrace plays your statement over live tables in the browser and shows what each clause did to the rows.
-            </p>
-            <Action i={2} />
-            <Hero />
-          </div>
-        </section>
-
-        <section className={s.section} aria-labelledby="states-title">
-          <div className={s.inner}>
-            <Reveal>
-              <h2 id="states-title" className={`${s.heading} ${s.col}`}>Every clause shows its work.</h2>
-            </Reveal>
-            <div className={s.states}>
-              {STATES.map((state, i) => (
-                <Reveal key={state.word} className={s.state} delay={i * 60}>
-                  <span className={s.stateWord}>{state.word}</span>
-                  <div className={s.statePic}>
-                    <Image src={state.src} alt={state.alt} unoptimized sizes="(min-width: 1024px) 520px, 100vw" />
-                  </div>
-                </Reveal>
-              ))}
-            </div>
-          </div>
+          <Hero
+            title={
+              <h1 id="headline" className={s.headline} data-rise style={{ '--i': 0 } as CSSProperties}>
+                Watch a query run.
+              </h1>
+            }
+            action={<Action i={3} />}
+          />
         </section>
 
         <section className={s.section} aria-labelledby="lessons-title" id="lessons">
           <div className={s.inner}>
-            <Reveal className={s.col}>
+            <Reveal className={s.wide}>
+              <p className={s.eyebrow}>Lessons</p>
               <h2 id="lessons-title" className={s.heading}>Nineteen lessons.</h2>
               <p className={s.prose}>
                 Each lesson is one query over a small fictional dataset. Open one and step through it.
@@ -114,6 +89,7 @@ export default function LandingPage() {
                 {(['Foundations', 'Combining data'] as Lesson['section'][]).map((section) => (
                   <div key={section}>
                     <p className={s.groupWord}>{section}</p>
+                    <div className={s.lessonGrid}>
                     {LESSONS.filter((lesson) => lesson.section === section).map((lesson) => (
                       <Link key={lesson.id} href={`/trace?lesson=${lesson.id}`} className={s.row}>
                         <span className={s.dot} style={{ '--c': SECTION_TONE[section] } as CSSProperties} aria-hidden="true" />
@@ -121,6 +97,7 @@ export default function LandingPage() {
                         <span className={s.rowValue}>{schemaById(lesson.schemaId)?.name}</span>
                       </Link>
                     ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -130,32 +107,71 @@ export default function LandingPage() {
 
         <section className={s.section} aria-labelledby="schema-title" id="schema">
           <div className={s.inner}>
-            <Reveal className={s.col}>
-              <h2 id="schema-title" className={s.heading}>Your own schema works too.</h2>
-              <p className={s.prose}>
-                Paste the CREATE TABLE statements from your database. Exports from PostgreSQL and SQL Server paste in as
-                they are, and so do MySQL and Oracle.
-              </p>
-              <p className={s.prose}>
-                Everything runs on SQLite compiled to WebAssembly, inside the tab. Nothing you type is sent anywhere.
-              </p>
-            </Reveal>
-            <Reveal className={`${s.picture} ${s.col}`} delay={80}>
-              <Image
-                src={schemaCrop}
-                unoptimized
-                alt="The schema dialog: five preloaded databases and a text area for your own CREATE TABLE statements."
-                sizes="(min-width: 1024px) 520px, 100vw"
-              />
+            <Reveal className={s.wide}>
+              <div className={s.schema}>
+                <div>
+                  <p className={s.eyebrow}>Schema</p>
+                  <h2 id="schema-title" className={s.heading}>Your own schema works too.</h2>
+                  <p className={s.prose}>
+                    Paste the CREATE TABLE statements from your database and step through queries over your own tables.
+                  </p>
+                  <ul className={s.facts}>
+                    {FACTS.map((fact) => (
+                      <li key={fact.text}>
+                        <span className={s.dot} style={{ '--c': fact.tone } as CSSProperties} aria-hidden="true" />
+                        <span>{fact.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <Link href="/trace" className={s.inlineLink}>
+                    <span className={s.textLabel}>Paste a schema</span>
+                    <span aria-hidden="true">&rarr;</span>
+                  </Link>
+                </div>
+                <figure className={s.schemaCode}>
+                  <figcaption className={s.codeLabel}>Pasted straight from pg_dump</figcaption>
+                  <pre className={s.sql}>
+                    <code>
+                      <span className={s.line}><span className={s.kw}>CREATE TABLE</span> venue (</span>
+                      <span className={s.line}>  venue_id    <span className={s.type}>integer</span> <span className={s.kw}>PRIMARY KEY</span>,</span>
+                      <span className={s.line}>  venue_name  <span className={s.type}>varchar(30)</span> <span className={s.kw}>NOT NULL</span>,</span>
+                      <span className={s.line}>  capacity    <span className={s.type}>integer</span> <span className={s.kw}>NOT NULL</span></span>
+                      <span className={s.line}>);</span>
+                      <span className={s.line}><span className={s.kw}>CREATE TABLE</span> screening (</span>
+                      <span className={s.line}>  screening_id  <span className={s.type}>integer</span> <span className={s.kw}>PRIMARY KEY</span>,</span>
+                      <span className={s.line}>  film_title    <span className={s.type}>varchar(40)</span> <span className={s.kw}>NOT NULL</span>,</span>
+                      <span className={s.line}>  venue_id      <span className={s.type}>integer</span> <span className={s.kw}>REFERENCES</span> venue (venue_id)</span>
+                      <span className={s.line}>);</span>
+                    </code>
+                  </pre>
+                  <ul className={s.dialects} aria-label="Dialects that paste in as exported">
+                    {DIALECTS.map((d) => <li key={d} className={s.chip}>{d}</li>)}
+                  </ul>
+                </figure>
+              </div>
             </Reveal>
           </div>
         </section>
 
-        <section className={s.close} aria-label="Open the tracer">
+        <section className={s.close} aria-labelledby="close-title">
           <div className={s.inner}>
-            <Reveal className={s.col}>
-              <p className={s.closeLine}>The tracer opens on a four-table join you can step through right now.</p>
-              <Action />
+            <Reveal className={s.wide}>
+              <div className={s.closePanel}>
+                <div>
+                  <p className={s.eyebrow}>Start</p>
+                  <h2 id="close-title" className={s.closeTitle}>Open the tracer.</h2>
+                  <p className={s.closeLine}>
+                    It opens on a four-table join you can step through right now. No account, nothing to install.
+                  </p>
+                </div>
+                <div className={s.closeActions}>
+                  <Link href="/trace" className={s.cta}>Open the tracer</Link>
+                  <a href="#lessons" className={s.inlineLink}>
+                    <span className={s.textLabel}>Browse the lessons</span>
+                    <span aria-hidden="true">&rarr;</span>
+                  </a>
+                </div>
+              </div>
             </Reveal>
           </div>
         </section>
@@ -171,7 +187,7 @@ export default function LandingPage() {
         </div>
         <div className={s.footRight}>
           <span>{year}</span>
-          <PoweredByPlatmatics site="querytrace.net" variant="inline" />
+          <PoweredByPlatmatics site="querytrace.net" />
         </div>
       </footer>
     </div>

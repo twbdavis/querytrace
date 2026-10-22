@@ -334,7 +334,7 @@ export function PlaybackDock({ leftClass = 'left-0' }: PlaybackDockProps) {
               {step.narration}
             </p>
             <div className="mt-2 flex justify-end border-t border-line/60 pt-2 font-ui text-ink-dim">
-              <PoweredByPlatmatics site="querytrace.net" variant="inline" />
+              <PoweredByPlatmatics site="querytrace.net" />
             </div>
           </div>
         )}

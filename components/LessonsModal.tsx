@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import { useModalDialog } from '@/lib/useModalDialog';
 import { LESSONS, type Lesson } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
 import { useAppStore } from '@/store/useAppStore';
@@ -17,33 +18,22 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
   const setSql = useAppStore((s) => s.setSql);
   const runQuery = useAppStore((s) => s.runQuery);
   const loadSchema = useAppStore((s) => s.loadSchema);
-  const schemaDef = useAppStore((s) => s.schemaDef);
-  const dataModified = useAppStore((s) => s.dataModified);
   const ranLessons = useAppStore((s) => s.ranLessons);
   const markLessonRun = useAppStore((s) => s.markLessonRun);
   const done = Object.values(ranLessons).filter(Boolean).length;
   const pressedBackdrop = useRef(false);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  const dialogRef = useModalDialog(open, onClose);
 
   /**
-   * Make sure the lesson's schema is loaded with its original rows (an
-   * INSERT / UPDATE / DELETE may have changed them), then put its query in place.
+   * Always queue the lesson's original schema before preparing its query.
+   * A pending write may not be acknowledged yet, so the visible data cannot
+   * safely determine whether a reset is needed.
    */
   const prepare = async (lesson: Lesson): Promise<boolean> => {
-    if (schemaDef.id !== lesson.schemaId || dataModified) {
-      const def = schemaById(lesson.schemaId);
-      if (!def) return false;
-      const res = await loadSchema(def);
-      if (!res.ok) return false;
-    }
+    const def = schemaById(lesson.schemaId);
+    if (!def) return false;
+    const res = await loadSchema(def);
+    if (!res.ok) return false;
     setSql(lesson.query);
     return true;
   };
@@ -51,8 +41,12 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
   return (
     <>
       {open && (
-        <div
-          className="modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
+        <dialog
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Lessons"
+          className="app-modal modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
           // Close only for a press that starts and ends on the backdrop, so a
           // drag that begins inside the dialog (selecting text) never closes it.
           onMouseDown={(e) => {
@@ -65,9 +59,6 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
           }}
         >
           <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Lessons"
             className="modal-dialog-enter flex max-h-[85vh] w-full max-w-4xl flex-col rounded-md border border-line-strong bg-panel max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none max-sm:border-0"
           >
             <div className="flex items-center justify-between border-b border-line px-4 py-3 max-sm:min-h-14 max-sm:px-3 max-sm:pt-[calc(0.75rem+env(safe-area-inset-top))]">
@@ -164,7 +155,7 @@ export function LessonsModal({ open, onClose }: LessonsModalProps) {
               ))}
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </>
   );

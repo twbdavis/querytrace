@@ -1511,7 +1511,6 @@ export function buildTrace(ast: SelectAst, db: SqlExec, schema: TableMeta[]): Tr
 
     if (ctx.havingSql) {
       const survivors = readGroups(`${baseSql} HAVING ${ctx.havingSql}`);
-      const surviving = new Set(survivors.map((g) => g.key));
       // Keep the colors assigned in the GROUP BY step.
       survivors.forEach((g) => {
         g.color = groupColorByKey[g.key] ?? g.color;

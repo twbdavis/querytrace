@@ -36,27 +36,16 @@ Dependency-update workflows and pinned Actions help keep the delivery chain curr
 
 ## Build tooling advisories
 
-The Tailwind 3 development dependency chain currently includes `braces` 3.0.3,
-affected by [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
-No patched upstream version was available when reviewed on October 14, 2026.
-This also appears as findings against chokidar, micromatch, fast-glob and
-Tailwind. These packages read the repository's fixed content globs and trusted
-source files during development/build; visitors' SQL and schema data are never
-passed to them. Malicious repository or build configuration changes can still
-exhaust build resources, so untrusted contributions require review.
+The build uses Tailwind CSS 4 and its PostCSS plugin. This removes the Tailwind 3
+dependency chain containing the unpatched `braces` advisory
+[GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm), along with
+the temporary exception and the old selector-parser override.
 
-The selector parser is overridden to patched `postcss-selector-parser` 7.1.6
-without migrating Tailwind to a new major version. Changes to that override
-require production CSS and browser verification. Production dependency auditing
-must remain strict; development-only exceptions must identify the exact advisory,
-affected paths, review rationale and expiry rather than suppress all audit errors.
-
-`npm run audit:release` enforces zero reported production vulnerabilities and
-temporarily permits only that advisory through the exact reviewed development
-versions and paths in `scripts/dependencyAuditPolicy.mjs`. The exception expires
-November 14, 2026. New advisories, production exposure, changed versions or paths,
-critical severity, and expiry fail CI. The exception is a documented build risk,
-not a claim that a full `npm audit` is clean.
+`npm run audit:release` requires zero reported vulnerabilities across production,
+development, optional, and peer dependencies. It explicitly includes those groups
+even when the environment sets npm omission options. Every severity fails CI;
+there are no advisory exceptions. Invalid or inconsistent registry responses and
+audit-command failures also fail the check.
 
 ## Out of scope
 

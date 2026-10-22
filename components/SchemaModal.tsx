@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { PRELOADED_SCHEMAS, type SchemaDef } from '@/lib/schemas';
 import { useAppStore } from '@/store/useAppStore';
+import { useModalDialog } from '@/lib/useModalDialog';
 import { CheckIcon, CloseIcon, DatabaseIcon } from './Icons';
 
 interface SchemaModalProps {
@@ -45,7 +46,10 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
   const setCustomDdlDraft = useAppStore((s) => s.setCustomDdlDraft);
   const persistCustomDdlDraft = useAppStore((s) => s.persistCustomDdlDraft);
   const loadSchema = useAppStore((s) => s.loadSchema);
+  const resumeCustomSchema = useAppStore((s) => s.resumeCustomSchema);
+  const schemaLoading = useAppStore((s) => s.schemaLoading);
   const [ddlError, setDdlError] = useState<string | null>(null);
+  const [ddlNotice, setDdlNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const errorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -60,7 +64,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
   const ddl = draft ?? (schemaDef.id === 'custom' ? schemaDef.ddl : savedCustomSchema?.ddl ?? DDL_TEMPLATE);
 
   useEffect(() => {
-    if (open) setDdlError(null);
+    if (open) { setDdlError(null); setDdlNotice(null); }
   }, [open]);
 
   useEffect(() => {
@@ -71,17 +75,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
     void persistCustomDdlDraft();
     onClose();
   };
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // `close` reads the latest store action each render; re-binding on open is enough.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, onClose]);
+  const dialogRef = useModalDialog(open, close);
 
   const pick = async (def: SchemaDef) => {
     setBusy(true);
@@ -94,6 +88,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
   const applyCustom = async () => {
     setBusy(true);
     setDdlError(null);
+    setDdlNotice(null);
     const res = await loadSchema({
       id: 'custom',
       name: 'Custom schema',
@@ -102,13 +97,25 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
       starterQuery: '',
     });
     setBusy(false);
-    if (res.ok) onClose();
+    if (res.ok) {
+      if (useAppStore.getState().customDdlDraft === null) onClose();
+      else setDdlNotice('Schema built. Your newer edits are still here and have not been built.');
+    }
     else if (!res.cancelled) {
       // Keep the SQL exactly as typed so the message can be acted on in place.
       void persistCustomDdlDraft();
       setDdlError(res.error ?? 'Failed to build the schema.');
       if (res.statement) selectStatement(res.statement);
     }
+  };
+
+  const resume = async () => {
+    setBusy(true);
+    setDdlError(null);
+    const res = await resumeCustomSchema();
+    setBusy(false);
+    if (res.ok) close();
+    else if (!res.cancelled) setDdlError(res.error ?? 'Failed to resume the saved schema.');
   };
 
   /** Select the failing statement in the editor so the fix can start right there. */
@@ -131,10 +138,10 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
     textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 3);
   };
 
-  const onBackdropMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
+  const onBackdropMouseDown = (e: ReactMouseEvent<HTMLDialogElement>) => {
     pressedBackdrop.current = e.target === e.currentTarget;
   };
-  const onBackdropClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+  const onBackdropClick = (e: ReactMouseEvent<HTMLDialogElement>) => {
     const startedOnBackdrop = pressedBackdrop.current;
     pressedBackdrop.current = false;
     if (startedOnBackdrop && e.target === e.currentTarget) close();
@@ -143,15 +150,16 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
   return (
     <>
       {open && (
-        <div
-          className="modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
+        <dialog
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Schema"
+          className="app-modal modal-backdrop-enter fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm max-sm:items-end max-sm:p-0"
           onMouseDown={onBackdropMouseDown}
           onClick={onBackdropClick}
         >
           <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Schema"
             className="modal-dialog-enter flex max-h-[88vh] w-full max-w-4xl flex-col rounded-md border border-line-strong bg-panel max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none max-sm:border-0"
           >
             <div className="flex items-center justify-between border-b border-line px-4 py-3 max-sm:min-h-14 max-sm:px-3 max-sm:pt-[calc(0.75rem+env(safe-area-inset-top))]">
@@ -178,7 +186,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
                   return (
                     <button
                       key={def.id}
-                      disabled={busy}
+                      disabled={busy || schemaLoading}
                       onClick={() => void pick(def)}
                       className={`flex cursor-pointer flex-col rounded-md border p-3 text-left transition-colors disabled:opacity-50 max-sm:min-h-20 max-sm:p-3.5 ${
                         active
@@ -201,6 +209,22 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
                   );
                 })}
               </div>
+
+              {savedCustomSchema && (
+                <div className="mb-5 rounded-md border border-line bg-node p-3">
+                  <button
+                    type="button"
+                    disabled={busy || schemaLoading}
+                    onClick={() => void resume()}
+                    className="cursor-pointer font-ui text-[11px] font-bold tracking-wider text-accent-active disabled:opacity-40 max-sm:min-h-11"
+                  >
+                    RESUME SAVED SCHEMA
+                  </button>
+                  <p className="mt-1 text-[11px] leading-relaxed text-ink-dim">
+                    Continue with your saved rows, tables and indexes. Building from the SQL below replaces that saved database.
+                  </p>
+                </div>
+              )}
 
               <div className="mb-2 flex items-center justify-between gap-3">
                 <span className="font-ui text-[10px] font-bold uppercase tracking-[0.25em] text-ink-mute">
@@ -235,7 +259,7 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
                 onChange={(e) => setCustomDdlDraft(e.target.value)}
                 spellCheck={false}
                 aria-label="Schema definition SQL"
-                className="mb-2 h-72 min-h-[10rem] w-full resize-y rounded-md border border-line bg-app p-3 font-data text-[11px] leading-relaxed text-ink focus:border-accent-active focus:outline-none max-sm:h-60 max-sm:text-base max-sm:leading-6"
+                className="mb-2 h-72 min-h-[10rem] w-full resize-y rounded-md border border-line bg-app p-3 font-data text-[11px] leading-relaxed text-ink focus:border-accent-active focus:outline-hidden max-sm:h-60 max-sm:text-base max-sm:leading-6"
               />
               {ddlError && (
                 <div
@@ -246,16 +270,17 @@ export function SchemaModal({ open, onClose }: SchemaModalProps) {
                   {ddlError}
                 </div>
               )}
+              {ddlNotice && <p role="status" className="mb-2 text-[11px] text-ink-dim">{ddlNotice}</p>}
               <button
                 onClick={() => void applyCustom()}
-                disabled={busy || !ddl.trim()}
+                disabled={busy || schemaLoading || !ddl.trim()}
                 className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-accent-active bg-accent-active/10 px-3 py-1.5 font-ui text-[11px] font-bold tracking-wider text-accent-active transition-colors hover:bg-accent-active/20 disabled:opacity-40 max-sm:min-h-11 max-sm:w-full max-sm:justify-center"
               >
                 {busy ? 'BUILDING…' : 'BUILD THIS SCHEMA'}
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </>
   );

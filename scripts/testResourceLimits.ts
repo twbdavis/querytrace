@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createDatabase, queryAll } from '../lib/db';
+import { createDatabase, exportDatabase, queryAll, restoreDatabase } from '../lib/db';
 import { withResultBudget } from '../lib/resourceLimits';
 import { SqlRuntime } from '../lib/sqlRuntime';
 import type { SchemaDef } from '../lib/schemas';
@@ -21,6 +21,15 @@ async function main() {
     });
     check('SQLite strings are bounded before entering the trace', () => {
       assert.throws(() => scalar("SELECT printf('%.*c',100001,120)"), /100,000-character/);
+    });
+    check('SQLite integers are read exactly and unsupported results are rejected', () => {
+      for (const value of ['9007199254740992', '9007199254740993', '-9007199254740992', '-9007199254740993', '9223372036854775807', '-9223372036854775808']) {
+        assert.throws(() => scalar(`SELECT ${value}`), /exact browser tracing/);
+        assert.equal(scalar(`SELECT CAST(${value} AS TEXT)`), value, 'an explicit text conversion preserves every digit');
+        assert.equal(typeof scalar(`SELECT CAST(${value} AS REAL)`), 'number', 'REAL values retain SQLite floating-point semantics');
+      }
+      assert.deepEqual(queryAll(database, 'SELECT -9007199254740991, 9007199254740991, 1.5').rows, [[Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 1.5]]);
+      assert.equal(scalar('SELECT 7'), 7, 'a rejected result frees its statement');
     });
     check('binary results and function inputs are bounded before decoding', () => {
       assert.throws(() => scalar('SELECT zeroblob(100001)'), /100,000-byte/);
@@ -91,6 +100,59 @@ async function main() {
       assert.deepEqual(rows('SELECT COUNT(*) AS n FROM sample'), [[250]]);
     });
   } finally { runtime.close(); }
+
+  const exactRuntime = new SqlRuntime();
+  const exactDef: SchemaDef = { ...def, ddl: 'CREATE TABLE sample(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO sample VALUES(1,7);' };
+  const exactRows = (sql: string) => exactRuntime.runQuery(sql).trace.at(-1)!.partialResult!.rows;
+  try {
+    await exactRuntime.loadSchema(exactDef);
+    check('unsafe integer mutations and RETURNING results roll back atomically', () => {
+      assert.throws(() => exactRows('SELECT 9007199254740991 + 1'), /exact browser tracing/);
+      assert.deepEqual(exactRows('SELECT CAST(9007199254740993 AS TEXT)'), [['9007199254740993']]);
+      for (const sql of [
+        'INSERT INTO sample VALUES(9007199254740992,8)',
+        'INSERT INTO sample VALUES(2,9007199254740993)',
+        'UPDATE sample SET id=-9007199254740992 WHERE id=1',
+        'UPDATE sample SET value=9007199254740993 WHERE id=1',
+        'UPDATE sample SET value=8 WHERE id=1 RETURNING 9007199254740993',
+      ]) {
+        assert.throws(() => exactRuntime.runQuery(sql), /exact browser tracing/, sql);
+        assert.deepEqual(exactRows('SELECT * FROM sample'), [[1, 7]], 'failed writes leave the old rows intact');
+      }
+    });
+    const unsafeImports = [
+      "CREATE TABLE unsafe(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO unsafe VALUES(9007199254740992,'first'),(9007199254740993,'second');",
+      'CREATE TABLE unsafe(value INTEGER); INSERT INTO unsafe VALUES(-9007199254740993);',
+      "CREATE TABLE unsafe(value TEXT); INSERT INTO unsafe(rowid,value) VALUES(9007199254740992,'hidden row identity');",
+    ];
+    for (const ddl of unsafeImports) {
+      await assert.rejects(exactRuntime.loadSchema({ ...exactDef, ddl }), /exact browser tracing/);
+      const unsafeDatabase = await createDatabase(ddl);
+      let bytes: Uint8Array;
+      try { bytes = exportDatabase(unsafeDatabase); }
+      finally { unsafeDatabase.close(); }
+      await assert.rejects(restoreDatabase(bytes, true), /exact browser tracing/);
+      await assert.rejects(exactRuntime.loadSchema(exactDef, bytes), /exact browser tracing/);
+    }
+    check('unsafe imports and restored integer identities preserve the working database', () => {
+      assert.deepEqual(exactRows('SELECT * FROM sample'), [[1, 7]]);
+    });
+    await exactRuntime.loadSchema({ ...exactDef, ddl: 'CREATE TABLE sample(id INTEGER PRIMARY KEY,value INTEGER); INSERT INTO sample VALUES(-9007199254740991,1),(9007199254740991,2);' });
+    check('safe boundary row identities stay distinct and their mutations are traced', () => {
+      const run = exactRuntime.runQuery('UPDATE sample SET value=3 WHERE id=9007199254740991');
+      assert.deepEqual(run.trace.at(-1)!.partialResult!.rows, [[Number.MAX_SAFE_INTEGER, 3]]);
+      assert.deepEqual(run.mutation!.changedTables, ['sample']);
+      assert.deepEqual(run.trace.at(-1)!.resultRowSources, [{ sample: [Number.MAX_SAFE_INTEGER] }]);
+      assert.deepEqual(exactRows('SELECT * FROM sample ORDER BY id'), [[Number.MIN_SAFE_INTEGER, 1], [Number.MAX_SAFE_INTEGER, 3]]);
+      assert.throws(() => exactRuntime.runQuery('INSERT INTO sample(value) VALUES(4)'), /exact browser tracing/, 'an automatically assigned unsafe rowid is also rejected');
+      assert.deepEqual(exactRows('SELECT COUNT(*) FROM sample'), [[2]]);
+    });
+    await exactRuntime.loadSchema({ ...exactDef, ddl: 'CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES(\'original\');' });
+    check('hidden rowids are validated before writes commit', () => {
+      assert.throws(() => exactRuntime.runQuery("UPDATE sample SET rowid=9007199254740993"), /exact browser tracing/);
+      assert.deepEqual(exactRows('SELECT rowid,value FROM sample'), [[1, 'original']]);
+    });
+  } finally { exactRuntime.close(); }
   console.log(`${passed} resource containment checks passed.`);
 }
 main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });

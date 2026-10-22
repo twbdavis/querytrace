@@ -6,6 +6,7 @@ import type { TableData } from '@/lib/db';
 import type { DialectNote } from '@/lib/dialect';
 import {
   loadPersistedAppState,
+  PersistenceConflictError,
   requestDurableStorage,
   savePersistedAppState,
 } from '@/lib/persistence';
@@ -18,6 +19,15 @@ import { loadSchemaInWorker, runQueryInWorker, WorkerRequestError } from '@/lib/
 const MAX_QUERY_CHARS = 20_000;
 let schemaLoadGeneration = 0;
 let queryRunGeneration = 0;
+let databaseOperations = Promise.resolve();
+let customDraftDirty = false;
+
+/** Persistence is part of a database operation, so its acknowledgment precedes the next request. */
+function serializeDatabase<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = databaseOperations.then(operation);
+  databaseOperations = pending.then(() => undefined, () => undefined);
+  return pending;
+}
 
 export type Speed = 0.5 | 1 | 2;
 
@@ -37,6 +47,7 @@ export interface LoadResult {
 
 interface AppState {
   dbReady: boolean;
+  schemaLoading: boolean;
   dbError: string | null;
 
   schemaDef: SchemaDef;
@@ -44,6 +55,7 @@ interface AppState {
   schemaRevision: number;
   savedCustomSchema: SchemaDef | null;
   savedCustomDatabase: Uint8Array | null;
+  savedCustomRevision: number;
   /** Schema SQL being edited in the builder; survives closing the dialog and reloads. */
   customDdlDraft: string | null;
   schema: TableMeta[];
@@ -54,11 +66,6 @@ interface AppState {
   error: string | null;
   /** How the last run's dialect was rewritten for SQLite (empty for plain SQLite). */
   notes: DialectNote[];
-  /**
-   * True once an INSERT / UPDATE / DELETE changed a bundled schema's rows in
-   * this session; lessons reload the schema first so their results stay right.
-   */
-  dataModified: boolean;
 
   trace: TraceStep[] | null;
   /** The exact SQL text the current trace was built from. */
@@ -83,6 +90,7 @@ interface AppState {
 
   init: () => Promise<void>;
   loadSchema: (def: SchemaDef, savedBytes?: Uint8Array) => Promise<LoadResult>;
+  resumeCustomSchema: () => Promise<LoadResult>;
   setSql: (sql: string) => void;
   runQuery: (sql?: string) => Promise<void>;
   play: () => void;
@@ -105,12 +113,14 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   dbReady: false,
+  schemaLoading: false,
   dbError: null,
 
   schemaDef: PRELOADED_SCHEMAS[0],
   schemaRevision: 0,
   savedCustomSchema: null,
   savedCustomDatabase: null,
+  savedCustomRevision: 0,
   customDdlDraft: null,
   schema: [],
   fkEdges: [],
@@ -119,7 +129,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   sql: PRELOADED_SCHEMAS[0].starterQuery,
   error: null,
   notes: [],
-  dataModified: false,
 
   trace: null,
   tracedSql: null,
@@ -135,13 +144,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   editorFocused: false,
 
   init: async () => {
-    if (get().dbReady) return;
+    if (get().dbReady || get().schemaLoading) return;
     const persisted = await loadPersistedAppState();
     if (persisted) {
       set({
         ranLessons: persisted.ranLessons,
         savedCustomSchema: persisted.customSchema ?? null,
         savedCustomDatabase: persisted.customDatabase ?? null,
+        savedCustomRevision: persisted.customRevision,
         customDdlDraft: persisted.customDdlDraft ?? null,
       });
     }
@@ -160,65 +170,98 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   loadSchema: async (def, savedBytes) => {
     const generation = ++schemaLoadGeneration;
+    const draftAtDispatch = get().customDdlDraft;
     queryRunGeneration++;
-    try {
-      const { schema, fkEdges, tableData, databaseBytes } = await loadSchemaInWorker(def, savedBytes);
+    set({ schemaLoading: true, playing: false });
+    return serializeDatabase(async () => {
+      try {
+        // A superseded request that has not reached the worker can be skipped.
+        if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
+        const { schema, fkEdges, tableData, databaseBytes } = await loadSchemaInWorker(def, savedBytes);
+        // Once the worker has accepted a schema, adopt it even if another load
+        // is queued. If that later load fails, canvas and worker must agree.
 
-      // A user can choose a schema while the initial WASM database is still
-      // loading. Never let that older startup request overwrite the choice.
-      if (generation !== schemaLoadGeneration) {
-        return { ok: false, cancelled: true };
+        // Someone who starts typing while SQLite is still starting keeps their
+        // text: only a change of schema replaces the editor with the starter query.
+        const previous = get();
+        const keepTypedSql =
+          !previous.dbReady && def.id === previous.schemaDef.id && previous.sql !== previous.schemaDef.starterQuery;
+        set({
+          dbReady: true,
+          dbError: null,
+          schemaDef: def,
+          schemaRevision: previous.schemaRevision + 1,
+          schema,
+          fkEdges,
+          tableData,
+          sql: keepTypedSql
+            ? previous.sql
+            : def.starterQuery || `SELECT * FROM ${quoteIdentIfNeeded(schema[0].name)};`,
+          trace: null,
+          tracedSql: null,
+          currentStep: 0,
+          playing: false,
+          finished: false,
+          error: null,
+          notes: [],
+          selection: null,
+          hoveredRow: null,
+          hoveredResultRow: null,
+          ...(def.id === 'custom'
+            ? {
+                savedCustomSchema: def, savedCustomDatabase: databaseBytes ?? null,
+                // A restored checkpoint does not build the draft. A fresh build
+                // consumes only the submitted draft, never later keystrokes.
+                ...(!savedBytes && previous.customDdlDraft === draftAtDispatch ? { customDdlDraft: null } : {}),
+              }
+            : {}),
+        });
+        if (def.id === 'custom' && !savedBytes) await persistCustomCheckpoint(true);
+        else await savePersistedAppState({ lastSchemaId: def.id });
+        if (def.id === 'custom') requestDurableStorage();
+        return generation === schemaLoadGeneration ? { ok: true } : { ok: false, cancelled: true };
+      } catch (err) {
+        if (err instanceof PersistenceConflictError) {
+          await restoreAfterConflict(err, !savedBytes && def.id === 'custom' ? def.ddl : undefined);
+        }
+        if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
+        return {
+          ok: false,
+          error: err instanceof PersistenceConflictError ? get().error ?? err.message : err instanceof Error ? err.message : String(err),
+          statement: err instanceof WorkerRequestError ? err.statement : undefined,
+        };
+      } finally {
+        if (generation === schemaLoadGeneration) set({ schemaLoading: false });
       }
+    });
+  },
 
-      // Someone who starts typing while SQLite is still starting keeps their
-      // text: only a change of schema replaces the editor with the starter query.
-      const previous = get();
-      const keepTypedSql =
-        !previous.dbReady && def.id === previous.schemaDef.id && previous.sql !== previous.schemaDef.starterQuery;
-      set({
-        dbReady: true,
-        dbError: null,
-        schemaDef: def,
-        schemaRevision: previous.schemaRevision + 1,
-        schema,
-        fkEdges,
-        tableData,
-        sql: keepTypedSql
-          ? previous.sql
-          : def.starterQuery || `SELECT * FROM ${quoteIdentIfNeeded(schema[0].name)};`,
-        trace: null,
-        tracedSql: null,
-        currentStep: 0,
-        playing: false,
-        finished: false,
-        error: null,
-        notes: [],
-        dataModified: false,
-        selection: null,
-        hoveredRow: null,
-        hoveredResultRow: null,
-        ...(def.id === 'custom'
-          ? // A successful build is the new saved schema; the draft has served its purpose.
-            { savedCustomSchema: def, savedCustomDatabase: databaseBytes ?? null, customDdlDraft: null }
-          : {}),
+  resumeCustomSchema: async () => {
+    if (get().schemaLoading) return { ok: false, error: 'Wait for the current schema to finish loading.' };
+    // Reserve the user's place before either wait. A later schema choice must
+    // supersede this resume, even while an earlier mutation is still saving.
+    const generation = ++schemaLoadGeneration;
+    queryRunGeneration++;
+    set({ schemaLoading: true, playing: false });
+    try {
+      // Finish already accepted mutations before choosing the checkpoint to resume.
+      await databaseOperations;
+      if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
+      // A different tab may have saved a more recent custom checkpoint.
+      const latest = await loadPersistedAppState();
+      if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
+      if (latest?.customSchema) set({
+        savedCustomSchema: latest.customSchema,
+        savedCustomDatabase: latest.customDatabase ?? null,
+        savedCustomRevision: latest.customRevision,
       });
       const state = get();
-      await savePersistedAppState({
-        lastSchemaId: def.id,
-        customSchema: state.savedCustomSchema ?? undefined,
-        customDatabase: state.savedCustomDatabase ?? undefined,
-        customDdlDraft: state.customDdlDraft ?? undefined,
-        ranLessons: state.ranLessons,
-      });
-      if (def.id === 'custom') requestDurableStorage();
-      return { ok: true };
-    } catch (err) {
-      if (generation !== schemaLoadGeneration) return { ok: false, cancelled: true };
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        statement: err instanceof WorkerRequestError ? err.statement : undefined,
-      };
+      if (!state.savedCustomSchema) return { ok: false, error: 'There is no saved custom schema to resume.' };
+      // loadSchema synchronously takes ownership of loading before it queues
+      // the worker request; this resume's cleanup cannot clear its indicator.
+      return state.loadSchema(state.savedCustomSchema, state.savedCustomDatabase ?? undefined);
+    } finally {
+      if (generation === schemaLoadGeneration) set({ schemaLoading: false });
     }
   },
 
@@ -244,6 +287,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   runQuery: async (sqlArg) => {
+    if (get().schemaLoading) {
+      set({ error: 'A schema is still loading. Wait for it to finish before running a query.', playing: false });
+      return;
+    }
     const generation = ++queryRunGeneration;
     const sql = sqlArg ?? get().sql;
     const schemaAtDispatch = get().schemaRevision;
@@ -260,43 +307,50 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     set({ playing: false });
-    try {
-      const { trace, notes, mutation } = await runQueryInWorker(sql);
-      const mutationState = mutation ? {
-        tableData: mutation.tableData,
-        ...(mutation.schema ? { schema: mutation.schema, fkEdges: mutation.fkEdges ?? [] } : {}),
-        dataModified: !isCustom,
-        ...(isCustom && mutation.databaseBytes ? { savedCustomDatabase: mutation.databaseBytes } : {}),
-      } : {};
-      if (generation !== queryRunGeneration) {
-        // Editing cancels an obsolete teaching trace, not an acknowledged
-        // database write. Retain the write without replacing the new text or
-        // a different schema that has already finished loading.
-        if (mutation && get().schemaRevision === schemaAtDispatch) {
-          set(mutationState);
-          if (isCustom) await persistCurrentState();
+    return serializeDatabase(async () => {
+      // A conflict recovery can replace the schema ahead of a queued query.
+      if (get().schemaRevision !== schemaAtDispatch) return;
+      try {
+        const { trace, notes, mutation } = await runQueryInWorker(sql);
+        const mutationState = mutation ? {
+          tableData: mutation.tableData,
+          ...(mutation.schema ? { schema: mutation.schema, fkEdges: mutation.fkEdges ?? [] } : {}),
+          ...(isCustom && mutation.databaseBytes ? { savedCustomDatabase: mutation.databaseBytes } : {}),
+        } : {};
+        if (generation !== queryRunGeneration) {
+          // Editing cancels an obsolete teaching trace, not an acknowledged
+          // database write. Retain the write without replacing the new text or
+          // a different schema that has already finished loading.
+          if (mutation && get().schemaRevision === schemaAtDispatch) {
+            set(mutationState);
+            if (isCustom) await persistCustomCheckpoint();
+          }
+          return;
         }
-        return;
+        set({
+          trace,
+          notes,
+          tracedSql: sql,
+          currentStep: 0,
+          playing: true,
+          finished: false,
+          error: null,
+          selection: null,
+          hoveredRow: null,
+          hoveredResultRow: null,
+          ...mutationState,
+        });
+        if (mutation && isCustom) await persistCustomCheckpoint();
+      } catch (err) {
+        if (err instanceof PersistenceConflictError) {
+          await restoreAfterConflict(err);
+          return;
+        }
+        if (generation !== queryRunGeneration) return;
+        const msg = err instanceof Error ? err.message : `Trace failed: ${String(err)}`;
+        set({ error: msg, playing: false });
       }
-      set({
-        trace,
-        notes,
-        tracedSql: sql,
-        currentStep: 0,
-        playing: true,
-        finished: false,
-        error: null,
-        selection: null,
-        hoveredRow: null,
-        hoveredResultRow: null,
-        ...mutationState,
-      });
-      if (mutation && isCustom) await persistCurrentState();
-    } catch (err) {
-      if (generation !== queryRunGeneration) return;
-      const msg = err instanceof Error ? err.message : `Trace failed: ${String(err)}`;
-      set({ error: msg, playing: false });
-    }
+    });
   },
 
   play: () => {
@@ -341,24 +395,58 @@ export const useAppStore = create<AppState>((set, get) => ({
   ),
   markLessonRun: (id) => {
     set((state) => ({ ranLessons: { ...state.ranLessons, [id]: true } }));
-    return persistCurrentState();
+    return savePersistedAppState({ ranLessons: { [id]: true } }).then(() => undefined);
   },
   setEditorFocused: (focused) => set({ editorFocused: focused }),
-  setCustomDdlDraft: (ddl) => set({ customDdlDraft: ddl }),
-  persistCustomDdlDraft: () => persistCurrentState(),
+  setCustomDdlDraft: (ddl) => { customDraftDirty = true; set({ customDdlDraft: ddl }); },
+  persistCustomDdlDraft: async () => {
+    if (!customDraftDirty) return;
+    const draft = get().customDdlDraft;
+    await savePersistedAppState({ customDdlDraft: draft ?? undefined });
+    if (get().customDdlDraft === draft) customDraftDirty = false;
+  },
 }));
 
-/** Snapshot everything durable (schema choice, custom DB, draft, progress) into IndexedDB. */
-function persistCurrentState(): Promise<void> {
+/** Save one custom checkpoint only if it still descends from the durable revision. */
+async function persistCustomCheckpoint(includeDraft = false): Promise<void> {
   const state = useAppStore.getState();
-  if (!state.dbReady) return Promise.resolve();
-  return savePersistedAppState({
-    lastSchemaId: state.schemaDef.id,
+  const saved = await savePersistedAppState({
+    lastSchemaId: 'custom',
     customSchema: state.savedCustomSchema ?? undefined,
     customDatabase: state.savedCustomDatabase ?? undefined,
-    customDdlDraft: state.customDdlDraft ?? undefined,
-    ranLessons: state.ranLessons,
-  });
+    ...(includeDraft ? { customDdlDraft: state.customDdlDraft ?? undefined } : {}),
+  }, state.savedCustomRevision);
+  if (saved) useAppStore.setState({ savedCustomRevision: saved.customRevision });
+  if (includeDraft && useAppStore.getState().customDdlDraft === state.customDdlDraft) customDraftDirty = false;
+}
+
+/** A rejected stale write must never leave its unpersisted worker state masquerading as saved. */
+async function restoreAfterConflict(conflict: PersistenceConflictError, attemptedDdl?: string): Promise<void> {
+  const current = conflict.current;
+  const state = useAppStore.getState();
+  const wasLoading = state.schemaLoading;
+  useAppStore.setState({ schemaLoading: true, playing: false });
+  queryRunGeneration++;
+  if (attemptedDdl) customDraftDirty = true;
+  try {
+    if (!current.customSchema || !current.customDatabase) throw new Error('The latest saved schema has no usable checkpoint.');
+    const loaded = await loadSchemaInWorker(current.customSchema, current.customDatabase);
+    useAppStore.setState({
+      dbReady: true, dbError: null,
+      schemaDef: current.customSchema, schemaRevision: useAppStore.getState().schemaRevision + 1,
+      schema: loaded.schema, fkEdges: loaded.fkEdges, tableData: loaded.tableData,
+      savedCustomSchema: current.customSchema, savedCustomDatabase: current.customDatabase,
+      savedCustomRevision: current.customRevision,
+      customDdlDraft: useAppStore.getState().customDdlDraft ?? attemptedDdl ?? null,
+      trace: null, tracedSql: null, notes: [], currentStep: 0, finished: false,
+      selection: null, hoveredRow: null, hoveredResultRow: null,
+      error: `${conflict.message} The latest saved data has been restored. Review it before retrying your query or build.`,
+    });
+  } catch {
+    useAppStore.setState({ dbReady: false, dbError: 'Another tab changed the saved schema. This change was not saved. Reload to restore the latest saved data.' });
+  } finally {
+    useAppStore.setState({ schemaLoading: wasLoading });
+  }
 }
 
 /** Current step, derived. */
@@ -389,8 +477,6 @@ export function displayRowLabel(table: string, rid: number): string {
 export interface Highlight {
   rows: Record<string, Set<number>>;
   resultRows: Set<number>;
-  /** True when the highlight comes from a pinned click, not a transient hover. */
-  pinned: boolean;
   /** Pinned contributors are kept separate from transient hover previews. */
   pinnedRows: Record<string, Set<number>>;
 }
@@ -450,7 +536,7 @@ function selectHighlight(state: AppState): Highlight | null {
       }
       for (const index of preview.resultRows) resultRows.add(index);
     }
-    return { rows, resultRows, pinned: !!pinned, pinnedRows: pinned?.rows ?? {} };
+    return { rows, resultRows, pinnedRows: pinned?.rows ?? {} };
   })();
   return cachedHighlight;
 }

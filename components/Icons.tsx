@@ -121,22 +121,6 @@ export const SortIcon = (p: IconProps) => (
   </Svg>
 );
 
-/* --- schema badges ------------------------------------------------------ */
-
-export const KeyIcon = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx={8} cy={16} r={5} />
-    <path d="m11.5 12.5 9-9M15 6l3 3" />
-  </Svg>
-);
-
-export const LinkIcon = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-  </Svg>
-);
-
 export const CrosshairIcon = (p: IconProps) => (
   <Svg {...p}>
     <circle cx={12} cy={12} r={9} />
@@ -154,20 +138,6 @@ export const BookIcon = (p: IconProps) => (
 export const ChevronDownIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="m6 9 6 6 6-6" />
-  </Svg>
-);
-
-export const PanelLeftIcon = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x={3} y={4} width={18} height={16} rx={2} />
-    <path d="M9 4v16" />
-  </Svg>
-);
-
-export const PanelRightIcon = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x={3} y={4} width={18} height={16} rx={2} />
-    <path d="M15 4v16" />
   </Svg>
 );
 

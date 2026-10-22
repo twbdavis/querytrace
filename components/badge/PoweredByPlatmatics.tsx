@@ -3,11 +3,6 @@ import styles from "./PoweredByPlatmatics.module.css";
 type Props = {
   /** Client domain, used as utm_source. Example: "whitleycs.com" */
   site: string;
-  /** "badge" is a quiet pill. "inline" is text plus mark, no chrome. */
-  variant?: "badge" | "inline";
-  /** Lead-in text. Default "Powered by". "Built by" and "Site by" also read well. */
-  label?: string;
-  className?: string;
 };
 
 const HOME = "https://platmatics.com/";
@@ -20,20 +15,13 @@ export function poweredByHref(site: string) {
   return url.toString();
 }
 
-export default function PoweredByPlatmatics({
-  site,
-  variant = "badge",
-  label = "Powered by",
-  className,
-}: Props) {
-  const classes = [styles.root, styles[variant], className].filter(Boolean).join(" ");
-
+export default function PoweredByPlatmatics({ site }: Props) {
   return (
     <a
       href={poweredByHref(site)}
       target="_blank"
       rel="noopener"
-      className={classes}
+      className={styles.root}
       title="Websites and software by Platmatics"
     >
       <svg
@@ -61,7 +49,7 @@ export default function PoweredByPlatmatics({
         />
       </svg>
       <span className={styles.text}>
-        <span className={styles.label}>{label}</span>{" "}
+        <span className={styles.label}>Powered by</span>{" "}
         <span className={styles.brand}>Platmatics</span>
       </span>
     </a>

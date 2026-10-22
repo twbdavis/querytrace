@@ -82,7 +82,7 @@ function NativeSqlInput() {
         autoComplete="off"
         autoCorrect="off"
         spellCheck={false}
-        className="absolute inset-0 h-full w-full resize-none border-0 bg-transparent px-3 py-3.5 font-data text-base leading-[1.45] text-transparent caret-accent-active outline-none [-webkit-text-fill-color:transparent]"
+        className="absolute inset-0 h-full w-full resize-none border-0 bg-transparent px-3 py-3.5 font-data text-base leading-[1.45] text-transparent caret-accent-active outline-hidden [-webkit-text-fill-color:transparent]"
       />
     </div>
   );
@@ -93,6 +93,7 @@ export function SqlEditor({ bare = false, onCollapse }: SqlEditorProps) {
   // roomier screens, progressively enhance to CodeMirror after hydration.
   const [enhancedEditor, setEnhancedEditor] = useState(false);
   const dbReady = useAppStore((s) => s.dbReady);
+  const schemaLoading = useAppStore((s) => s.schemaLoading);
   const runQuery = useAppStore((s) => s.runQuery);
   const error = useAppStore((s) => s.error);
   const notes = useAppStore((s) => s.notes);
@@ -116,7 +117,7 @@ export function SqlEditor({ bare = false, onCollapse }: SqlEditorProps) {
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => void runQuery()}
-              disabled={!dbReady}
+              disabled={!dbReady || schemaLoading}
               className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-accent-active bg-accent-active/10 px-3 py-1 font-ui text-[11px] font-bold tracking-wider text-accent-active transition-colors hover:bg-accent-active/20 disabled:cursor-wait disabled:opacity-40"
               title="Run query (Ctrl/Cmd + Enter)"
             >

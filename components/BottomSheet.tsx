@@ -19,6 +19,7 @@ interface BottomSheetProps {
 export function BottomSheet({ editor, results }: BottomSheetProps) {
   const [open, setOpen] = useState(true);
   const dbReady = useAppStore((s) => s.dbReady);
+  const schemaLoading = useAppStore((s) => s.schemaLoading);
   const runQuery = useAppStore((s) => s.runQuery);
   const tracedSql = useAppStore((s) => s.tracedSql);
   const step = useCurrentStep();
@@ -65,7 +66,7 @@ export function BottomSheet({ editor, results }: BottomSheetProps) {
             setOpen(true);
             void runQuery();
           }}
-          disabled={!dbReady}
+          disabled={!dbReady || schemaLoading}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-accent-active bg-accent-active/10 px-2.5 py-1 font-ui text-[10px] font-bold tracking-wider text-accent-active transition-colors hover:bg-accent-active/20 max-sm:h-9 max-sm:px-2"
           title="Run query (Ctrl/Cmd + Enter)"
         >

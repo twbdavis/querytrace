@@ -14,7 +14,22 @@ const config: Config = {
     './lib/**/*.{ts,tsx}',
   ],
   theme: {
+    // Blueprint: every corner is square. All `rounded-*` utilities resolve to 0,
+    // so components keep their semantic class names without rounding anything.
+    borderRadius: {
+      none: '0',
+      sm: '0',
+      DEFAULT: '0',
+      md: '0',
+      lg: '0',
+      xl: '0',
+      '2xl': '0',
+      '3xl': '0',
+      full: '0',
+    },
     extend: {
+      // Tailwind 4 renamed the 4px blur to xs. Keep the existing modal glass.
+      blur: { sm: '4px' },
       colors: {
         app: rgb(surfaces.app),
         canvas: rgb(surfaces.canvas),

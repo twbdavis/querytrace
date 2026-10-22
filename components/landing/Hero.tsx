@@ -1,170 +1,61 @@
 'use client';
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
-import Image, { type StaticImageData } from 'next/image';
-import Link from 'next/link';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import s from './landing.module.css';
-import heroJoin from '@/public/landing/hero-join.png';
-import stageWhere from '@/public/landing/stage-where.png';
-import stageGroup from '@/public/landing/stage-group.png';
-import stageFinal from '@/public/landing/stage-final.png';
+import { JoinScene, type JoinPhase } from './join-scene/JoinScene';
 
-/** Each frame holds for a while, then crossfades, like light shifting in a room. */
-const HOLD_MS = 5600;
+type Clause = 'select' | 'from' | 'join';
 
-type StageKey = 'join' | 'where' | 'group' | 'order';
+/** The clause the scene is executing, highlighted the way the tracer marks it. */
+const CLAUSE_FOR_PHASE: Record<JoinPhase, Clause> = {
+  assemble: 'from',
+  connect: 'join',
+  match: 'join',
+  project: 'select',
+  hold: 'select',
+};
 
-interface Frame {
-  key: StageKey;
-  src: StaticImageData;
-  alt: string;
-  caption: string;
-}
-
-const FRAMES: Frame[] = [
-  {
-    key: 'join',
-    src: heroJoin,
-    alt: 'QueryTrace at the JOIN stage: wires connect VENUE_ID between the VENUE and SCREENING tables and matched rows are lit.',
-    caption: 'Wires run along VENUE_ID and the matched rows light up on both tables.',
-  },
-  {
-    key: 'where',
-    src: stageWhere,
-    alt: 'QueryTrace at the WHERE stage: the SCREENING_DAY column is gold and rows that are not Saturday have faded out.',
-    caption: 'SCREENING_DAY turns gold and the rows that are not Saturday fade out.',
-  },
-  {
-    key: 'group',
-    src: stageGroup,
-    alt: 'QueryTrace at the GROUP BY stage: rows are tinted by venue and the intermediate result shows one row per venue.',
-    caption: 'Rows take the colour of their venue and collapse to one row each.',
-  },
-  {
-    key: 'order',
-    src: stageFinal,
-    alt: 'QueryTrace at the final ORDER BY stage: three venues sorted by Saturday seats in the result panel.',
-    caption: 'Three venues, sorted by Saturday seats.',
-  },
-];
-
-const INDEX: Record<StageKey, number> = { join: 0, where: 1, group: 2, order: 3 };
-
-function usePrefersReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const update = () => setReduced(mq.matches);
-    update();
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
-  }, []);
-  return reduced;
-}
-
-interface ClauseProps {
-  stage: StageKey;
-  active: StageKey;
-  tone: string;
-  onPick: (stage: StageKey) => void;
-  children: ReactNode;
-}
-
-/** One line of the query, which is also the control for its stage. */
-function Clause({ stage, active, tone, onPick, children }: ClauseProps) {
-  const on = stage === active;
-  return (
-    <button type="button" aria-pressed={on} onClick={() => onPick(stage)} className={`${s.clause} ${tone} ${on ? s.on : ''}`}>
-      {children}
-    </button>
-  );
+interface HeroProps {
+  /** The headline, rendered on the server. */
+  title: ReactNode;
+  /** The call to action, rendered on the server. */
+  action: ReactNode;
 }
 
 /**
- * The demonstration under the headline: real frames of lesson 15, one per
- * stage, crossfading slowly. The query is the control; pressing a
- * clause shows that stage and stops the drift. The first frame and the
- * static query render without script.
+ * The stage under the header: the three.js join scene with the headline
+ * over its top-left corner, and the query it is playing (one clause per
+ * line, the executing clause marked as in the tracer) with the call to
+ * action over its bottom-left. The words render without script; the scene
+ * arrives when it can run.
  */
-export function Hero() {
-  const [index, setIndex] = useState(0);
-  const [held, setHeld] = useState(false);
-  const reduced = usePrefersReducedMotion();
-  const drifting = !held && !reduced;
-  const active = FRAMES[index].key;
-
-  useEffect(() => {
-    if (!drifting) return;
-    const id = window.setInterval(() => {
-      if (document.visibilityState === 'visible') setIndex((i) => (i + 1) % FRAMES.length);
-    }, HOLD_MS);
-    return () => window.clearInterval(id);
-  }, [drifting, index]);
-
-  const pick = (stage: StageKey) => {
-    setIndex(INDEX[stage]);
-    setHeld(true);
-  };
+export function Hero({ title, action }: HeroProps) {
+  const [phase, setPhase] = useState<JoinPhase>('assemble');
+  const active = CLAUSE_FOR_PHASE[phase];
+  const line = (clause: Clause) => `${s.line} ${active === clause ? 'queryExecHighlight' : ''}`;
 
   return (
-    <div className={s.demo}>
-      <div className={s.demoQuery} data-ui data-rise style={{ '--i': 3 } as CSSProperties}>
-        <pre className={s.sql}>
-          <code>
-            <span className={s.line}>
-              <span className={s.kwResult}>SELECT</span> V.VENUE_NAME, SUM(R.SEATS) <span className={s.kw}>AS</span>{' '}
-              <span className={s.str}>&apos;Saturday Seats&apos;</span>
-            </span>
-            <span className={s.line}>
-              <span className={s.kw}>FROM</span> VENUE V
-            </span>
-            <span role="group" aria-label="Stage shown in the preview">
-              <Clause stage="join" active={active} tone={s.join} onPick={pick}>
-                <span className={s.kw}>JOIN</span> SCREENING S <span className={s.kw}>ON</span> V.VENUE_ID = S.VENUE_ID
-              </Clause>
-              <Clause stage="join" active={active} tone={s.join} onPick={pick}>
-                <span className={s.kw}>JOIN</span> RESERVATION R <span className={s.kw}>ON</span> S.SCREENING_ID = R.SCREENING_ID
-              </Clause>
-              <Clause stage="where" active={active} tone={s.where} onPick={pick}>
-                <span className={s.kwWhere}>WHERE</span> S.SCREENING_DAY = <span className={s.str}>&apos;Saturday&apos;</span>
-              </Clause>
-              <Clause stage="group" active={active} tone={s.group} onPick={pick}>
-                <span className={s.kwGroup}>GROUP BY</span> V.VENUE_NAME
-              </Clause>
-              <Clause stage="order" active={active} tone={s.order} onPick={pick}>
-                <span className={s.kw}>ORDER BY</span> SUM(R.SEATS) <span className={s.kw}>DESC</span>;
-              </Clause>
-            </span>
-          </code>
-        </pre>
-        <p className={`${s.caption} ${held ? s.captionOn : ''}`} aria-live="polite">
-          {FRAMES[index].caption}
-        </p>
+    <div className={s.stage}>
+      <JoinScene onPhase={setPhase} />
+      <div className={s.stageTitle}>{title}</div>
+      <div className={s.stageText}>
+        <div className={s.demoQuery} data-rise style={{ '--i': 2 } as CSSProperties}>
+          <pre className={s.sql}>
+            <code>
+              <span className={line('select')}>
+                <span className={s.kwResult}>SELECT</span> V.VENUE_NAME, S.FILM_TITLE, S.SCREENING_DAY
+              </span>
+              <span className={line('from')}>
+                <span className={s.kw}>FROM</span> SCREENING S
+              </span>
+              <span className={line('join')}>
+                <span className={s.kw}>JOIN</span> VENUE V <span className={s.kw}>ON</span> S.VENUE_ID = V.VENUE_ID;
+              </span>
+            </code>
+          </pre>
+        </div>
+        {action}
       </div>
-
-      <Link
-        href="/trace"
-        aria-label="Open the tracer"
-        className={s.frame}
-        data-rise
-        style={{ '--i': 4 } as CSSProperties}
-        onMouseEnter={() => setHeld(true)}
-        onMouseLeave={() => setHeld(false)}
-      >
-        {FRAMES.map((frame, i) => (
-          <Image
-            key={frame.key}
-            src={frame.src}
-            alt={i === index ? frame.alt : ''}
-            fill
-            unoptimized
-            preload={i === 0}
-            sizes="(min-width: 1440px) 680px, (min-width: 1024px) calc((100vw - 240px) * 17 / 30), calc(100vw - 48px)"
-            className={`${s.frameImg} ${i === index ? s.frameOn : ''}`}
-            aria-hidden={i !== index}
-          />
-        ))}
-      </Link>
     </div>
   );
 }
