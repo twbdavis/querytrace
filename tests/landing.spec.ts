@@ -7,6 +7,9 @@ declare global {
   }
 }
 
+// Motion changes rebuild WebGL before the 900 ms fade; CI renderers can take longer.
+const sceneReadyTimeout = 15_000;
+
 async function requireWebGL(page: Page) {
   const supported = await page.evaluate(() => {
     const gl = document.createElement('canvas').getContext('webgl2');
@@ -86,7 +89,7 @@ test('landing animation plays without controls and follows motion preferences', 
   const canvas = scene.locator('canvas');
   await expect(scene).toHaveAttribute('data-mode', 'live');
   await scene.scrollIntoViewIfNeeded();
-  await expect(canvas).toHaveCSS('opacity', '1');
+  await expect(canvas).toHaveCSS('opacity', '1', { timeout: sceneReadyTimeout });
   const initial = await drawCount(page);
   await expect.poll(() => drawCount(page)).toBeGreaterThan(initial);
 
@@ -94,13 +97,13 @@ test('landing animation plays without controls and follows motion preferences', 
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(scene).toHaveAttribute('data-mode', 'still');
-  await expect(canvas).toHaveCSS('opacity', '1');
+  await expect(canvas).toHaveCSS('opacity', '1', { timeout: sceneReadyTimeout });
   await expect(scene.getByRole('button')).toHaveCount(0);
   await expectDrawsStopped(page);
 
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await expect(scene).toHaveAttribute('data-mode', 'live');
-  await expect(canvas).toHaveCSS('opacity', '1');
+  await expect(canvas).toHaveCSS('opacity', '1', { timeout: sceneReadyTimeout });
   const restarted = await drawCount(page);
   await expect.poll(() => drawCount(page)).toBeGreaterThan(restarted);
 });
@@ -109,22 +112,27 @@ test('a failed scene download keeps the landing page and tracer links usable', a
   await requireWebGL(page);
   const screenshotRequests = watchOldScreenshotRequests(page);
   let blocked = false;
-  await page.route('**/_next/static/chunks/*.js', async (route) => {
-    const response = await route.fetch();
-    if ((await response.text()).includes('The join scene could not start.')) {
-      blocked = true;
-      await route.abort('failed');
-    } else {
-      await route.fulfill({ response });
-    }
-  });
-  await page.goto('/');
-  await expectStaticJoin(page, screenshotRequests);
-  expect(blocked).toBe(true);
-  await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
-  await expect(page).toHaveURL(/\/trace$/);
-  await expect(page.getByLabel('SQL query editor')).toBeVisible();
+  try {
+    await page.route('**/_next/static/chunks/*.js', async (route) => {
+      const response = await route.fetch();
+      if ((await response.text()).includes('The join scene could not start.')) {
+        blocked = true;
+        await route.abort('failed');
+      } else {
+        await route.fulfill({ response });
+      }
+    });
+    await page.goto('/');
+    await expectStaticJoin(page, screenshotRequests);
+    expect(blocked).toBe(true);
+    await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
+    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
+    await expect(page).toHaveURL(/\/trace$/);
+    await expect(page.getByLabel('SQL query editor')).toBeVisible();
+  } finally {
+    // Drain route.fetch/fulfill calls before fixture teardown disposes their responses.
+    await page.unrouteAll({ behavior: 'wait' });
+  }
 });
 
 test('a scene rendering failure falls back without replacing the homepage', async ({ page }) => {
@@ -136,7 +144,7 @@ test('a scene rendering failure falls back without replacing the homepage', asyn
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
   await page.locator('[data-mode]').scrollIntoViewIfNeeded();
-  await expect(page.locator('[data-mode] canvas')).toHaveCSS('opacity', '1');
+  await expect(page.locator('[data-mode] canvas')).toHaveCSS('opacity', '1', { timeout: sceneReadyTimeout });
   await page.evaluate(() => { window.__querytraceRenderFailure = true; });
   await expectStaticJoin(page, screenshotRequests);
   await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
