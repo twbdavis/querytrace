@@ -7,7 +7,7 @@ declare global {
   }
 }
 
-// Motion changes rebuild WebGL before the 900 ms fade; CI renderers can take longer.
+// WebGL startup includes fonts and shader compilation on CI renderers.
 const sceneReadyTimeout = 15_000;
 
 async function requireWebGL(page: Page) {
@@ -85,6 +85,9 @@ test('landing animation plays without controls and follows motion preferences', 
   await trackDraws(page);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.goto('/');
+  // Verify WebGL start/stop/resume independently of the compositor's fade clock.
+  // Opacity still becomes 1 only after the real first-render readiness callback.
+  await page.addStyleTag({ content: '[data-mode] canvas { transition: none !important; }' });
   const scene = page.locator('[data-mode]');
   const canvas = scene.locator('canvas');
   await expect(scene).toHaveAttribute('data-mode', 'live');
