@@ -113,7 +113,7 @@ test('a failed scene download keeps the landing page and tracer links usable', a
   const screenshotRequests = watchOldScreenshotRequests(page);
   let blocked = false;
   try {
-    await page.route('**/_next/static/chunks/*.js', async (route) => {
+    await page.route(/\/_next\/static\/(?:immutable\/)?chunks\/[^/?]+\.js(?:\?.*)?$/, async (route) => {
       const response = await route.fetch();
       if ((await response.text()).includes('The join scene could not start.')) {
         blocked = true;
