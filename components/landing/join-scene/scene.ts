@@ -10,6 +10,7 @@ import {
   EdgesGeometry,
   Float32BufferAttribute,
   Group,
+  HalfFloatType,
   LineBasicMaterial,
   LineCurve3,
   LineSegments,
@@ -22,21 +23,21 @@ import {
   PlaneGeometry,
   Points,
   PointsMaterial,
-  QuadraticBezierCurve3,
   Quaternion,
   Scene,
   ShaderMaterial,
   SRGBColorSpace,
   Texture,
-  TubeGeometry,
   Vector2,
   Vector3,
   WebGLRenderer,
+  WebGLRenderTarget,
 } from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { TexturePass } from 'three/addons/postprocessing/TexturePass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { accents, grid, lines, surfaces } from '@/styles/theme';
 import { MATCHES, SCREENING, VENUE, type TableSpec } from './joinData';
 import { drawTable, layoutTable, type Fonts, type TableLayout } from './tableTexture';
@@ -243,7 +244,7 @@ const GLOW_FRAGMENT = /* glsl */ `
   }
 `;
 
-// Clip continuously in path space instead of revealing discrete tube triangles.
+// Clip continuously in path space instead of revealing discrete wire triangles.
 const WIRE_VERTEX = /* glsl */ `
   varying float vProgress;
   void main() {
@@ -315,6 +316,7 @@ interface SlabOptions {
 
 const _v = new Vector3();
 const _q = new Quaternion();
+const RIGHT = new Vector3(1, 0, 0);
 const _color = new Color();
 
 function makeSlab(texture: Texture, layout: TableLayout, region: Region, opts: SlabOptions): Slab {
@@ -404,25 +406,52 @@ function setSlabOpacity(slab: Slab, k: number) {
   slab.edge.opacity = k;
 }
 
-/** Orthogonal routing with small, tangent-continuous bends at the elbows. */
-function roundedRoute(points: Vector3[], radius: number): CurvePath<Vector3> {
+/** Orthogonal routing with square corners: straight runs only. */
+function squareRoute(points: Vector3[]): CurvePath<Vector3> {
   const path = new CurvePath<Vector3>();
-  let start = points[0];
-  for (let i = 1; i < points.length - 1; i++) {
-    const corner = points[i];
-    const before = points[i - 1];
-    const after = points[i + 1];
-    const r = Math.min(radius, corner.distanceTo(before) / 2, corner.distanceTo(after) / 2);
-    const entry = corner.clone().addScaledVector(before.clone().sub(corner).normalize(), r);
-    const exit = corner.clone().addScaledVector(after.clone().sub(corner).normalize(), r);
-    path.add(new LineCurve3(start, entry));
-    path.add(new QuadraticBezierCurve3(entry, corner, exit));
-    start = exit;
-  }
-  path.add(new LineCurve3(start, points[points.length - 1]));
+  for (let i = 1; i < points.length; i++) path.add(new LineCurve3(points[i - 1], points[i]));
   // Populate arc-length caches during setup, never on a spark's first frame.
   path.getLengths();
   return path;
+}
+
+/**
+ * The wire's body: a square-section box per straight run, each run extended
+ * by half the wire's thickness into its corners so consecutive runs meet
+ * flush in a sharp mitre. Every vertex carries its fraction of the wire's
+ * length in uv.x (what WIRE_VERTEX reads) so the reveal sweeps along the path.
+ */
+function squareWireGeometry(points: Vector3[], half: number): BufferGeometry {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += points[i].distanceTo(points[i - 1]);
+  const parts: BufferGeometry[] = [];
+  const dir = new Vector3();
+  const centre = new Vector3();
+  let along = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const len = a.distanceTo(b);
+    dir.subVectors(b, a).normalize();
+    const extendA = i > 1 ? half : 0;
+    const extendB = i < points.length - 1 ? half : 0;
+    const boxLen = len + extendA + extendB;
+    const box = new BoxGeometry(boxLen, half * 2, half * 2);
+    const pos = box.getAttribute('position');
+    const uv = box.getAttribute('uv');
+    for (let v = 0; v < pos.count; v++) {
+      const distance = along + pos.getX(v) + boxLen / 2 - extendA;
+      uv.setX(v, Math.min(1, Math.max(0, distance / total)));
+    }
+    box.applyQuaternion(_q.setFromUnitVectors(RIGHT, dir));
+    centre.copy(a).addScaledVector(dir, (len + extendB - extendA) / 2);
+    box.translate(centre.x, centre.y, centre.z);
+    parts.push(box);
+    along += len;
+  }
+  const merged = mergeGeometries(parts);
+  for (const part of parts) part.dispose();
+  return merged;
 }
 
 interface Table {
@@ -569,7 +598,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
   const square = new Mesh(new BoxGeometry(0.075, 0.075, 0.075), markerMat);
   const arrow = new Mesh(new ConeGeometry(0.055, 0.16, 4), markerMat);
   stage.add(square, arrow);
-  let wire: Mesh<TubeGeometry, ShaderMaterial> | null = null;
+  let wire: Mesh<BufferGeometry, ShaderMaterial> | null = null;
   let wireCurve: CurvePath<Vector3> | null = null;
   let wireLength = 1;
   const sparkCurves: CurvePath<Vector3>[] = [];
@@ -650,10 +679,19 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
   // Bloom (desktop only): only the additive glows and over-bright lit edges cross the threshold.
   let composer: EffectComposer | null = null;
   let bloom: UnrealBloomPass | null = null;
+  let sceneTarget: WebGLRenderTarget | null = null;
   if (!opts.lite) {
+    // The canvas's own antialiasing only applies to the default framebuffer,
+    // so the scene is drawn into a multisampled target of its own and copied,
+    // resolved, into the composer. The composer's buffers stay single-sampled:
+    // three invalidates a multisampled buffer after each resolve, and the
+    // bloom pass draws additively back into its input, which would blend
+    // over undefined contents and flash.
+    const samples = Math.min(4, renderer.capabilities.maxSamples || 0);
+    sceneTarget = new WebGLRenderTarget(1, 1, { type: HalfFloatType, samples });
     composer = new EffectComposer(renderer);
     composer.setPixelRatio(pixelRatio);
-    composer.addPass(new RenderPass(scene, camera));
+    composer.addPass(new TexturePass(sceneTarget.texture));
     bloom = new UnrealBloomPass(new Vector2(1, 1), 0.9, 0.55, 1.0);
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
@@ -686,10 +724,9 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
       new Vector3(anchorB.x, yMid, 0),
       anchorB.clone(),
     ];
-    wireCurve = roundedRoute(pts, 0.18);
+    wireCurve = squareRoute(pts);
     wireLength = wireCurve.getLength();
-    const geo = new TubeGeometry(wireCurve, 192, 0.014, 8, false);
-    wire = new Mesh(geo, wireMat);
+    wire = new Mesh(squareWireGeometry(pts, 0.014), wireMat);
     stage.add(wire);
 
     square.position.copy(anchorA);
@@ -762,6 +799,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
     width = Math.max(1, w);
     height = Math.max(1, h);
     renderer.setSize(width, height, false);
+    sceneTarget?.setSize(Math.round(width * pixelRatio), Math.round(height * pixelRatio));
     composer?.setSize(width, height);
     const aspect = width / height;
     const next = aspect < 1 ? PORTRAIT : LANDSCAPE;
@@ -845,7 +883,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
       markerMat.color.copy(wireMat.uniforms.uColor.value);
       markerMat.opacity = appear;
       square.scale.setScalar(Math.max(0.0001, appear));
-      // The tip leads the reveal and follows the rounded bends into the key.
+      // The tip leads the reveal and turns the corners into the key.
       wireCurve.getPointAt(drawn, arrow.position);
       wireCurve.getPointAt(Math.min(1, drawn + 0.001), tangent);
       wireCurve.getPointAt(Math.max(0, drawn - 0.001), _v);
@@ -962,8 +1000,13 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
   }
 
   function render() {
-    if (composer) composer.render();
-    else renderer.render(scene, camera);
+    if (composer && sceneTarget) {
+      renderer.setRenderTarget(sceneTarget);
+      renderer.render(scene, camera);
+      composer.render();
+    } else {
+      renderer.render(scene, camera);
+    }
     if (!ready) { ready = true; opts.onReady(); }
   }
 
@@ -1023,6 +1066,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
     glow.dispose();
     bloom?.dispose();
     composer?.dispose();
+    sceneTarget?.dispose();
     renderer.dispose();
     renderer.forceContextLoss();
   }
@@ -1030,7 +1074,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
   // Warm even the initially hidden materials before the animation clock starts,
   // using the same output color space as the actual scene pass.
   try {
-    renderer.setRenderTarget(composer?.readBuffer ?? null);
+    renderer.setRenderTarget(sceneTarget);
     renderer.compile(scene, camera);
     renderer.setRenderTarget(null);
   } catch (error) {
