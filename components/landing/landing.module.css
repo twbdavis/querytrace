@@ -475,25 +475,12 @@
   padding-top: 120px;
 }
 
-/* One panel: the invitation on the left, the button on the right. */
+/* One panel: the label, then the button and link underneath. */
 .closePanel {
   display: grid;
-  gap: 32px;
+  gap: 10px;
   padding: 40px 24px;
   background: var(--surface);
-}
-
-.closeTitle {
-  font-size: var(--step-head);
-  font-weight: 500;
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.closeLine {
-  margin-top: 14px;
-  color: var(--soft);
-  max-width: 40ch;
 }
 
 .closeActions {
@@ -602,12 +589,7 @@
 
   .close { padding-top: 150px; }
 
-  .closePanel {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 48px;
-    padding: 56px 64px;
-  }
+  .closePanel { padding: 56px 64px; }
 
   .foot {
     display: grid;

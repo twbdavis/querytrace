@@ -10,7 +10,7 @@ function literalEnd(sql: string, start: number, backslashEscapes: boolean): numb
   let j = start + 1;
   while (j < sql.length) {
     const ch = sql[j];
-    if (backslashEscapes && open === "'" && ch === '\\') {
+    if (backslashEscapes && (open === "'" || open === '"') && ch === '\\') {
       j += 2;
       continue;
     }
@@ -48,7 +48,7 @@ function isQuote(ch: string): boolean {
  * Walk SQL text once, handing every comment and literal to the callbacks and
  * copying everything else verbatim. Both callbacks return replacement text.
  */
-function rewriteSql(
+export function rewriteSql(
   sql: string,
   options: ScanOptions,
   onComment: (text: string) => string,
@@ -131,6 +131,9 @@ const BACKSLASH_ESCAPES: Record<string, string> = {
   0: '',
   Z: '',
   b: '\b',
+  // MySQL keeps \% and \_ as two characters: they are the LIKE escapes under its default ESCAPE '\'.
+  '%': '\\%',
+  _: '\\_',
 };
 
 function unescapeBackslashes(literal: string): string {
@@ -338,6 +341,54 @@ export function convertBracketIdentifiers(sql: string): string {
   );
 }
 
+/**
+ * MySQL and MariaDB (default mode) read "text" as a string literal, not a name.
+ * Every terminated double-quoted token outside comments becomes a single-quoted
+ * literal, except one that directly follows AS, which MySQL accepts as an alias.
+ * Doubled quotes ("") collapse. With backslash escapes in effect the escapes are
+ * left for the backslash converter, except that \" no longer needs one and a
+ * bare ' gains one so it survives as a quote. Returns the converted text and
+ * the contents of each literal, for the schema-name warning.
+ */
+export function readDoubleQuotedAsStrings(sql: string, backslashEscapes: boolean): { sql: string; strings: string[] } {
+  let out = '';
+  const strings: string[] = [];
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const comment = commentEnd(sql, i);
+    if (comment !== -1) {
+      out += sql.slice(i, comment);
+      i = comment;
+      continue;
+    }
+    const ch = sql[i];
+    if (isQuote(ch)) {
+      const end = literalEnd(sql, i, backslashEscapes);
+      const stop = end === -1 ? n : end;
+      const text = sql.slice(i, stop);
+      if (ch === '"' && end !== -1 && !/\bAS\s*$/i.test(out)) {
+        let inner = text.slice(1, -1).replace(/""/g, '"');
+        if (backslashEscapes) {
+          inner = inner.replace(/\\(["'])|'/g, (_match, escaped: string | undefined) => (escaped === '"' ? '"' : "\\'"));
+          strings.push(inner.replace(/\\(.)/g, '$1'));
+        } else {
+          strings.push(inner);
+          inner = inner.replace(/'/g, "''");
+        }
+        out += `'${inner}'`;
+      } else {
+        out += text;
+      }
+      i = stop;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return { sql: out, strings };
+}
+
 /** MySQL `# comment` lines become standard `-- comment` lines. */
 export function convertHashComments(sql: string): string {
   return rewriteSql(
@@ -489,12 +540,13 @@ export function rewriteCalls(
 ): string {
   const alternatives = names.join('|');
   const pattern = new RegExp(String.raw`(?<![\w.` + '`' + String.raw`"\]])(${alternatives})\s*\(`, 'gi');
-  const head = new RegExp(String.raw`^(${alternatives})\s*\(`, 'i');
-  const starts = [...maskSql(sql).matchAll(pattern)].map((match) => match.index ?? 0).reverse();
+  const head = new RegExp(String.raw`(${alternatives})\s*\(`, 'iy');
+  let masked = maskSql(sql);
+  const starts = [...masked.matchAll(pattern)].map((match) => match.index ?? 0).reverse();
   let text = sql;
   for (const start of starts) {
-    const masked = maskSql(text);
-    const match = masked.slice(start).match(head);
+    head.lastIndex = start;
+    const match = head.exec(masked);
     if (!match) continue;
     const open = start + match[0].length - 1;
     const close = matchingParen(masked, open);
@@ -506,7 +558,15 @@ export function rewriteCalls(
       inner,
       text: text.slice(start, close + 1),
     });
-    if (replacement !== null) text = text.slice(0, start) + replacement + text.slice(close + 1);
+    if (replacement === null) continue;
+    text = text.slice(0, start) + replacement + text.slice(close + 1);
+    // Calls are taken from the end of the text backwards, so only the replaced
+    // span changes. A replacement made of whole tokens masks the same on its
+    // own as in place, which avoids re-reading the whole query for every call;
+    // one that leaves a quote open changes how the rest reads, so re-read then.
+    masked = hasUnterminatedLiteral(replacement)
+      ? maskSql(text)
+      : masked.slice(0, start) + maskSql(replacement) + masked.slice(close + 1);
   }
   return text;
 }

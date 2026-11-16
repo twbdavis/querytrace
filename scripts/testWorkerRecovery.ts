@@ -46,7 +46,7 @@ class ControlledWorker {
       else if (request.sql === 'BAD_SQL') this.reply({ id: request.id, ok: false, error: 'simulated invalid SQL' });
       else {
         if (request.sql === 'MUTATE') this.state = 2;
-        this.reply({ id: request.id, ok: true, result: { trace: [{ stage: 'select', label: 'Controlled result', narration: 'Isolated worker fixture.', activeTables: [], activeColumns: [], activeEdges: [], litRows: {}, dimmedRows: {}, partialResult: { columns: ['value'], rows: [[this.state]] } }], notes: [] },
+        this.reply({ id: request.id, ok: true, result: { trace: [{ stage: 'select', label: 'Controlled result', narration: 'Isolated worker fixture.', activeTables: [], activeColumns: [], activeEdges: [], litRows: {}, dimmedRows: {}, partialResult: { columns: ['value'], rows: [[this.state]] } }], notes: [], coverage: { revision: 1, dialect: 'legacy', explanation: 'result-only', lineage: 'none', features: [], limits: [] } },
           ...(request.sql === 'MUTATE' ? { checkpoint: { def, databaseBytes: new Uint8Array([this.state]) } } : {}),
         });
       }

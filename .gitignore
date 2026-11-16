@@ -51,3 +51,6 @@ CLAUDE.md
 
 # tasteskill working files (direction sheet, inspector screenshots)
 /.taste-skill/
+
+# Local editor/agent config
+.claude/

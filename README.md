@@ -45,7 +45,7 @@ for tests, production builds, hosting, and troubleshooting.
 A personal learning project with automated tracing and browser checks. The app
 teaches logical query stages; it is not a display of SQLite's internal physical
 query plan. Queries written in MySQL / MariaDB, PostgreSQL, SQL Server or Oracle
-spelling are translated to SQLite and the rewrite is shown beside the result;
+spelling are translated to SQLite and the rewrite is shown under the editor;
 the translation covers a defined subset, and some complex queries (CTEs, set
 operations, derived tables) show branch results plus the final SQLite result
 rather than a full trace. INSERT, UPDATE and DELETE run against the loaded

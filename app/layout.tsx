@@ -24,6 +24,8 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
     default: 'QueryTrace',
+    // Deliberately without %s: the browser tab reads "QueryTrace" on every page
+    // (pinned by tests/landing.spec.ts). Page titles still feed search and share metadata.
     template: 'QueryTrace',
   },
   description: siteDescription,

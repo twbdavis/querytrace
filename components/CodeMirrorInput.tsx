@@ -4,11 +4,12 @@ import { useEffect, useRef } from 'react';
 import { minimalSetup } from 'codemirror';
 import { autocompletion } from '@codemirror/autocomplete';
 import { bracketMatching, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
-import { SQLite, sql as sqlLanguage } from '@codemirror/lang-sql';
+import { MariaSQL, MSSQL, MySQL, PLSQL, PostgreSQL, SQLite, sql as sqlLanguage, type SQLDialect } from '@codemirror/lang-sql';
 import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { useAppStore, useCurrentStep } from '@/store/useAppStore';
+import { dialectProfile, type SourceDialect } from '@/lib/queryCompatibility';
 import { accents, lines, surfaces, text } from '@/styles/theme';
 
 const setClauseHighlight = StateEffect.define<{ from: number; to: number } | null>();
@@ -74,9 +75,14 @@ const blueprintTheme = EditorView.theme(
   { dark: true }
 );
 
-function schemaExtension(schema: ReturnType<typeof useAppStore.getState>['schema']) {
+/** Highlighting follows the selected source dialect; it does not define what executes. */
+const EDITOR_DIALECTS: Record<ReturnType<typeof dialectProfile>['editor'], SQLDialect> = {
+  sqlite: SQLite, mysql: MySQL, mariadb: MariaSQL, postgresql: PostgreSQL, mssql: MSSQL, plsql: PLSQL,
+};
+
+function schemaExtension(schema: ReturnType<typeof useAppStore.getState>['schema'], dialect: SourceDialect) {
   return sqlLanguage({
-    dialect: SQLite,
+    dialect: EDITOR_DIALECTS[dialectProfile(dialect).editor],
     upperCaseKeywords: true,
     schema: Object.fromEntries(
       schema.map((table) => [table.name, table.columns.map((column) => column.name)])
@@ -87,6 +93,7 @@ function schemaExtension(schema: ReturnType<typeof useAppStore.getState>['schema
 export function CodeMirrorInput() {
   const sql = useAppStore((s) => s.sql);
   const schema = useAppStore((s) => s.schema);
+  const queryDialect = useAppStore((s) => s.queryDialect);
   const setSql = useAppStore((s) => s.setSql);
   const runQuery = useAppStore((s) => s.runQuery);
   const setEditorFocused = useAppStore((s) => s.setEditorFocused);
@@ -114,7 +121,7 @@ export function CodeMirrorInput() {
           autocompletion({ activateOnTyping: true }),
           EditorView.lineWrapping,
           syntaxHighlighting(blueprintHighlight),
-          languageConfig.current.of(schemaExtension(useAppStore.getState().schema)),
+          languageConfig.current.of(schemaExtension(useAppStore.getState().schema, useAppStore.getState().queryDialect)),
           blueprintTheme,
           clauseHighlightField,
           EditorView.contentAttributes.of({
@@ -153,8 +160,8 @@ export function CodeMirrorInput() {
   }, [sql]);
 
   useEffect(() => {
-    viewRef.current?.dispatch({ effects: languageConfig.current.reconfigure(schemaExtension(schema)) });
-  }, [schema]);
+    viewRef.current?.dispatch({ effects: languageConfig.current.reconfigure(schemaExtension(schema, queryDialect)) });
+  }, [schema, queryDialect]);
 
   useEffect(() => {
     const view = viewRef.current;

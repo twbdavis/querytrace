@@ -1,16 +1,18 @@
 import { emptyRecord } from './records';
 import type { Database } from 'sql.js';
 import { enforceCustomSchemaLimits, exportDatabase, getTableData, introspectSchema, prepareQueryDdl, type TableData } from './db';
+import type { SourceDialect } from './queryCompatibility';
 import type { TableMeta } from './schemas';
 import type { QueryRun } from './sqlRuntime';
 import { TraceError } from './traceEngine';
 import { snapshotAfterCommit } from './sqlRecovery';
 
 /** Apply one supported CREATE atomically, including validation of the new schema. */
-export function runCreateStatement(db: Database, input: string, previous: TableMeta[], persistent: boolean): QueryRun {
+/** The runtime attaches the coverage metadata for the request's dialect. */
+export function runCreateStatement(db: Database, input: string, previous: TableMeta[], persistent: boolean, dialect?: SourceDialect): Omit<QueryRun, 'coverage'> {
   let statement: ReturnType<typeof prepareQueryDdl>;
   try {
-    statement = prepareQueryDdl(input);
+    statement = prepareQueryDdl(input, dialect);
   } catch (error) {
     throw new TraceError(error instanceof Error ? error.message : String(error));
   }

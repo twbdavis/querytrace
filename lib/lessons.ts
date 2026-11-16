@@ -1,14 +1,51 @@
 /* QueryTrace lessons use original scenarios while retaining a standard path
    from SELECT fundamentals through joins, set operations and subqueries. */
 
+import type { SourceDialect } from './queryCompatibility';
+
+/** The spellings a lesson can be shown in; MariaDB shares MySQL's. */
+export type LessonDialect = 'sqlite' | 'mysql' | 'postgresql' | 'sqlserver' | 'oracle';
+
+export interface LessonVariant {
+  query: string;
+  /** A hint that names the vendor's own syntax, when the portable hint would not apply. */
+  tryIt?: string;
+}
+
 export interface Lesson {
   id: string;
   section: 'Foundations' | 'Combining data';
   schemaId: string;
   title: string;
   concept: string;
+  /** Portable spelling; runs identically under every profile. */
   query: string;
   tryIt: string;
+  /**
+   * The same lesson in a vendor's idiomatic spelling, only where it differs.
+   * Every variant returns the rows of the portable query under its own profile
+   * (checked by the compatibility suite).
+   */
+  variants?: Partial<Record<LessonDialect, LessonVariant>>;
+}
+
+/** The lesson dialect a source-dialect profile shows; the legacy profile shows the portable text. */
+export function lessonDialect(dialect: SourceDialect): LessonDialect | null {
+  if (dialect === 'legacy') return null;
+  return dialect === 'mariadb' ? 'mysql' : dialect;
+}
+
+/** The lesson text to show and run under a profile: its variant, or the portable spelling. */
+export function lessonForDialect(lesson: Lesson, dialect: SourceDialect): LessonVariant & { variant: boolean } {
+  const key = lessonDialect(dialect);
+  const variant = key ? lesson.variants?.[key] : undefined;
+  if (variant) return { query: variant.query, tryIt: variant.tryIt ?? lesson.tryIt, variant: true };
+  // PostgreSQL and Oracle do not accept a single-quoted alias; the portable
+  // spelling is shown with the standard double quotes there.
+  if ((key === 'postgresql' || key === 'oracle') && /\bAS\s+'[^']+'/i.test(lesson.query)) {
+    return { query: lesson.query.replace(/\bAS\s+'([^']+)'/gi, 'AS "$1"'), tryIt: lesson.tryIt, variant: true };
+  }
+  return { query: lesson.query, tryIt: lesson.tryIt, variant: false };
 }
 
 export const LESSONS: Lesson[] = [
@@ -64,6 +101,11 @@ export const LESSONS: Lesson[] = [
     query: "SELECT FILM_TITLE, GENRE FROM SCREENING WHERE FILM_TITLE LIKE '%the%';",
     tryIt:
       "Try GENRE IN ('Comedy', 'Animation'), then find venues with CAPACITY BETWEEN 90 AND 150.",
+    variants: {
+      // LIKE ignores letter case in SQLite, MySQL and SQL Server's default collation, but not in PostgreSQL or Oracle.
+      postgresql: { query: "SELECT FILM_TITLE, GENRE FROM SCREENING WHERE FILM_TITLE ILIKE '%the%';" },
+      oracle: { query: "SELECT FILM_TITLE, GENRE FROM SCREENING WHERE LOWER(FILM_TITLE) LIKE '%the%';" },
+    },
   },
   {
     id: 'distinct',
@@ -84,6 +126,24 @@ export const LESSONS: Lesson[] = [
       'CONCAT assembles text values and literal separators. AS gives the derived result column a useful heading.',
     query: "SELECT CONCAT(GIVEN_NAME, ' ', FAMILY_NAME) AS 'Observer' FROM ASTRONOMER;",
     tryIt: "Append the home city in parentheses by adding ' (', HOME_CITY, ')' to CONCAT.",
+    variants: {
+      sqlite: {
+        query: "SELECT GIVEN_NAME || ' ' || FAMILY_NAME AS \"Observer\" FROM ASTRONOMER;",
+        tryIt: "Append the home city in parentheses by adding || ' (' || HOME_CITY || ')'.",
+      },
+      postgresql: {
+        query: "SELECT GIVEN_NAME || ' ' || FAMILY_NAME AS \"Observer\" FROM ASTRONOMER;",
+        tryIt: "Append the home city in parentheses by adding || ' (' || HOME_CITY || ')'.",
+      },
+      sqlserver: {
+        query: "SELECT GIVEN_NAME + ' ' + FAMILY_NAME AS [Observer] FROM ASTRONOMER;",
+        tryIt: "Append the home city in parentheses by adding + ' (' + HOME_CITY + ')'.",
+      },
+      oracle: {
+        query: "SELECT GIVEN_NAME || ' ' || FAMILY_NAME AS \"Observer\" FROM ASTRONOMER;",
+        tryIt: "Append the home city in parentheses by adding || ' (' || HOME_CITY || ')'.",
+      },
+    },
   },
   {
     id: 'aggregates',
@@ -94,6 +154,12 @@ export const LESSONS: Lesson[] = [
       'An aggregate turns many input rows into one summary value. Common choices include COUNT, SUM, AVG, MIN and MAX.',
     query: "SELECT SUM(COUNT_SEEN) AS 'Animals Recorded' FROM SIGHTING;",
     tryIt: 'Compare the shallowest and deepest reefs with MIN(DEPTH_M) and MAX(DEPTH_M).',
+    variants: {
+      sqlite: { query: 'SELECT SUM(COUNT_SEEN) AS "Animals Recorded" FROM SIGHTING;' },
+      postgresql: { query: 'SELECT SUM(COUNT_SEEN) AS "Animals Recorded" FROM SIGHTING;' },
+      sqlserver: { query: 'SELECT SUM(COUNT_SEEN) AS [Animals Recorded] FROM SIGHTING;' },
+      oracle: { query: 'SELECT SUM(COUNT_SEEN) AS "Animals Recorded" FROM SIGHTING;' },
+    },
   },
   {
     id: 'is-null',
@@ -201,6 +267,12 @@ export const LESSONS: Lesson[] = [
       'UNION combines same-shaped SELECT results and removes duplicates. UNION ALL keeps repeats, which is useful when their frequency matters.',
     query: "SELECT CITY AS 'Festival City' FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;",
     tryIt: 'Change UNION to UNION ALL and compare the result count. Both branches must return the same number of fields.',
+    variants: {
+      sqlite: { query: 'SELECT CITY AS "Festival City" FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;' },
+      postgresql: { query: 'SELECT CITY AS "Festival City" FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;' },
+      sqlserver: { query: 'SELECT CITY AS [Festival City] FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;' },
+      oracle: { query: 'SELECT CITY AS "Festival City" FROM ATTENDEE\nUNION\nSELECT CITY FROM VENUE;' },
+    },
   },
   {
     id: 'subquery',

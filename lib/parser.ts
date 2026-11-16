@@ -4,7 +4,9 @@ import { Parser } from 'node-sql-parser/build/sqlite';
 import { COMPAT_FUNCTION_NAMES, COMPAT_FUNCTION_NOTES } from './compatFunctions';
 import { DialectError, splitCompound, statementKind, translateQuery, type DialectNote } from './dialect';
 import { maskSql, replaceOutsideLiterals, splitSqlStatements, topLevelMatches, unquoteIdent } from './sqlText';
-import { ORDERED_GROUP_CONCAT_MARKER, prepareOrderedAggregates } from './orderedAggregates';
+import { ORDERED_GROUP_CONCAT_MARKER } from './orderedAggregates';
+import { FILTER_MARKER, prepareParserEncodings, restoreParsedSql, usesReservedMarker } from './parserEncodings';
+import { dialectProfile, type CompatFeature, type SourceDialect } from './queryCompatibility';
 import type { TableMeta } from './schemas';
 
 /** The loaded schema, when the caller shares it, for checks that need keys and columns. */
@@ -100,9 +102,9 @@ export interface MutationAst {
 export type MutationKind = 'insert' | 'update' | 'delete';
 
 export type ParseOutcome =
-  | { ok: true; kind: 'select'; ast: SelectAst; sql: string; notes: DialectNote[] }
-  | { ok: true; kind: 'compound'; branches: SelectAst[]; operators: string[]; sql: string; notes: DialectNote[] }
-  | { ok: true; kind: 'mutation'; statement: MutationKind; table: string; ast: MutationAst | null; sql: string; notes: DialectNote[] }
+  | { ok: true; kind: 'select'; ast: SelectAst; sql: string; notes: DialectNote[]; features: CompatFeature[] }
+  | { ok: true; kind: 'compound'; branches: SelectAst[]; operators: string[]; sql: string; notes: DialectNote[]; features: CompatFeature[] }
+  | { ok: true; kind: 'mutation'; statement: MutationKind; table: string; ast: MutationAst | null; sql: string; notes: DialectNote[]; features: CompatFeature[] }
   | { ok: false; error: string };
 
 const UNSUPPORTED = 'Not supported yet in visual mode.';
@@ -200,7 +202,7 @@ function restoreJoinKinds(ast: SelectAst, kinds: string[]): void {
 }
 
 /** Aggregates the sqlite grammar reads as ordinary function calls. */
-const AGGREGATE_FUNCTION_NAMES = new Set(['GROUP_CONCAT', 'STRING_AGG', 'TOTAL', 'JSON_GROUP_ARRAY', 'JSON_GROUP_OBJECT', ORDERED_GROUP_CONCAT_MARKER]);
+const AGGREGATE_FUNCTION_NAMES = new Set(['GROUP_CONCAT', 'STRING_AGG', 'TOTAL', 'JSON_GROUP_ARRAY', 'JSON_GROUP_OBJECT', ORDERED_GROUP_CONCAT_MARKER, FILTER_MARKER]);
 
 function functionName(obj: Record<string, unknown>): string | null {
   const raw = obj.name as { name?: Array<{ value?: string }> } | string | undefined;
@@ -215,11 +217,17 @@ function isGroupingAggregate(obj: Record<string, unknown>): boolean {
   return obj.type === 'function' && AGGREGATE_FUNCTION_NAMES.has(functionName(obj) ?? '');
 }
 
+/** The encoded `agg(...) FILTER (WHERE ...) OVER (...)`: its inner aggregate node belongs to the window. */
+function isFilteredWindow(obj: Record<string, unknown>): boolean {
+  return obj.type === 'function' && !!obj.over && functionName(obj) === FILTER_MARKER;
+}
+
 export function containsAggregate(node: unknown): boolean {
   if (node === null || typeof node !== 'object') return false;
   if (Array.isArray(node)) return node.some(containsAggregate);
   const obj = node as Record<string, unknown>;
   if (obj.type === 'select') return false;
+  if (isFilteredWindow(obj)) return false;
   if (isGroupingAggregate(obj)) return true;
   return Object.values(obj).some(containsAggregate);
 }
@@ -308,6 +316,17 @@ function findQuotedAlias(node: unknown, aliases: Set<string>): string | null {
 function isOrdinal(expr: AstExpr): number | null {
   if (expr.type !== 'number' || typeof expr.value !== 'number') return null;
   return Number.isInteger(expr.value) ? expr.value : null;
+}
+
+/** True when the expression contains a window call (a function with an OVER clause) at any depth. */
+function hasWindowCall(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if (Array.isArray(node)) return node.some(hasWindowCall);
+  const record = node as Record<string, unknown>;
+  // A subquery is its own scope; a window inside it is evaluated before the outer sort.
+  if (record.ast) return false;
+  if (record.over) return true;
+  return Object.values(record).some(hasWindowCall);
 }
 
 /**
@@ -655,10 +674,17 @@ function functionNotes(node: unknown): DialectNote[] {
 const parser = new Parser();
 
 function astify(sql: string): { ok: true; ast: unknown } | { ok: false; error: string } {
+  let encoded: string;
+  try {
+    encoded = prepareParserEncodings(sql).sql;
+  } catch (error) {
+    if (error instanceof DialectError) return { ok: false, error: error.message };
+    throw error;
+  }
   try {
     // The parser reserves common function names and FULL even when SQLite
     // accepts them as output aliases. Quote just these aliases for parsing.
-    let parserSql = replaceOutsideLiterals(prepareOrderedAggregates(sql), /\bAS(\s+)(COUNT|SUM|AVG|MIN|MAX|FULL)\b/gi,
+    let parserSql = replaceOutsideLiterals(encoded, /\bAS(\s+)(COUNT|SUM|AVG|MIN|MAX|FULL)\b/gi,
       (_original, match) => `AS${match[1]}"${match[2]}"`);
     // GENERATED is an ordinary table name in SQLite/PostgreSQL, but the
     // parser reserves it for column definitions even in table positions.
@@ -671,7 +697,12 @@ function astify(sql: string): { ok: true; ast: unknown } | { ok: false; error: s
   }
 }
 
-function parseSelectText(sql: string, nested: boolean): { ok: true; ast: SelectAst } | { ok: false; error: string } {
+interface SelectParseOptions {
+  /** Give `FROM (SELECT ...)` without an alias the name DERIVED instead of refusing it. */
+  aliasDerived?: boolean;
+}
+
+function parseSelectText(sql: string, nested: boolean, topWithTies?: number, options: SelectParseOptions = {}): { ok: true; ast: SelectAst; features: CompatFeature[] } | { ok: false; error: string } {
   const rewritten = rewriteJoinKeywords(sql);
   const raw = astify(rewritten.sql);
   if (!raw.ok) return raw;
@@ -680,14 +711,190 @@ function parseSelectText(sql: string, nested: boolean): { ok: true; ast: SelectA
     if (node.length !== 1) return { ok: false, error: `${UNSUPPORTED} Run one statement at a time.` };
     node = node[0];
   }
-  const ast = node as SelectAst;
+  let ast = node as SelectAst;
   if (!ast || typeof ast !== 'object' || ast.type !== 'select') {
     return { ok: false, error: `${UNSUPPORTED} Only SELECT queries can be visualized.` };
   }
   restoreJoinKinds(ast, rewritten.kinds);
+  if (options.aliasDerived) aliasDerivedTables(ast);
+  // Coverage reports the learner's constructs, so features are read before the
+  // TOP WITH TIES rewrite adds a derived table and a RANK() window of its own.
+  const features = astFeatures([ast, ...nestedSelects([ast.columns, ast.from?.map((item) => item.expr), ast.where, ast.having]), ...cteItems(ast).map((cte) => cte.stmt.ast)]);
+  if (topWithTies !== undefined) {
+    const ranked = applyTopWithTies(ast, topWithTies);
+    if (!ranked.ok) return ranked;
+    ast = ranked.ast;
+  }
   const validationError = validateSelect(ast, nested);
   if (validationError) return { ok: false, error: validationError };
-  return { ok: true, ast };
+  return { ok: true, ast, features };
+}
+
+const DERIVED_ALIAS = 'DERIVED';
+
+/**
+ * Oracle and SQLite accept a derived table without an alias; the trace needs
+ * a name for it. Every unaliased `FROM (SELECT ...)` in the statement becomes
+ * DERIVED (DERIVED2, ... when that name is already taken in the same FROM).
+ */
+function aliasDerivedTables(node: unknown): void {
+  if (node === null || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    node.forEach(aliasDerivedTables);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'select') {
+    const select = obj as unknown as SelectAst;
+    const taken = new Set((select.from ?? []).map((item) => (item.as ?? item.table ?? '').toLowerCase()));
+    for (const item of select.from ?? []) {
+      if (!item.expr || item.as) continue;
+      let alias = DERIVED_ALIAS;
+      for (let n = 2; taken.has(alias.toLowerCase()); n++) alias = `${DERIVED_ALIAS}${n}`;
+      item.as = alias;
+      taken.add(alias.toLowerCase());
+    }
+  }
+  Object.values(obj).forEach(aliasDerivedTables);
+}
+
+/** Names the TOP WITH TIES rewrite introduces; the trace shows them under friendlier labels. */
+export const TIES_RANK = '__qt_rank';
+export const TIES_SOURCE = '__qt_ties';
+export const TIES_HELPER_PREFIX = '__qt_';
+
+/** Render one expression the way the trace engine prints it, for a stable output column name. */
+function exprText(expr: AstExpr): string {
+  const dummy = { with: null, type: 'select', options: null, distinct: null, columns: [{ expr, as: null }], from: null, where: null, groupby: null, having: null, orderby: null, limit: null };
+  const sql = parser.sqlify(dummy as never, { database: 'sqlite' }).replace(/^SELECT\s+/i, '');
+  return restoreParsedSql(sql);
+}
+
+function columnRef(column: string, table: string | null = null): AstExpr {
+  return { type: 'column_ref', table, column };
+}
+
+/**
+ * SQL Server `TOP n WITH TIES`: keep every row whose rank under the full
+ * ORDER BY is at most n. The SELECT becomes a derived table that adds
+ * RANK() OVER (ORDER BY ...) and an outer SELECT that filters on it and
+ * restores the projection in the original order. RANK (not DENSE_RANK)
+ * matches SQL Server: with scores 100, 90, 90, 80, TOP 3 WITH TIES returns
+ * three rows, not four.
+ */
+function applyTopWithTies(ast: SelectAst, n: number): { ok: true; ast: SelectAst } | { ok: false; error: string } {
+  const reject = (error: string) => ({ ok: false as const, error });
+  if (ast._next) return reject('TOP n WITH TIES on a UNION / INTERSECT / EXCEPT query is not supported. Put the compound query in a subquery and apply TOP to the outer SELECT.');
+  if (!ast.orderby || ast.orderby.length === 0) return reject('TOP n WITH TIES needs an ORDER BY clause: the ties are decided by the sort order.');
+  if (ast.limit) return reject('TOP n WITH TIES cannot be combined with LIMIT or OFFSET.');
+  const columns = typeof ast.columns === 'string' ? null : ast.columns;
+  const userNames = [...(columns ?? []).map((column) => column.as), ...(ast.from ?? []).map((item) => item.as)];
+  if (userNames.some((name) => typeof name === 'string' && name.toLowerCase().startsWith(TIES_HELPER_PREFIX))) {
+    return reject(`Names beginning with ${TIES_HELPER_PREFIX} are reserved by QueryTrace for the TOP n WITH TIES rewrite. Choose another alias.`);
+  }
+  const physical = (ast.from ?? []).filter((item) => item.table && !item.expr);
+  const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+  const innerColumns: SelectColumn[] = [];
+  const outerColumns: SelectColumn[] = [];
+  const usedNames = new Set<string>();
+  let helper = 0;
+  const expandStar = (qualifier: string | null): string | null => {
+    const owners = qualifier
+      ? physical.filter((item) => (item.as ?? item.table ?? '').toLowerCase() === qualifier.toLowerCase())
+      : physical;
+    if (!qualifier && ((ast.from ?? []).length !== 1 || owners.length !== 1)) {
+      return 'TOP n WITH TIES with SELECT * over several tables is not supported. List the columns you want.';
+    }
+    if (owners.length !== 1 || !owners[0].table) return `TOP n WITH TIES: ${qualifier}.* does not name a table in FROM.`;
+    const meta = tableMeta(owners[0].table);
+    if (!meta) return `TOP n WITH TIES: the columns of ${owners[0].table} are not known. List the columns you want.`;
+    for (const column of meta.columns) {
+      usedNames.add(column.name.toLowerCase());
+      outerColumns.push({ expr: columnRef(column.name), as: null });
+    }
+    return null;
+  };
+
+  if (!columns) {
+    const error = expandStar(null);
+    if (error) return reject(error);
+  } else {
+    for (const column of columns) {
+      if (isStarExpr(column.expr)) {
+        innerColumns.push(column);
+        const qualifier = typeof column.expr.table === 'string' ? column.expr.table : null;
+        const error = expandStar(qualifier);
+        if (error) return reject(error);
+        continue;
+      }
+      if (column.as) {
+        innerColumns.push(column);
+        outerColumns.push({ expr: columnRef(column.as), as: null });
+        usedNames.add(column.as.toLowerCase());
+        continue;
+      }
+      const name = column.expr.type === 'column_ref' ? (typeof column.expr.column === 'string' ? column.expr.column : plainName(column.expr.column)) : null;
+      if (name && !usedNames.has(name.toLowerCase())) {
+        innerColumns.push(column);
+        outerColumns.push({ expr: columnRef(name), as: null });
+        usedNames.add(name.toLowerCase());
+        continue;
+      }
+      // An expression (or a repeated column name) gets a helper alias inside
+      // and shows its usual name outside.
+      const alias = `__qt_c${helper++}`;
+      innerColumns.push({ expr: column.expr, as: alias });
+      // The serializer does not double quotes inside an alias, so the display
+      // name drops identifier quotes: points * 2 rather than "points" * 2.
+      outerColumns.push({ expr: columnRef(alias), as: name ?? exprText(column.expr).replace(/"/g, '') });
+    }
+  }
+
+  // The ranking order is the original ORDER BY with output aliases and
+  // positions resolved, because a window ORDER BY cannot name output columns.
+  const byAlias = new Map<string, AstExpr>();
+  for (const column of columns ?? []) if (column.as && !isStarExpr(column.expr)) byAlias.set(column.as.toLowerCase(), column.expr);
+  const rankOrder: OrderByItem[] = [];
+  for (const item of ast.orderby) {
+    const position = isOrdinal(item.expr);
+    let expr: AstExpr;
+    if (position !== null) {
+      if (!columns || columns.some((column) => isStarExpr(column.expr))) return reject('TOP n WITH TIES with ORDER BY a column position needs an explicit SELECT list.');
+      if (position < 1 || position > columns.length) return reject(`ORDER BY ${position} refers to a select-list position, but the SELECT list has ${columns.length} ${columns.length === 1 ? 'item' : 'items'}.`);
+      expr = clone(columns[position - 1].expr);
+    } else if (item.expr.type === 'column_ref' && typeof item.expr.table !== 'string') {
+      const name = typeof item.expr.column === 'string' ? item.expr.column : plainName(item.expr.column);
+      const aliased = name ? byAlias.get(name.toLowerCase()) : undefined;
+      expr = aliased ? clone(aliased) : clone(item.expr);
+    } else {
+      expr = clone(item.expr);
+    }
+    // The ties are found with RANK() OVER (ORDER BY <these keys>), and a window
+    // function cannot be nested inside another window's ORDER BY.
+    if (hasWindowCall(expr)) {
+      return reject('TOP n WITH TIES cannot be ordered by a window function such as RANK() or ROW_NUMBER(). Compute the window value in a derived table first, then order the outer query by its column: SELECT TOP n WITH TIES name, r FROM (SELECT name, RANK() OVER (ORDER BY score DESC) AS r FROM t) AS ranked ORDER BY r.');
+    }
+    rankOrder.push({ expr, type: item.type ?? null });
+  }
+  const rankColumn: SelectColumn = {
+    expr: {
+      type: 'function',
+      name: { name: [{ type: 'default', value: 'RANK' }] },
+      args: { type: 'expr_list', value: [] },
+      over: { partitionby: [{ expr: { type: 'null', value: null }, as: null }], orderby: rankOrder },
+    },
+    as: TIES_RANK,
+  };
+  const inner: SelectAst = { ...ast, with: null, columns: typeof ast.columns === 'string' ? [{ expr: columnRef('*'), as: null }, rankColumn] : [...innerColumns, rankColumn], orderby: null, limit: null };
+  const template = astify(`SELECT 1 FROM (SELECT 1) AS ${TIES_SOURCE} WHERE ${TIES_RANK} <= 0 ORDER BY ${TIES_RANK}`);
+  if (!template.ok) return reject(template.error);
+  const outer = (Array.isArray(template.ast) ? template.ast[0] : template.ast) as SelectAst;
+  outer.with = ast.with ?? null;
+  outer.columns = outerColumns;
+  outer.from![0].expr!.ast = inner;
+  (outer.where as { right: { value: number } }).right.value = n;
+  return { ok: true, ast: outer };
 }
 
 const DML_HEAD = /^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+((?:"[^"]*"|`[^`]*`|\w+)(?:\s*\.\s*(?:"[^"]*"|`[^`]*`|\w+))?)/i;
@@ -708,33 +915,68 @@ function unwrapParens(sql: string): string {
 export interface ParseOptions {
   /** The loaded tables: enables key-aware checks such as GROUP BY on a primary key and JOIN ... USING. */
   schema?: TableMeta[];
+  /** The profile whose lexical rules read the text; defaults to the legacy mixed rules. */
+  dialect?: SourceDialect;
 }
 
 export function parseQuery(input: string, options: ParseOptions = {}): ParseOutcome {
   schemaHint = options.schema ?? null;
   try {
-    return parseQueryInner(input);
+    return parseQueryInner(input, options.dialect);
   } finally {
     schemaHint = null;
   }
 }
 
-function parseQueryInner(input: string): ParseOutcome {
+/** Structural features of a parsed SELECT, for the coverage label. */
+function astFeatures(selects: SelectAst[]): CompatFeature[] {
+  const features = new Set<CompatFeature>();
+  for (const select of selects) {
+    if (cteItems(select).length) features.add('cte');
+    if ((select.from ?? []).some((item) => !!item.expr)) features.add('derived-table');
+    if (select._next) features.add('compound');
+    if (hasNestedSelect(select)) features.add('subquery');
+    if (containsWindowFunction(select.columns)) features.add('window');
+  }
+  return [...features];
+}
+
+function parseQueryInner(input: string, dialect: SourceDialect | undefined): ParseOutcome {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, error: 'Type a query to get started.' };
 
   if (splitSqlStatements(trimmed).length > 1) {
     return { ok: false, error: `${UNSUPPORTED} Run one statement at a time.` };
   }
-
   let translated;
   try {
-    translated = translateQuery(trimmed);
+    translated = translateQuery(trimmed, { dialect });
   } catch (error) {
     if (error instanceof DialectError) return { ok: false, error: error.message };
     throw error;
   }
-  const { sql, notes } = translated;
+  const { sql, notes, topWithTies } = translated;
+  // Checked on the translated text, where every literal has SQLite's quoting:
+  // the raw text would be misread wherever the profile's own rules differ
+  // (a marker name inside a MySQL string that contains \').
+  const reserved = usesReservedMarker(sql);
+  if (reserved) return { ok: false, error: `${reserved} is a name reserved by QueryTrace and cannot appear in a query.` };
+  // MySQL read "name" as text. When that text is a table or column of the
+  // loaded schema the learner almost certainly meant the name: say so.
+  if (translated.quotedStrings.length && schemaHint) {
+    const names = new Set<string>();
+    for (const table of schemaHint) {
+      names.add(table.name.toLowerCase());
+      for (const column of table.columns) names.add(column.name.toLowerCase());
+    }
+    for (const text of translated.quotedStrings) {
+      if (names.has(text.toLowerCase())) {
+        notes.push({ from: `"${text}"`, to: `the text '${text}', not the ${text.toUpperCase()} column or table. Write \`${text}\` (backticks) for the name.` });
+      }
+    }
+  }
+  const features = new Set<CompatFeature>(translated.features);
+  const selectOptions: SelectParseOptions = { aliasDerived: dialectProfile(dialect).unaliasedDerivedTables };
 
   const kind = statementKind(sql);
   if (kind === 'other') {
@@ -780,11 +1022,13 @@ function parseQueryInner(input: string): ParseOutcome {
       // itself validates.
       return raw;
     }
-    return { ok: true, kind: 'mutation', statement: kind, table, ast, sql, notes };
+    if (topWithTies !== undefined) return { ok: false, error: 'TOP n WITH TIES applies to a SELECT query.' };
+    return { ok: true, kind: 'mutation', statement: kind, table, ast, sql, notes, features: [...features] };
   }
 
   const compound = splitCompound(sql);
   if (compound.operators.some((operator) => !operator.startsWith('UNION'))) {
+    if (topWithTies !== undefined) return { ok: false, error: 'TOP n WITH TIES on an INTERSECT / EXCEPT query is not supported. Put the compound query in a subquery and apply TOP to the outer SELECT.' };
     const branches: SelectAst[] = [];
     for (const branch of compound.branches) {
       const text = unwrapParens(branch);
@@ -792,17 +1036,28 @@ function parseQueryInner(input: string): ParseOutcome {
         return { ok: false, error: 'Each side of INTERSECT / EXCEPT must be a complete SELECT.' };
       }
       // ORDER BY / LIMIT after the last branch belong to the whole compound.
-      const parsed = parseSelectText(text, true);
+      const parsed = parseSelectText(text, true, undefined, selectOptions);
       if (!parsed.ok) return parsed;
       branches.push(parsed.ast);
     }
-    return { ok: true, kind: 'compound', branches, operators: compound.operators, sql, notes };
+    features.add('compound');
+    for (const feature of astFeatures(branches)) features.add(feature);
+    return { ok: true, kind: 'compound', branches, operators: compound.operators, sql, notes, features: [...features] };
   }
 
-  const parsed = parseSelectText(sql, false);
+  const parsed = parseSelectText(sql, false, topWithTies, selectOptions);
   if (!parsed.ok) return parsed;
+  // The ranked rewrite lives in the AST; the executable text must say the same thing.
+  const executableSql = topWithTies !== undefined ? selectText(parsed.ast) : sql;
   notes.push(...functionNotes(parsed.ast));
-  return { ok: true, kind: 'select', ast: parsed.ast, sql, notes };
+  for (const feature of parsed.features) features.add(feature);
+  return { ok: true, kind: 'select', ast: parsed.ast, sql: executableSql, notes, features: [...features] };
+}
+
+/** Render a SELECT AST back to executable SQLite text. */
+function selectText(ast: SelectAst): string {
+  const sql = parser.sqlify(ast as never, { database: 'sqlite' });
+  return restoreParsedSql(sql);
 }
 
 /** Normalize the two groupby shapes node-sql-parser emits across versions. */
