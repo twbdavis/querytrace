@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Keep the React runtime and TypeScript types compatible, including major upgrades.
+      react:
+        patterns:
+          - react
+          - react-dom
+          - '@types/react'
+          - '@types/react-dom'
       # Batch routine bumps into one PR; security updates still open immediately.
       minor-and-patch:
         update-types:
