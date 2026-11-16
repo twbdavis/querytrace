@@ -11,6 +11,7 @@ import {
   savePersistedAppState,
 } from '@/lib/persistence';
 import { provenanceFor } from '@/lib/provenance';
+import { normalizeDialect, type QueryCoverage, type SourceDialect } from '@/lib/queryCompatibility';
 import { quoteIdentIfNeeded } from '@/lib/sqlText';
 import type { TraceStep } from '@/lib/traceEngine';
 import { PRELOADED_SCHEMAS, schemaById, type FkEdgeDef, type SchemaDef, type TableMeta } from '@/lib/schemas';
@@ -66,6 +67,10 @@ interface AppState {
   error: string | null;
   /** How the last run's dialect was rewritten for SQLite (empty for plain SQLite). */
   notes: DialectNote[];
+  /** What the current trace explains; null until a query has run. */
+  coverage: QueryCoverage | null;
+  /** The source dialect the editor text is read as; snapshotted when Run is pressed. */
+  queryDialect: SourceDialect;
 
   trace: TraceStep[] | null;
   /** The exact SQL text the current trace was built from. */
@@ -92,6 +97,7 @@ interface AppState {
   loadSchema: (def: SchemaDef, savedBytes?: Uint8Array) => Promise<LoadResult>;
   resumeCustomSchema: () => Promise<LoadResult>;
   setSql: (sql: string) => void;
+  setQueryDialect: (dialect: SourceDialect) => void;
   runQuery: (sql?: string) => Promise<void>;
   play: () => void;
   pause: () => void;
@@ -129,6 +135,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   sql: PRELOADED_SCHEMAS[0].starterQuery,
   error: null,
   notes: [],
+  coverage: null,
+  queryDialect: 'legacy',
 
   trace: null,
   tracedSql: null,
@@ -153,6 +161,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         savedCustomDatabase: persisted.customDatabase ?? null,
         savedCustomRevision: persisted.customRevision,
         customDdlDraft: persisted.customDdlDraft ?? null,
+        queryDialect: normalizeDialect(persisted.queryDialect),
       });
     }
     const startupSchema =
@@ -204,6 +213,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           finished: false,
           error: null,
           notes: [],
+          coverage: null,
           selection: null,
           hoveredRow: null,
           hoveredResultRow: null,
@@ -279,11 +289,34 @@ export const useAppStore = create<AppState>((set, get) => ({
             finished: false,
             error: null,
             notes: [],
+            coverage: null,
             selection: null,
             hoveredRow: null,
             hoveredResultRow: null,
           }
     );
+  },
+
+  setQueryDialect: (dialect) => {
+    const next = normalizeDialect(dialect);
+    if (get().queryDialect === next) return;
+    // Like editing the SQL: the displayed trace was built under other rules.
+    queryRunGeneration++;
+    set({
+      queryDialect: next,
+      trace: null,
+      tracedSql: null,
+      currentStep: 0,
+      playing: false,
+      finished: false,
+      error: null,
+      notes: [],
+      coverage: null,
+      selection: null,
+      hoveredRow: null,
+      hoveredResultRow: null,
+    });
+    void savePersistedAppState({ queryDialect: next });
   },
 
   runQuery: async (sqlArg) => {
@@ -293,6 +326,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const generation = ++queryRunGeneration;
     const sql = sqlArg ?? get().sql;
+    const dialect = get().queryDialect;
     const schemaAtDispatch = get().schemaRevision;
     const isCustom = get().schemaDef.id === 'custom';
     if (!get().dbReady) {
@@ -311,7 +345,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // A conflict recovery can replace the schema ahead of a queued query.
       if (get().schemaRevision !== schemaAtDispatch) return;
       try {
-        const { trace, notes, mutation } = await runQueryInWorker(sql);
+        const { trace, notes, coverage, mutation } = await runQueryInWorker(sql, { dialect });
         const mutationState = mutation ? {
           tableData: mutation.tableData,
           ...(mutation.schema ? { schema: mutation.schema, fkEdges: mutation.fkEdges ?? [] } : {}),
@@ -330,6 +364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({
           trace,
           notes,
+          coverage,
           tracedSql: sql,
           currentStep: 0,
           playing: true,
@@ -348,7 +383,21 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         if (generation !== queryRunGeneration) return;
         const msg = err instanceof Error ? err.message : `Trace failed: ${String(err)}`;
-        set({ error: msg, playing: false });
+        // A failed run must not leave the previous query's trace, coverage label
+        // or highlights on screen next to the new error.
+        set({
+          error: msg,
+          playing: false,
+          trace: null,
+          tracedSql: null,
+          currentStep: 0,
+          finished: false,
+          notes: [],
+          coverage: null,
+          selection: null,
+          hoveredRow: null,
+          hoveredResultRow: null,
+        });
       }
     });
   },
@@ -438,7 +487,7 @@ async function restoreAfterConflict(conflict: PersistenceConflictError, attempte
       savedCustomSchema: current.customSchema, savedCustomDatabase: current.customDatabase,
       savedCustomRevision: current.customRevision,
       customDdlDraft: useAppStore.getState().customDdlDraft ?? attemptedDdl ?? null,
-      trace: null, tracedSql: null, notes: [], currentStep: 0, finished: false,
+      trace: null, tracedSql: null, notes: [], coverage: null, currentStep: 0, finished: false,
       selection: null, hoveredRow: null, hoveredResultRow: null,
       error: `${conflict.message} The latest saved data has been restored. Review it before retrying your query or build.`,
     });

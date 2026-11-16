@@ -76,8 +76,8 @@ export const QUERY_SEQUENCE_REJECTIONS = [
   { name: 'multiple statements are rejected together', sql: 'SELECT code FROM account; DELETE FROM account;', message: /one statement/i },
   {
     name: 'unsupported explicit window frame recovers cleanly',
-    sql: 'SELECT SUM(amount) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM purchase;',
-    message: /window frames.*not supported/i,
+    sql: 'SELECT SUM(amount) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM purchase;',
+    message: /RANGE frames.*not supported/i,
   },
   {
     name: 'failed CREATE does not replace an existing table',

@@ -118,10 +118,17 @@ test('a failed scene download keeps the landing page and tracer links usable', a
       await route.fulfill({ response });
     }
   });
-  await page.goto('/');
-  await expectStaticJoin(page, screenshotRequests);
-  expect(blocked).toBe(true);
-  await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
+  try {
+    await page.goto('/');
+    await expectStaticJoin(page, screenshotRequests);
+    expect(blocked).toBe(true);
+    await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
+  } finally {
+    // Only the landing scene download is under test. Drain active fetch/body
+    // handlers before navigation starts loading the tracer's worker chunks;
+    // otherwise context teardown can dispose their responses mid-handler.
+    await page.unrouteAll({ behavior: 'wait' });
+  }
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
   await expect(page).toHaveURL(/\/trace$/);
   await expect(page.getByLabel('SQL query editor')).toBeVisible();

@@ -1,5 +1,6 @@
 'use client';
 import { useAppStore, useCurrentStep, useHighlight, usePinnedHighlight } from '@/store/useAppStore';
+import { EXPLANATION_LABELS } from '@/lib/queryCompatibility';
 import { ResultTable } from './ResultTable';
 import { StepBackIcon } from './Icons';
 
@@ -13,15 +14,45 @@ export function ResultPanel({ onCollapse }: ResultPanelProps) {
   const pinned = usePinnedHighlight();
   const currentStep = useAppStore((s) => s.currentStep);
   const traceLength = useAppStore((s) => s.trace?.length ?? 0);
+  const coverage = useAppStore((s) => s.coverage);
   const result = step?.partialResult;
   const isFinal = !!step && traceLength > 0 && currentStep === traceLength - 1;
   const interactive = !!step?.resultRowSources;
+  const coverageTitle = coverage
+    ? [
+        coverage.explanation === 'detailed'
+          ? 'Every stage is shown and each result row maps back to its source rows.'
+          : coverage.explanation === 'components'
+            ? 'Component results are shown before the final result; result rows are not traced to source rows.'
+            : 'Only the result is shown for this statement.',
+        ...coverage.limits,
+      ].join(' ')
+    : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center justify-between px-3 pb-1 pt-2 max-sm:px-2.5 max-sm:pt-2.5">
-        <span className="font-ui text-[10px] font-bold uppercase tracking-[0.2em] text-ink-dim">
-          {isFinal ? 'result' : 'intermediate rows'}
+        <span className="flex items-center gap-1.5">
+          <span className="font-ui text-[10px] font-bold uppercase tracking-[0.2em] text-ink-dim">
+            {isFinal ? 'result' : 'intermediate rows'}
+          </span>
+          {/* The live region stays mounted so a label that appears after a run is announced. */}
+          <span role="status" className="contents">
+            {coverage && step && (
+              <span
+                title={coverageTitle}
+                className={`rounded border px-1.5 py-0.5 font-ui text-[9px] font-bold uppercase tracking-[0.12em] ${
+                  coverage.explanation === 'detailed'
+                    ? 'border-accent-result/50 text-accent-result'
+                    : 'border-line text-ink-mute'
+                }`}
+              >
+                <span className="sr-only">Explanation: </span>
+                {EXPLANATION_LABELS[coverage.explanation]}
+                <span className="sr-only">. {coverageTitle}</span>
+              </span>
+            )}
+          </span>
         </span>
         <span className="flex min-h-6 items-center gap-1.5">
           {!!highlight?.resultRows.size && (
@@ -52,6 +83,13 @@ export function ResultPanel({ onCollapse }: ResultPanelProps) {
           <span className="hidden sm:inline">
             Hover a row to light up its source rows in the tables; click to pin the trace.
           </span>
+        </p>
+      )}
+      {!interactive && coverage && step && coverage.explanation !== 'detailed' && isFinal && (
+        <p className="px-3 pb-1 text-[10px] leading-snug text-ink-mute max-sm:px-2.5">
+          {coverage.explanation === 'components'
+            ? 'This result is executed directly by SQLite after its component previews; rows are not traced back to the tables.'
+            : 'This statement shows its result without a row-by-row trace.'}
         </p>
       )}
       {pinned && pinned.resultRows.size === 0 && (

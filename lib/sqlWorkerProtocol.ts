@@ -1,9 +1,9 @@
 import type { SchemaDef } from './schemas';
-import type { LoadedSchema, QueryRun } from './sqlRuntime';
+import type { LoadedSchema, QueryOptions, QueryRun } from './sqlRuntime';
 
 export type SqlWorkerRequest =
   | { id: number; operation: 'loadSchema'; def: SchemaDef; savedBytes?: Uint8Array }
-  | { id: number; operation: 'runQuery'; sql: string };
+  | { id: number; operation: 'runQuery'; sql: string; options?: QueryOptions };
 
 /** Last acknowledged database, used only to recover a terminated worker. */
 export interface SqlWorkerCheckpoint {

@@ -4,12 +4,14 @@ import {
   convertBackslashEscapes,
   convertDoubleQuotedStrings,
   convertEscapeStringLiterals,
+  convertHashComments,
   hasUnterminatedLiteral,
   maskSql,
   matchingParen,
   normalizePastedText,
   operandStart,
   quoteIdent,
+  readDoubleQuotedAsStrings,
   replaceOutsideLiterals,
   splitSqlStatements,
   splitTopLevel,
@@ -19,6 +21,7 @@ import {
 } from './sqlText';
 import { registerCompatFunctions } from './compatFunctions';
 import { translateCasts } from './dialect';
+import { dialectProfile, type SourceDialect } from './queryCompatibility';
 import { SQL_WASM_URL } from './sqlWasmAsset.generated';
 import { accountResultRow, ResourceLimitError, resultBudget } from './resourceLimits';
 
@@ -779,8 +782,32 @@ export interface QueryDdl {
   initializers?: string[];
 }
 
-/** Normalize one supported CREATE from the query editor using the schema-import rules. */
-export function prepareQueryDdl(input: string): QueryDdl {
+/**
+ * Read a CREATE typed in the editor under the active profile before the
+ * schema-import rules see it. Those rules accept every vendor's spelling at
+ * once, which is right for a pasted dump but would let PostgreSQL mode accept
+ * [brackets] and # comments that the same mode refuses in a query.
+ */
+function readDdlAsProfile(input: string, dialect: SourceDialect | undefined): string {
+  const profile = dialectProfile(dialect);
+  if (profile.id === 'legacy') return input;
+  let text = normalizePastedText(input);
+  const backslashes = profile.backslashEscapes === 'always' && text.includes('\\');
+  if (!profile.hashComments && convertHashComments(text) !== text) {
+    throw new SchemaBuildError(`# starts a comment in MySQL and MariaDB, not in ${profile.label}. Write -- for a comment to the end of the line.`);
+  }
+  if (!profile.bracketIdentifiers && /\[[^\]]*\]/.test(maskSql(text, { backslashEscapes: backslashes }))) {
+    throw new SchemaBuildError(`[bracketed] names are SQL Server syntax, not ${profile.label}. Quote the name with double quotes ("name") or write it bare.`);
+  }
+  // MySQL / MariaDB: "text" is a string (DEFAULT "none"), and \' is an escaped quote.
+  if (profile.doubleQuotedStrings) text = readDoubleQuotedAsStrings(text, backslashes).sql;
+  if (backslashes) text = convertBackslashEscapes(text);
+  return text;
+}
+
+/** Normalize one supported CREATE from the query editor: the profile's reading first, then the schema-import rules. */
+export function prepareQueryDdl(rawInput: string, dialect?: SourceDialect): QueryDdl {
+  const input = readDdlAsProfile(rawInput, dialect);
   const statements = splitSqlStatements(normalizePastedText(input));
   if (statements.length !== 1) throw new SchemaBuildError('Run one CREATE statement at a time.');
   const masked = statements[0].masked.trim();

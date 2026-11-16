@@ -1,6 +1,7 @@
 'use client';
 
 import { useAppStore } from '@/store/useAppStore';
+import { DialectMenu } from './DialectMenu';
 import { BookIcon, DatabaseIcon, HelpIcon, RunIcon } from './Icons';
 
 interface TopBarProps {
@@ -16,8 +17,11 @@ export function TopBar({ onOpenSchema, onOpenLessons, onOpenHelp, showRun = fals
   const schemaLoading = useAppStore((state) => state.schemaLoading);
   const runQuery = useAppStore((state) => state.runQuery);
 
-  const chromeBtn =
-    'inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-line-strong px-2.5 py-1 font-ui text-[10px] font-bold tracking-wider text-ink transition-colors hover:border-accent-active hover:text-accent-active disabled:cursor-wait disabled:opacity-40 max-sm:h-9 max-sm:w-9 max-sm:justify-center max-sm:p-0';
+  // Layout shared by every chrome button; the colours are added per button so a
+  // control with its own active state (the mode button) can own them.
+  const chromeBase =
+    'inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 font-ui text-[10px] font-bold tracking-wider transition-colors disabled:cursor-wait disabled:opacity-40 max-sm:h-9 max-sm:justify-center';
+  const chromeBtn = `${chromeBase} border-line-strong text-ink hover:border-accent-active hover:text-accent-active max-sm:w-9 max-sm:p-0`;
 
   return (
     <header className="relative z-40 flex h-10 shrink-0 items-center justify-between border-b border-line bg-app px-3 max-sm:h-12 max-sm:pr-2">
@@ -40,6 +44,7 @@ export function TopBar({ onOpenSchema, onOpenLessons, onOpenHelp, showRun = fals
             RUN
           </button>
         )}
+        <DialectMenu className={`${chromeBase} max-sm:px-2`} />
         <button disabled={!dbReady} onClick={onOpenSchema} className={chromeBtn} aria-label="Open schema settings" title="Schema">
           <DatabaseIcon size={11} />
           <span className="hidden sm:inline">SCHEMA</span>

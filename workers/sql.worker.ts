@@ -23,7 +23,7 @@ self.onmessage = (event: MessageEvent<SqlWorkerRequest>) => {
           checkpoint: { def: currentDef, databaseBytes: result.databaseBytes ?? runtime.exportSnapshot() },
         } satisfies SqlWorkerResponse);
       } else {
-        const result = runtime.runQuery(request.sql);
+        const result = runtime.runQuery(request.sql, request.options);
         completed = true;
         self.postMessage({ id: request.id, ok: true, result,
           ...(result.mutation && currentDef ? { checkpoint: { def: currentDef, databaseBytes: result.mutation.databaseBytes ?? runtime.exportSnapshot() } } : {}),

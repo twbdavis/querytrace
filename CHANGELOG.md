@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Require 15 distinct successful queries per selectable SQL mode in `npm run test:release` and the production-browser suite, with exact expected rows and separate syntax-error checks.
+- Fix computed PostgreSQL date arithmetic, SQL Server LEN whitespace handling and CHARINDEX starting-position semantics, and Oracle DECODE matching of expression-valued NULLs. Keep native PostgreSQL comparisons and targeted boundary regressions for the fixes.
+- Update Next.js to 16.4.6 and require a clean dependency audit before release.
+- Drain homepage fault-injection network handlers before navigation so browser test teardown cannot dispose an active response.
+- Split the long dialect browser test into focused persistence, case-comparison and Unicode-restoration scenarios while keeping every transition assertion and the existing timeout.
+- Add query dialect modes (Any SQL, SQLite, MySQL, MariaDB, PostgreSQL, SQL Server, Oracle) chosen from a MODE button in the top bar and mirrored by the lessons dialog, which can show every lesson in each database's own spelling.
+- Trace aggregate FILTER, named windows, ROWS frames and SQL Server TOP n WITH TIES exactly; label each result Full trace, Component previews or Result only.
+- Read MySQL / MariaDB "text" as a string, backslash LIKE escapes, PostgreSQL ::type casts in date arithmetic, DECIMAL(p, s) and VARCHAR(n) casts, Oracle TRUNC(date) and unaliased derived tables, and TOP inside subqueries the way their engines do; refuse TOP mixed with LIMIT.
+- Return what the chosen database would return where meanings differ: LIKE compares letter case under PostgreSQL and Oracle (ILIKE still ignores it), `||` is OR and GROUP_CONCAT(a, b) joins both values under MySQL and MariaDB, and GREATEST / LEAST skip NULL under PostgreSQL and SQL Server. Each shows a note beside the result.
+- Ignore letter case in every alphabet for LIKE under MySQL, MariaDB and SQL Server, and for LOWER, UPPER and ILIKE in every database mode, so 'École' matches 'é%'. A schema with an index built on LIKE keeps SQLite's LIKE and says so.
+- Read a CREATE typed in the editor under the chosen mode, keep private-use characters in query text intact, stop refusing a reserved name that only appears inside a MySQL string, and translate queries near the 20,000 character limit in under a quarter of a second without stopping part-way.
+- Check PostgreSQL mode against a real PostgreSQL (npm run test:postgres): 125 queries from the tour, lessons, release acceptance and regression fixtures return the same rows from both.
+- Accept columns named rows, range or groups inside OVER (...), and replace raw SQLite errors for TOP n WITH TIES ordered by a window function and for Oracle ROWNUM in DELETE or UPDATE with a message that names the spelling to use.
+- Add the dialect tour (npm run test:tour) and the goal scoreboard (npm run goals) to the release checks, and a browser spec for the mode button, its saved choice and the lessons toggle (tests/dialect-mode.spec.ts).
 - Remove unused runtime helpers, obsolete landing screenshot tools, and unused UI/style branches; reject unused TypeScript locals and parameters during release checks.
 - Restore original lesson rows even when an earlier write is still pending, and prevent a delayed Resume request from overriding a later lesson or schema choice.
 - Remove the vulnerable development dependency chain by moving to Tailwind 4, preserve the existing theme, and require a clean audit of all dependencies without exceptions. Supported browsers are Chrome/Edge 111+, Firefox 128+, and Safari 16.4+.

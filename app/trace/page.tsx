@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { useAppStore } from '@/store/useAppStore';
 import { useMediaQuery } from '@/lib/useMediaQuery';
 import { usePanelLayout } from '@/lib/usePanelLayout';
-import { LESSONS } from '@/lib/lessons';
+import { LESSONS, lessonForDialect } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
 import { TopBar } from '@/components/TopBar';
 import { PlaybackDock } from '@/components/PlaybackDock';
@@ -150,9 +150,11 @@ export default function Home() {
     void (async () => {
       const res = await loadSchema(def);
       if (!res.ok) return;
-      setSql(lesson.query);
+      // The deep link shows the lesson the way the saved mode spells it.
+      const { query } = lessonForDialect(lesson, useAppStore.getState().queryDialect);
+      setSql(query);
       await markLessonRun(lesson.id);
-      void runQuery(lesson.query);
+      void runQuery(query);
     })();
   }, [dbReady, loadSchema, setSql, runQuery, markLessonRun]);
 

@@ -3,10 +3,11 @@ import { emptyRecord, ownValue } from './records';
 import { Parser } from 'node-sql-parser/build/sqlite';
 import type { Statement } from 'sql.js';
 import { queryAll } from './db';
-import { restoreOrderedAggregates } from './orderedAggregates';
+import { restoreParsedSql } from './parserEncodings';
 import type { AstExpr, FromItem, MutationAst, ParseOutcome, SelectAst } from './parser';
-import { cteItems, cteNames, containsAggregate, groupByExprs, hasNestedSelect, queryTableNames } from './parser';
-import { tidyIntegerCasts, tidyWindowSql, type DialectNote } from './dialect';
+import { cteItems, cteNames, containsAggregate, groupByExprs, hasNestedSelect, queryTableNames, TIES_HELPER_PREFIX, TIES_RANK, TIES_SOURCE } from './parser';
+import { tidyIntegerCasts, type DialectNote } from './dialect';
+import type { ExplanationLevel } from './queryCompatibility';
 import { rewriteDateArithmeticInSelect } from './dateArithmetic';
 import type { TableMeta } from './schemas';
 import { maskSql, quoteIdent, stripComments, topLevelMatches } from './sqlText';
@@ -85,6 +86,19 @@ export interface StatementTrace {
   mutation?: MutationResult;
   /** Rewrites the engine made with the schema's help (date column arithmetic), for the notes panel. */
   notes?: DialectNote[];
+  /** How much of the statement the stages explain; the result panel labels the trace with it. */
+  explanation: ExplanationLevel;
+}
+
+/**
+ * The explanation a SELECT receives, decided by the same shape test that
+ * chooses its trace path: only a single SELECT over physical tables gets the
+ * row-provenance trace.
+ */
+export function explanationFor(ast: SelectAst): ExplanationLevel {
+  if (!ast.from || ast.from.length === 0) return ast._next ? 'components' : 'result-only';
+  const hasDerivedTable = ast.from.some((item) => !!item.expr);
+  return ast._next || hasDerivedTable || cteItems(ast).length ? 'components' : 'detailed';
 }
 
 export interface TraceOptions {
@@ -122,12 +136,14 @@ function exprSql(expr: AstExpr): string {
     limit: null,
   };
   const sql = sqlifyParser.sqlify(dummy as never, SQLIFY_OPT);
-  return restoreOrderedAggregates(tidyWindowSql(sql.replace(/^SELECT\s+/i, '')));
+  return restoreParsedSql(sql.replace(/^SELECT\s+/i, ''));
 }
 
 /** Render a whole SELECT (with any CTEs) back to SQLite text. */
 function selectSql(ast: SelectAst): string {
-  return restoreOrderedAggregates(tidyWindowSql(sqlifyParser.sqlify(ast as never, SQLIFY_OPT)));
+  // Frames are restored before the parser-only partition is hidden, since the
+  // marker sits in that partition list; the second pass is a no-op otherwise.
+  return restoreParsedSql(sqlifyParser.sqlify(ast as never, SQLIFY_OPT));
 }
 
 /** Collect every column_ref in an expression tree. Table is alias-or-null here. */
@@ -533,10 +549,28 @@ function buildSubqueryPrelude(ast: SelectAst, db: SqlExec, schema: TableMeta[]):
     } catch {
       correlated = true;
     }
+    // The TOP n WITH TIES rewrite ranks the rows in a derived table the learner
+    // never wrote; present it as the ranking step it is, under the names they used.
+    const ties = (ast.from ?? []).some((item) => item.as === TIES_SOURCE && item.expr?.ast === child);
+    if (ties && partialResult) {
+      const outer = typeof ast.columns === 'string' ? [] : ast.columns;
+      const shown = (name: string) => {
+        if (name === TIES_RANK) return 'rank';
+        if (!name.startsWith(TIES_HELPER_PREFIX)) return name;
+        const column = outer.find((item) => item.expr.type === 'column_ref' && item.expr.column === name);
+        return column?.as ?? name;
+      };
+      partialResult = { ...partialResult, columns: partialResult.columns.map(shown) };
+    }
+    const tiesLimit = ties ? (ast.where as { right?: { value?: number } } | null)?.right?.value : undefined;
     return {
       stage: 'subquery' as const,
-      label: `${correlated ? 'CORRELATED ' : ''}SUBQUERY ${index + 1}${partialResult ? ` - ${rowCountLabel(partialResult.rows.length)}` : ''}`,
-      narration: correlated
+      label: ties
+        ? `RANKED FOR TOP ${tiesLimit ?? ''} WITH TIES${partialResult ? ` - ${rowCountLabel(partialResult.rows.length)}` : ''}`
+        : `${correlated ? 'CORRELATED ' : ''}SUBQUERY ${index + 1}${partialResult ? ` - ${rowCountLabel(partialResult.rows.length)}` : ''}`,
+      narration: ties
+        ? `Every row is numbered by the ORDER BY with RANK(), before any row is dropped. The final stage keeps the rows whose rank is at most ${tiesLimit ?? 'n'}, so rows tied with the last place stay.`
+        : correlated
         ? 'This correlated subquery is evaluated once for each candidate row from the outer query because it refers to an outer-table value.'
         : 'SQLite evaluates this inner SELECT first. Its result is then supplied to the surrounding query as a value, list, or derived table.',
       activeTables,
@@ -1008,7 +1042,7 @@ function buildMutationTrace(
     queryRange: { start: 0, end: originalSql.length },
   });
 
-  return { steps, mutation: { tableData: after, changedTables } };
+  return { steps, mutation: { tableData: after, changedTables }, explanation: 'detailed' };
 }
 
 /**
@@ -1064,10 +1098,10 @@ function traceStatementRaw(
     const sql = notes.length
       ? branches.map((branch, index) => `${index ? `${parsed.operators[index - 1]} ` : ''}${selectSql(branch)}`).join(' ')
       : parsed.sql;
-    return { steps: buildCompoundTrace(branches, parsed.operators, sql, db, schema), notes };
+    return { steps: buildCompoundTrace(branches, parsed.operators, sql, db, schema), notes, explanation: 'components' };
   }
   const ast = rewriteDateArithmeticInSelect(parsed.ast, schema, notes);
-  return { steps: buildTrace(ast, db, schema), notes };
+  return { steps: buildTrace(ast, db, schema), notes, explanation: explanationFor(ast) };
 }
 
 interface Scope {

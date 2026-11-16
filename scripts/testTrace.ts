@@ -940,7 +940,10 @@ async function main() {
     assert(notesOf('SELECT TOP 3 ROUTE_NAME FROM FERRY_ROUTE').includes('TOP 3'), 'TOP is explained in a note');
     assert(rows('transit', 'SELECT ROUTE_NAME FROM FERRY_ROUTE ORDER BY FARE OFFSET 8 ROWS FETCH NEXT 5 ROWS ONLY').length === 2, 'OFFSET ... FETCH NEXT becomes LIMIT ... OFFSET');
     assert(rows('transit', 'SELECT ROUTE_NAME FROM FERRY_ROUTE WHERE ROWNUM <= 4').length === 4, 'Oracle ROWNUM <= n becomes LIMIT n');
-    assert(rows('transit', "SELECT ROUTE_NAME FROM FERRY_ROUTE WHERE TERMINAL_ZONE = 'Central' AND ROWNUM < 3 ORDER BY FARE").length === 2, 'trailing AND ROWNUM < n becomes LIMIT n - 1');
+    assert(rows('transit', "SELECT ROUTE_NAME FROM FERRY_ROUTE WHERE TERMINAL_ZONE = 'Central' AND ROWNUM < 3").length === 2, 'trailing AND ROWNUM < n becomes LIMIT n - 1');
+    // Oracle numbers rows before ORDER BY sorts them: the same-scope form is not the sorted top n.
+    expectError('transit', "SELECT ROUTE_NAME FROM FERRY_ROUTE WHERE TERMINAL_ZONE = 'Central' AND ROWNUM < 3 ORDER BY FARE", /ROWNUM is applied before ORDER BY/, 'ROWNUM beside a same-scope ORDER BY is refused with the nested form');
+    assert(rows('transit', "SELECT * FROM (SELECT ROUTE_NAME FROM FERRY_ROUTE WHERE TERMINAL_ZONE = 'Central' ORDER BY FARE) T WHERE ROWNUM < 3").length === 2, 'the nested ROWNUM form is the sorted top n');
     const { assignQueryRanges: assignRanges } = await import('../lib/clauseRanges');
     const topSql = 'SELECT TOP 2 ROUTE_NAME FROM FERRY_ROUTE';
     const topSteps = run('transit', topSql);
@@ -1040,7 +1043,14 @@ async function main() {
     assert(!final.label.includes('PARTITION BY NULL') && final.label.includes('OVER ()'), `the parser-only partition is hidden from labels (got "${final.label}")`);
     assert(final.resultRowSources?.[0]?.SIGHTING.length === 1, 'window rows keep single-row provenance');
     expectError('marine', 'SELECT COMMON_NAME FROM SPECIES WHERE ROW_NUMBER() OVER (ORDER BY COMMON_NAME) <= 3', /Window functions cannot be used in WHERE/, 'window functions in WHERE are explained');
-    expectError('marine', 'SELECT SUM(COUNT_SEEN) OVER (ORDER BY SIGHTING_ID ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM SIGHTING', /Window frames/, 'window frames are explained');
+    expectError('marine', 'SELECT SUM(COUNT_SEEN) OVER (ORDER BY SIGHTING_ID RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM SIGHTING', /RANGE frames/, 'RANGE window frames are explained');
+    {
+      const framed = run('marine', 'SELECT SIGHTING_ID, SUM(COUNT_SEEN) OVER (ORDER BY SIGHTING_ID ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM SIGHTING ORDER BY SIGHTING_ID');
+      const framedRows = framed.at(-1)!.partialResult!.rows;
+      const expectedRunning = rows('marine', 'SELECT COUNT_SEEN FROM SIGHTING ORDER BY SIGHTING_ID').reduce<number[]>((acc, row) => [...acc, (acc.at(-1) ?? 0) + Number(row[0])], []);
+      assert(JSON.stringify(framedRows.map((row) => row[1])) === JSON.stringify(expectedRunning), `ROWS frames compute the running total (got ${JSON.stringify(framedRows.map((row) => row[1]))})`);
+      assert(!framed.some((step) => /QT_FRAME|PARTITION BY NULL/.test(step.label + step.narration + step.partialResult?.columns.join(' '))), 'frame markers never reach labels or column names');
+    }
 
     const cased = rows('transit', "SELECT ROUTE_NAME, CASE WHEN FARE < 6 THEN 'budget' WHEN FARE < 12 THEN 'standard' ELSE 'premium' END AS tier, CASE NIGHT_SERVICE WHEN 1 THEN 'yes' ELSE 'no' END FROM FERRY_ROUTE ORDER BY CASE WHEN FARE < 6 THEN 0 ELSE 1 END, ROUTE_NAME");
     assert(cased[0][0] === 'Marsh Shuttle' && cased[0][1] === 'budget' && cased[0][2] === 'no', 'searched and simple CASE work in SELECT and ORDER BY');

@@ -8,15 +8,28 @@ export interface CharRange {
 interface Token {
   text: string;
   start: number;
+  /** Parenthesis depth: clause keywords inside FILTER (WHERE ...), OVER (...) or a subquery are not the outer clauses. */
+  depth: number;
 }
 
 /** Word tokens outside strings, quoted identifiers and comments. */
 function tokenize(sql: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
+  let depth = 0;
   const n = sql.length;
   while (i < n) {
     const ch = sql[i];
+    if (ch === '(') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
     if (ch === "'" || ch === '"' || ch === '`') {
       const quote = ch;
       i++;
@@ -44,7 +57,7 @@ function tokenize(sql: string): Token[] {
     if (/[A-Za-z_]/.test(ch)) {
       const start = i;
       while (i < n && /[A-Za-z0-9_]/.test(sql[i])) i++;
-      tokens.push({ text: sql.slice(start, i).toUpperCase(), start });
+      tokens.push({ text: sql.slice(start, i).toUpperCase(), start, depth });
       continue;
     }
     i++;
@@ -67,7 +80,9 @@ export interface ClauseRanges {
  * original text, so trace steps can light up the SQL they are executing.
  */
 export function computeClauseRanges(sql: string): ClauseRanges {
-  const tokens = tokenize(sql);
+  // Only depth-0 keywords are the statement's own clauses. A leading WITH
+  // clause keeps its CTE bodies in parentheses, so this holds for CTE queries too.
+  const tokens = tokenize(sql).filter((t) => t.depth === 0);
   const at = (kw: string) => tokens.find((t) => t.text === kw)?.start;
 
   const selectStart = at('SELECT');

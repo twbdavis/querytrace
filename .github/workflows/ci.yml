@@ -15,7 +15,9 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The four-browser matrix now also executes 105 SQL acceptance queries per
+    # profile. Keep the single worker and allow the expanded release gate to finish.
+    timeout-minutes: 60
     env:
       CI: true
       NEXT_TELEMETRY_DISABLED: 1

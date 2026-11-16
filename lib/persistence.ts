@@ -1,5 +1,6 @@
 'use client';
 
+import { normalizeDialect, type SourceDialect } from './queryCompatibility';
 import type { SchemaDef } from './schemas';
 
 const DATABASE_NAME = 'querytrace';
@@ -18,6 +19,12 @@ export interface PersistedAppState {
   /** Unbuilt schema SQL the user was still editing, so a failed attempt is never lost. */
   customDdlDraft?: string;
   ranLessons: Record<string, boolean>;
+  /**
+   * The editor's source dialect. Optional so that saved states written before
+   * it existed load unchanged: adding it does not bump STATE_VERSION, which
+   * would discard lesson progress as an older curriculum.
+   */
+  queryDialect?: SourceDialect;
 }
 
 let openPromise: Promise<IDBDatabase> | null = null;
@@ -33,7 +40,7 @@ export class PersistenceConflictError extends Error {
 
 export type PersistedStatePatch = Partial<Omit<PersistedAppState, 'version' | 'customRevision'>>;
 
-function normalizeState(value: unknown): PersistedAppState | null {
+export function normalizeState(value: unknown): PersistedAppState | null {
   if (!value || typeof value !== 'object') return null;
   const saved = value as Omit<Partial<PersistedAppState>, 'version'> & { version?: number };
   if (![1, 2, STATE_VERSION].includes(saved.version ?? -1) || typeof saved.lastSchemaId !== 'string') return null;
@@ -51,6 +58,7 @@ function normalizeState(value: unknown): PersistedAppState | null {
     customDatabase: normalizeBytes(saved.customDatabase),
     customDdlDraft: typeof saved.customDdlDraft === 'string' ? saved.customDdlDraft : undefined,
     ranLessons: currentCurriculum ? ranLessons : {},
+    queryDialect: normalizeDialect(saved.queryDialect),
   };
 }
 
