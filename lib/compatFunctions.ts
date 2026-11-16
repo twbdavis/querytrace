@@ -423,14 +423,14 @@ export const COMPAT_FUNCTION_NOTES: Record<string, string> = {
   QT_DOW: 'EXTRACT(DOW FROM d) is PostgreSQL; SQLite uses STRFTIME(\'%w\', d).',
   QT_ISOYEAR: 'EXTRACT(ISOYEAR FROM d) returns the ISO week-numbering year.',
   QT_BOOLEAN: 'CAST(x AS BOOLEAN) converts PostgreSQL boolean input to 1, 0 or NULL.',
-  LEN: 'LEN(s) is SQL Server; SQLite spells it LENGTH(s).',
+  LEN: 'LEN(s) is SQL Server; it counts characters after excluding trailing spaces.',
   LCASE: 'LCASE(s) is MySQL; SQLite spells it LOWER(s).',
   UCASE: 'UCASE(s) is MySQL; SQLite spells it UPPER(s).',
   LEFT: 'LEFT(s, n) is MySQL / SQL Server; SQLite spells it SUBSTR(s, 1, n).',
   RIGHT: 'RIGHT(s, n) is MySQL / SQL Server; SQLite spells it SUBSTR(s, -n).',
   MID: 'MID(s, start, len) is MySQL; SQLite spells it SUBSTR(s, start, len).',
   LOCATE: 'LOCATE(needle, s) is MySQL; SQLite spells it INSTR(s, needle) with the arguments swapped.',
-  CHARINDEX: 'CHARINDEX(needle, s) is SQL Server; SQLite spells it INSTR(s, needle).',
+  CHARINDEX: 'CHARINDEX(needle, s[, start]) is SQL Server; it searches from a one-based character position (1 when omitted).',
   LPAD: 'LPAD is MySQL / Oracle; SQLite has no padding function (use PRINTF or SUBSTR).',
   RPAD: 'RPAD is MySQL / Oracle; SQLite has no padding function.',
   REPEAT: 'REPEAT(s, n) is MySQL; SQLite has no direct equivalent.',
@@ -602,7 +602,7 @@ export function registerCompatFunctions(db: FunctionHost): void {
     const p = parseWithFormat(s, f);
     return p === null ? null : formatLike(p);
   });
-  define('DATE_TRUNC', (unit: Value, value: Value) => {
+  const dateTrunc = (unit: Value, value: Value): string | null => {
     const p = parts(value);
     const u = unitOf(unit);
     if (p === null || u === null) return null;
@@ -620,7 +620,8 @@ export function registerCompatFunctions(db: FunctionHost): void {
       case 'minute': return formatDateTime({ ...t, S: 0 });
       default: return formatDateTime(t);
     }
-  });
+  };
+  define('DATE_TRUNC', dateTrunc);
 
   // --- Date arithmetic ----------------------------------------------------------
   const add = (sign: 1 | -1) => (value: Value, n: Value, unit: Value) => {
@@ -682,7 +683,8 @@ export function registerCompatFunctions(db: FunctionHost): void {
     });
   define('LEN', (value: Value) => {
     const s = text(value);
-    return s === null ? null : Array.from(s.replace(/\s+$/, '')).length;
+    // SQL Server drops U+0020 spaces, not tabs, newlines or other whitespace.
+    return s === null ? null : Array.from(s.replace(/ +$/, '')).length;
   });
   const characterLength = (value: Value) => {
     const s = text(value);
@@ -726,13 +728,27 @@ export function registerCompatFunctions(db: FunctionHost): void {
     const index = suffix.indexOf(n);
     return index === -1 ? 0 : start + Array.from(suffix.slice(0, index)).length + 1;
   });
-  define('CHARINDEX', (needle: Value, haystack: Value) => {
+  define('CHARINDEX', (needle: Value, haystack: Value, position: Value) => {
     const n = text(needle);
     const h = text(haystack);
-    if (n === null || h === null) return null;
-    const lowered = h.toLowerCase();
+    const from = num(position);
+    if (n === null || h === null || from === null) return null;
+    if (!n.length) return 0;
+    const start = Math.max(0, Math.trunc(from) - 1);
+    const characters = Array.from(h);
+    if (start > characters.length) return 0;
+    const suffix = characters.slice(start);
+    const lowered = suffix.join('').toLowerCase();
     const index = lowered.indexOf(n.toLowerCase());
-    return index === -1 ? 0 : Array.from(lowered.slice(0, index)).length + 1;
+    if (index === -1) return 0;
+    // Lowercasing can expand a character (İ becomes i + combining dot).
+    // Search the folded text, but report the position in the original text.
+    let foldedOffset = 0;
+    for (let originalOffset = 0; originalOffset < suffix.length; originalOffset++) {
+      foldedOffset += suffix[originalOffset].toLowerCase().length;
+      if (index < foldedOffset) return start + originalOffset + 1;
+    }
+    return 0;
   });
   const padWith = (side: 'left' | 'right') => (value: Value, length: Value, fill: Value) => {
     const s = text(value);
@@ -834,7 +850,25 @@ export function registerCompatFunctions(db: FunctionHost): void {
     const factor = 10 ** Math.trunc(d);
     return Math.trunc(x * factor) / factor;
   });
+  // Oracle TRUNC(date) drops the time of day; TRUNC(date, 'MM') truncates to a unit.
+  const ORACLE_TRUNC_UNITS: Record<string, string> = {
+    YYYY: 'year', YEAR: 'year', YY: 'year', Y: 'year', SYYYY: 'year',
+    Q: 'quarter',
+    MM: 'month', MONTH: 'month', MON: 'month', RM: 'month',
+    WW: 'week', IW: 'week', W: 'week',
+    DD: 'day', DDD: 'day', J: 'day', DAY: 'day', DY: 'day', D: 'day',
+    HH: 'hour', HH12: 'hour', HH24: 'hour',
+    MI: 'minute',
+  };
   define('TRUNC', (a: Value, digits: Value) => {
+    if (typeof a === 'string' && parts(a) !== null && !/^-?\d+(?:\.\d+)?$/.test(a.trim())) {
+      const unit = typeof digits === 'string' ? ORACLE_TRUNC_UNITS[digits.trim().toUpperCase()] : 'day';
+      if (!unit) return null;
+      const truncated = dateTrunc(unit, a);
+      if (truncated === null) return null;
+      const result = parts(truncated);
+      return result === null ? null : unit === 'hour' || unit === 'minute' ? truncated : formatDate(result);
+    }
     const x = num(a);
     const d = num(digits);
     if (x === null || d === null) return null;

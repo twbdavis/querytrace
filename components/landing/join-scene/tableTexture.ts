@@ -24,7 +24,7 @@ export interface ColumnHighlight {
 }
 
 export interface TableLayout {
-  /** Canvas size in CSS pixels (the bitmap is drawn at `SCALE` times this). */
+  /** Canvas size in CSS pixels (the bitmap is drawn at `textureScale()` times this). */
   width: number;
   height: number;
   /** Top of the first data row, in CSS pixels. */
@@ -35,7 +35,17 @@ export interface TableLayout {
   keyColumn: number;
 }
 
-const SCALE = 2;
+/**
+ * Bitmap pixels per CSS pixel of layout. The slabs show one layout pixel at
+ * roughly one CSS pixel (the camera frames the tables to fit), and the camera
+ * then comes up to 10% closer, so the bitmap has to carry at least the device
+ * pixel ratio with headroom or the text is magnified and goes soft. Capped so
+ * a 4x display does not cost 16x the texture memory.
+ */
+function textureScale(): number {
+  const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+  return Math.min(4, Math.max(2, Math.ceil(dpr * 1.5)));
+}
 const PAD = 4; // body inset (px-1 py-0.5)
 const CELL_PAD = 6; // px-1.5
 const FIRST_COL_INSET = 14; // room for the row's left bar (pl-5 vs px-1.5)
@@ -113,11 +123,12 @@ function pill(ctx: CanvasRenderingContext2D, label: string, x: number, cy: numbe
 export function drawTable(spec: TableSpec, layout: TableLayout, fonts: Fonts, highlight: ColumnHighlight | null): CanvasTexture {
   const active = highlight !== null;
   const canvas = document.createElement('canvas');
-  canvas.width = layout.width * SCALE;
-  canvas.height = layout.height * SCALE;
+  const scale = textureScale();
+  canvas.width = layout.width * scale;
+  canvas.height = layout.height * scale;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('2D canvas unavailable');
-  ctx.scale(SCALE, SCALE);
+  ctx.scale(scale, scale);
   const { width, height, bodyTop, rowHeight, columns } = layout;
   const pkIndices = new Set(spec.columns.map((c, i) => (c.pk ? i : -1)).filter((i) => i >= 0));
 

@@ -16,6 +16,18 @@ npx playwright install
 npm run test:browsers
 ```
 
+For the final dialect acceptance gate, run `npm run test:release` (also included
+in `npm run check`). It requires exactly 15 distinct successful queries with
+explicit expected rows for every selectable mode: Any SQL, SQLite, MySQL,
+MariaDB, PostgreSQL, SQL Server and Oracle. Malformed SQL, unsupported syntax,
+and additional bug regressions are checked separately and cannot fill that quota.
+`tests/release-acceptance.spec.ts` runs the same 105 queries through the mode
+selector, editor and worker in each browser profile, after checking recovery
+from a syntax error. See [the November 10 release validation](release-validation-2026-11-10.md)
+for fixes, results and the remaining compatibility boundaries.
+CI keeps one browser worker and allows 60 minutes for the expanded release job,
+including dependency installation, the runtime checks, build and all four profiles.
+
 The check command rejects unused TypeScript locals and parameters, and generates Next.js declarations before TypeScript checks, so it also works
 on a clean checkout without `next-env.d.ts` or `.next`. It then runs tracing tests, key-route and schema-layout tests, the
 trace-engine fuzz battery, dialect regressions, the consecutive-query acceptance
@@ -28,7 +40,27 @@ table with an aggregate INSERT SELECT, and verifies a multirow PostgreSQL upsert
 with RETURNING. A separate restoration check proves the saved schema, foreign
 key, unique index, and data survive persistence. The same sequence runs through
 the browser worker in `tests/query-sequence.spec.ts`, followed by a browser reload
-and readback of the created table.
+and readback of the created table. `tests/dialect-mode.spec.ts` covers the query mode
+end to end: the top-bar button changes how the worker reads the same text, the choice
+survives a reload, the lessons toggle sets the same field, and the menu fits a phone
+screen and works from the keyboard.
+Run `npm run test:compat` for the compatibility fixtures of
+[compatibility-review.md](compatibility-review.md): aggregate `FILTER`, named windows,
+`ROWS` frames, `TOP n WITH TIES` boundary ties, Oracle `ROWNUM` narrowing, dialect
+profiles that change interpretation, coverage labels, parser-encoding round trips,
+scope-aware clause highlighting, saved-state migration and every lesson under every
+profile. `npm run test:tour` is the dialect tour (`scripts/dialectCases/tour.ts`): ten to
+thirty idiomatic queries per profile (MySQL, MariaDB, PostgreSQL, SQL Server, Oracle,
+SQLite) over the preloaded datasets, each checked against hand-computed rows and, where
+one exists, a plain SQLite spelling that must return the same rows, ending with the
+refusals that profile must give. `npm run test:postgres` runs every PostgreSQL-mode query
+of the tour, every lesson in its PostgreSQL spelling and the FILTER / frame / named-window
+/ text fixtures on a real PostgreSQL as well (PGlite, PostgreSQL compiled to WebAssembly, a
+dev dependency) and requires the same rows from both; a query PostgreSQL refuses fails the
+run unless `NOT_COMPARABLE` lists it with a reason. `npm run test:speed` repeats each
+construct the translator rewrites up to the 20,000 character limit and requires a quick,
+complete translation. `npm run goals` runs each goal criterion of that review
+and prints a scoreboard (`--release` adds the full check with the production build).
 Run `npm run test:schema` for CREATE rollback and capacity checks, generated columns,
 composite foreign-key metadata, deferred-constraint failures, accurate UPDATE traces,
 and persistence of new structures and constraints.

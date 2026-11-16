@@ -12,7 +12,7 @@ const pg: Case[] = [
   { sql: 'SELECT c.name, COUNT(*) AS n FROM category c, product p WHERE c.id = p.category_id GROUP BY c.name HAVING COUNT(*) = 2 ORDER BY 1', rows: [['Garden', 2], ['Tools', 2]], ordered: true },
   { sql: 'SELECT name, price, NTILE(2) OVER (ORDER BY price) AS half FROM product ORDER BY price', rows: [['Trowel', 7.25, 1], ['Hammer', 12.5, 1], ['Saw', 24, 2], ['Hose', 30, 2]], ordered: true },
   { sql: "SELECT name FROM product WHERE added_on >= '2025-02-01' AND added_on < '2025-04-01' ORDER BY added_on DESC", rows: [['Trowel'], ['Saw']], ordered: true },
-  { sql: 'SELECT COUNT(*) FILTER (WHERE in_stock) AS n FROM product', reject: /FILTER/ },
+  { sql: 'SELECT COUNT(*) FILTER (WHERE in_stock) AS n FROM product', rows: [[3]], columns: ['n'], note: 'Aggregate FILTER runs natively in SQLite' },
   { sql: 'SELECT name FROM product WHERE category_id = ALL (SELECT id FROM category WHERE id = 1)', reject: /ALL/ },
   { sql: "SELECT 'x' AS a, 1 AS b UNION ALL SELECT 'y', 2", rows: [['x', 1], ['y', 2]] },
   { sql: 'SELECT name FROM product WHERE price > (SELECT AVG(price) FROM product WHERE category_id = product.category_id) ORDER BY 1', rows: [['Hose'], ['Saw']], ordered: true },

@@ -428,9 +428,10 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
                 ))}
               </dl>
               <p className="mt-3 max-w-[62ch] text-[12px] leading-relaxed text-ink-dim">
-                <span className="text-ink">Top bar:</span> SCHEMA opens the schema builder, LESSONS opens the guided
-                lessons, and the question mark opens this help. On a phone the query and results live in a sheet at
-                the bottom of the screen.
+                <span className="text-ink">Top bar:</span> MODE shows which database&apos;s rules read your query and
+                opens the list to change it, SCHEMA opens the schema builder, LESSONS opens the guided lessons, and
+                the question mark opens this help. On a phone the query and results live in a sheet at the bottom of
+                the screen.
               </p>
             </Section>
 
@@ -673,11 +674,44 @@ export function HelpModal({ open, onClose, onOpenLessons, onOpenSchema }: HelpMo
                 different physical order and still produce the same rows.
               </Body>
               <Body>
-                Compound and derived-table queries show each branch&apos;s result and the exact final result rather
-                than a full row-by-row trace through every level. Constructs SQLite cannot express, such as{' '}
-                <Term>DISTINCT ON</Term>, <Term>NATURAL JOIN</Term>, <Term>ROLLUP</Term>, window frames and session
-                variables, are refused with the alternative spelled out. Structural statements such as CREATE and ALTER
-                belong in the schema builder, and the editor will send you there.
+                The dialect button in the top bar, beside SCHEMA, chooses how the text is read and always shows the current choice. <Term>Any SQL</Term> accepts the
+                mixed spellings of every dialect at once; choosing MySQL, PostgreSQL, SQL Server or Oracle applies that
+                vendor&apos;s rules where they differ, such as backslash escapes, <Term>#</Term> comments,{' '}
+                <Term>[bracketed]</Term> names and <Term>+</Term> on strings. Under MySQL and MariaDB{' '}
+                <Term>&quot;text&quot;</Term> is a string, as on a default server (not ANSI_QUOTES mode); names take{' '}
+                <Term>`backticks`</Term>, and a quoted alias after <Term>AS</Term> still works. The database underneath
+                stays SQLite.
+              </Body>
+              <Body>
+                A mode also changes a few meanings, so the same text returns what that database would return.{' '}
+                <Term>LIKE</Term> compares letter case under PostgreSQL and Oracle (<Term>&apos;A%&apos;</Term> does
+                not match apple; use <Term>ILIKE</Term> or <Term>UPPER()</Term>) and ignores it elsewhere. Under MySQL
+                and MariaDB <Term>||</Term> means OR, so text is joined with <Term>CONCAT()</Term>, and{' '}
+                <Term>GROUP_CONCAT(a, b)</Term> joins both values. <Term>GREATEST</Term> and <Term>LEAST</Term> skip
+                NULL under PostgreSQL and SQL Server and return NULL under MySQL and Oracle. Each of these shows a note
+                beside the result when it applies. Letter case covers every alphabet in a database mode, so{' '}
+                <Term>LIKE &apos;é%&apos;</Term> finds École under MySQL and SQL Server, and <Term>LOWER</Term> and{' '}
+                <Term>UPPER</Term> change accented letters too.
+              </Body>
+              <Body>
+                <Term>Any SQL</Term> cannot know which database you mean, so where databases disagree it uses
+                SQLite&apos;s meaning: <Term>LIKE</Term> ignores the case of A to Z, <Term>||</Term> joins text, and{' '}
+                <Term>GREATEST</Term> returns NULL if any value is NULL. Pick a database when its exact rules matter.
+                Two things are the same in every mode and differ from some databases. Text compared with{' '}
+                <Term>=</Term> must match in letter case, where MySQL and SQL Server would ignore it. And a mode never
+                refuses what only another database accepts, so a query that runs here can still need small changes
+                there, such as a cast before date arithmetic on a text column in PostgreSQL.
+              </Body>
+              <Body>
+                Aggregate <Term>FILTER (WHERE ...)</Term>, named windows (<Term>WINDOW w AS (...)</Term>), explicit{' '}
+                <Term>ROWS</Term> frames and SQL Server&apos;s <Term>TOP n WITH TIES</Term> run with their exact
+                results. The label beside the result says how much the stages explain: <Term>Full trace</Term> maps
+                every result row back to its source rows; <Term>Component previews</Term> shows CTE, derived-table and
+                branch results before the final result without row lineage; <Term>Result only</Term> shows the result
+                alone. Constructs SQLite cannot express, such as <Term>DISTINCT ON</Term>, <Term>NATURAL JOIN</Term>,{' '}
+                <Term>ROLLUP</Term>, <Term>RANGE</Term> frames and session variables, are refused with the alternative
+                spelled out. Structural statements such as CREATE and ALTER belong in the schema builder, and the editor
+                will send you there.
               </Body>
             </Section>
 

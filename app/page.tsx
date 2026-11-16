@@ -83,7 +83,7 @@ export default function LandingPage() {
               <p className={s.eyebrow}>Lessons</p>
               <h2 id="lessons-title" className={s.heading}>Nineteen lessons.</h2>
               <p className={s.prose}>
-                Each lesson is one query over a small fictional dataset. Open one and step through it.
+                Each lesson is one query over a small fictional dataset.
               </p>
               <div className={s.rows}>
                 {(['Foundations', 'Combining data'] as Lesson['section'][]).map((section) => (
@@ -112,9 +112,6 @@ export default function LandingPage() {
                 <div>
                   <p className={s.eyebrow}>Schema</p>
                   <h2 id="schema-title" className={s.heading}>Your own schema works too.</h2>
-                  <p className={s.prose}>
-                    Paste the CREATE TABLE statements from your database and step through queries over your own tables.
-                  </p>
                   <ul className={s.facts}>
                     {FACTS.map((fact) => (
                       <li key={fact.text}>
@@ -157,13 +154,7 @@ export default function LandingPage() {
           <div className={s.inner}>
             <Reveal className={s.wide}>
               <div className={s.closePanel}>
-                <div>
-                  <p className={s.eyebrow}>Start</p>
-                  <h2 id="close-title" className={s.closeTitle}>Open the tracer.</h2>
-                  <p className={s.closeLine}>
-                    It opens on a four-table join you can step through right now. No account, nothing to install.
-                  </p>
-                </div>
+                <h2 id="close-title" className={s.eyebrow}>Start</h2>
                 <div className={s.closeActions}>
                   <Link href="/trace" className={s.cta}>Open the tracer</Link>
                   <a href="#lessons" className={s.inlineLink}>

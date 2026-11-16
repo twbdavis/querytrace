@@ -480,7 +480,7 @@ const oracleCases: Case[] = [
   { sql: 'SELECT E.ENAME, D.DNAME FROM EMP E, DEPT D WHERE E.DEPTNO = D.DEPTNO(+)', reject: true, show: true },
   { sql: 'SELECT D.DNAME, COUNT(E.EMPNO) AS N FROM DEPT D LEFT OUTER JOIN EMP E ON E.DEPTNO = D.DEPTNO GROUP BY D.DEPTNO, D.DNAME ORDER BY N DESC, D.DNAME', rows: [['ACCOUNTING', 3], ['RESEARCH', 3], ['SALES', 3], ['OPERATIONS', 0]], ordered: true },
   { sql: 'SELECT ENAME FROM EMP WHERE ROWNUM <= 2', rows: [['SMITH'], ['ALLEN']] },
-  { sql: 'SELECT * FROM (SELECT ENAME FROM EMP ORDER BY SAL DESC) WHERE ROWNUM <= 3', reject: true, show: true },
+  { sql: 'SELECT * FROM (SELECT ENAME FROM EMP ORDER BY SAL DESC) WHERE ROWNUM <= 3', rows: [['KING'], ['FORD'], ['JONES']], ordered: true, note: 'Unaliased derived table is named DERIVED under the mixed profile, as Oracle allows' },
   { sql: 'SELECT * FROM (SELECT ENAME FROM EMP ORDER BY SAL DESC) T WHERE ROWNUM <= 3', rows: [['KING'], ['FORD'], ['JONES']] },
   { sql: 'SELECT ENAME FROM EMP ORDER BY SAL DESC FETCH FIRST 2 ROWS ONLY', rows: [['KING'], ['FORD']], ordered: true },
   { sql: 'SELECT ENAME, SAL FROM EMP WHERE SAL > (SELECT AVG(SAL) FROM EMP) ORDER BY SAL DESC', rows: [['KING', 5000], ['FORD', 3000], ['JONES', 2975], ['BLAKE', 2850], ['CLARK', 2450]], ordered: true },

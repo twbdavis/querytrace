@@ -37,7 +37,7 @@ stage is kept for scrubbing.
 
 **Query dialects:** `lib/dialect.ts` rewrites the query spellings of MySQL / MariaDB
 (first), PostgreSQL, SQL Server and Oracle into SQLite before parsing and records each
-rewrite as a note shown beside the result ("Rewritten for SQLite: TOP 5 → LIMIT 5"):
+rewrite as a note shown under the editor ("Rewritten for SQLite: TOP 5 → LIMIT 5"):
 `TOP n`, `FETCH FIRST n ROWS ONLY`, `ROWNUM <= n`, `ILIKE`, `RLIKE`, `x::type` and
 `CAST(x AS UNSIGNED | CHAR | DATETIME ...)`, `CONVERT`, `EXTRACT(unit FROM d)`,
 `SUBSTRING(s FROM a FOR n)`, `TRIM(BOTH ... FROM s)`, `POSITION(a IN b)`,
@@ -49,9 +49,83 @@ Server), a `schema.` prefix on a changed table, MySQL `\'` escapes and `#` comme
 every connection (`YEAR`, `MONTH`, `DATE_FORMAT`, `DATEDIFF`, `DATE_ADD`, `NOW`, `LEFT`,
 `RIGHT`, `LEN`, `LOCATE`, `LPAD`, `MOD`, `NVL`, `REGEXP`, `TO_CHAR`, `TO_DATE`, ...),
 and the note names the SQLite equivalent. Constructs SQLite cannot express
-(`DISTINCT ON`, `NATURAL JOIN`, `ROLLUP`, `FILTER (WHERE ...)`, `ALL/ANY` quantifiers,
-window frames, session variables, `SELECT ... INTO`) are refused with the alternative
+(`DISTINCT ON`, `NATURAL JOIN`, `ROLLUP`, `ALL/ANY` quantifiers, `RANGE` / `GROUPS`
+frames, session variables, `SELECT ... INTO`) are refused with the alternative
 spelled out.
+
+**Source dialect profiles:** `lib/queryCompatibility.ts` defines the profile the editor
+reads the text as (`legacy`, shown as "Any SQL", plus `sqlite`, `mysql`, `mariadb`,
+`postgresql`, `sqlserver`, `oracle`). A profile changes only the lexical rules whose
+meaning differs between vendors: backslash escapes (MySQL / MariaDB), `#` comments
+(MySQL / MariaDB), `[bracketed]` names (SQL Server) and `+` on strings (SQL Server).
+The legacy profile keeps the mixed heuristics earlier sessions were written against.
+Under MySQL and MariaDB `"text"` is a string literal, as on a default server (the
+`ANSI_QUOTES` mode is not modelled; standard-SQL writers pick another profile): the
+translator rewrites it to `'text'` except directly after `AS`, where MySQL accepts a quoted
+alias, and the parser adds a note when the text matches a table or column of the loaded
+schema, since the learner almost certainly meant the name.
+Under Oracle, SQLite and the legacy profile an unaliased `FROM (SELECT ...)` is named
+`DERIVED` by the parser (the vendors accept it); MySQL, PostgreSQL and SQL Server refuse it
+as their engines do. `TOP n` next to LIMIT, OFFSET or FETCH is refused rather than letting one win.
+A profile also carries four meanings that differ between vendors, each with a note beside
+the result. `LIKE` compares letter case under PostgreSQL and Oracle
+(`PRAGMA case_sensitive_like`, with `ILIKE` rewritten to `LCASE(a) LIKE LCASE(b)`) and
+ignores it in every alphabet under MySQL, MariaDB and SQL Server (`lib/unicodeLike.ts`
+replaces the connection's `like` function; SQLite's own folds A to Z only).
+`SqlRuntime.applyLikeRules` sets this at the start of every request from the request's
+profile, so each stage query agrees with the final result and nothing carries over. SQLite
+will not build an index or generated column on a changed `LIKE`, so a CREATE that mentions
+`LIKE` first gets a reopened connection with SQLite's own function, and a schema that
+already has such an object keeps SQLite's `LIKE` in every mode, with a note. In the five
+database modes `LOWER` / `UPPER` become the emulated `LCASE` / `UCASE`, which change
+letters in every alphabet. Under MySQL and MariaDB `||` is logical
+OR (rewritten to `OR` before any other step can introduce a `||`) and
+`GROUP_CONCAT(a, b)` joins both values of each row. `GREATEST` / `LEAST` skip NULL
+arguments under PostgreSQL and SQL Server (`MAX(COALESCE(a, b), COALESCE(b, a))`) and
+return NULL under the others. The legacy profile keeps SQLite's reading of all four, by
+design: the text alone does not say which vendor was meant. A CREATE typed in the editor
+is read under the active profile too (`readDdlAsProfile` in `lib/db.ts`) before the
+schema-import rules, which accept every vendor's spelling at once.
+The profile is chosen from the dialect button in the top bar (`components/DialectMenu.tsx`),
+which always shows the active profile; the lessons dialog's "Show in" toggle sets the same field.
+The choice is snapshotted when Run is pressed and travels with the worker request
+(`QueryOptions`), so a later change cannot reach a queued query; it is saved as an
+optional field of the persisted state without changing `STATE_VERSION`, and
+CodeMirror highlighting follows it. Oracle `ROWNUM` next to a same-scope `ORDER BY` is
+refused (Oracle numbers rows before sorting); the nested form stays exact.
+
+**Parser encodings:** the bundled `node-sql-parser` SQLite grammar cannot read
+aggregate `FILTER (WHERE ...)`, explicit window frames or `OVER name` / `WINDOW`
+clauses, all of which SQLite executes. `lib/parserEncodings.ts` follows the pattern of
+`orderedAggregates.ts`: `agg(x) FILTER (WHERE c)` becomes `QT_FILTER(agg(x), c)` and a
+frame becomes a constant `QT_FRAME('ROWS BETWEEN ...')` entry in the window's partition
+list while the AST is analysed and serialized, and every generated SQL fragment restores
+the native syntax before SQLite sees it. Backslashes inside string literals are masked the
+same way, because the grammar would otherwise turn `'a\n'` into a newline. Named windows
+are inlined per SELECT scope by the translator (`OVER w` → `OVER (...)`); inheritance
+(`w2 AS (w ...)`) is refused. Only `ROWS` frames with an `ORDER BY` are accepted;
+`RANGE`, `GROUPS`, `EXCLUDE` and frames on ranking functions (which would ignore them)
+are refused. SQL Server `TOP n WITH TIES` is rewritten in the parser to a derived table
+with `RANK() OVER (ORDER BY ...)` filtered to `<= n`, so boundary ties are kept. The
+marker names are reserved and a query that spells one is refused.
+
+**Coverage:** every `QueryRun` carries `coverage` (`lib/queryCompatibility.ts`): the
+dialect, the explanation level and what a highlighted row means. `detailed` is the
+row-provenance trace of a single SELECT over physical tables; CTE, derived-table and
+compound queries are `components` (component previews, then the final result, no row
+lineage); a FROM-less SELECT or CREATE is `result-only`. Recognised features (`filter`,
+`window`, `window-frame`, `named-window`, `top-with-ties`, `cte`, ...) add plain-language
+limits, such as a window value being computed from rows the highlight does not show. The
+result panel labels the trace with the level and never offers row interactions a stage
+does not have sources for.
+
+**Lesson spellings:** a lesson keeps one portable query and may carry `variants`
+(`lib/lessons.ts`) with the idiomatic spelling of SQLite, MySQL / MariaDB, PostgreSQL,
+SQL Server or Oracle where it differs (string concatenation, quoted aliases,
+case-sensitive LIKE). The lessons dialog's "Show in" toggle drives the editor's dialect,
+shows the matching spelling on each card and marks lessons that read the same everywhere;
+Run and Load use the shown text. The compatibility suite runs every variant under its own
+profile and requires the portable lesson's rows.
 
 Ordered `GROUP_CONCAT`, `STRING_AGG`, and `LISTAGG` preserve their requested sort
 order using SQLite's aggregate-local `ORDER BY`. `lib/orderedAggregates.ts` encodes

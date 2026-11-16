@@ -10,6 +10,7 @@
 import {
   convertBackslashEscapes,
   convertBracketIdentifiers,
+  readDoubleQuotedAsStrings,
   convertEscapeStringLiterals,
   convertHashComments,
   hasUnterminatedLiteral,
@@ -25,6 +26,7 @@ import {
   topLevelMatches,
   unquoteIdent,
 } from './sqlText';
+import { dialectProfile, type CompatFeature, type SourceDialect } from './queryCompatibility';
 
 export interface DialectNote {
   /** What the learner wrote. */
@@ -36,6 +38,17 @@ export interface DialectNote {
 export interface Translation {
   sql: string;
   notes: DialectNote[];
+  /** Contents of every "double-quoted" token read as a string (MySQL / MariaDB), for the name warning. */
+  quotedStrings: string[];
+  /** Syntax the translator recognised, for the coverage label. */
+  features: CompatFeature[];
+  /** `TOP n WITH TIES` was requested: the parser applies the ranked rewrite instead of LIMIT. */
+  topWithTies?: number;
+}
+
+export interface TranslateOptions {
+  /** The profile whose lexical rules read the text; `legacy` keeps the mixed heuristics. */
+  dialect?: SourceDialect;
 }
 
 /** A construct with no SQLite equivalent; the message names what to write instead. */
@@ -45,11 +58,52 @@ function fail(message: string): never {
   throw new DialectError(message);
 }
 
-const INTERVAL_UNITS: Record<string, string> = {
+/** Width of a value-joining operator (|| or arithmetic) that ends at `end` / starts at `start`, or 0. */
+function joinOperatorBefore(masked: string, end: number): number {
+  if (masked.slice(0, end).endsWith('||')) return 2;
+  return end > 0 && /[+\-*/%]/.test(masked[end - 1]) ? 1 : 0;
+}
+function joinOperatorAt(masked: string, start: number): number {
+  if (masked.startsWith('||', start)) return 2;
+  return start < masked.length && /[+\-*/%]/.test(masked[start]) ? 1 : 0;
+}
+
+/** Start of the value (operands joined by || or arithmetic) that ends before `end`: the left side of LIKE. */
+function valueStart(masked: string, end: number): number {
+  let start = operandStart(masked, end);
+  if (start === end) return end;
+  for (;;) {
+    let operator = start;
+    while (operator > 0 && /\s/.test(masked[operator - 1])) operator--;
+    const width = joinOperatorBefore(masked, operator);
+    if (!width) return start;
+    const left = operandStart(masked, operator - width);
+    if (left === operator - width) return start;
+    start = left;
+  }
+}
+
+/** End (exclusive) of the value that starts at or after `start`: the right side of LIKE. */
+function valueEnd(masked: string, start: number): number {
+  let end = operandEnd(masked, start);
+  if (end === start) return start;
+  for (;;) {
+    let operator = end;
+    while (operator < masked.length && /\s/.test(masked[operator])) operator++;
+    const width = joinOperatorAt(masked, operator);
+    if (!width) return end;
+    const right = operandEnd(masked, operator + width);
+    if (right === operator + width) return end;
+    end = right;
+  }
+}
+
+// A null prototype so a unit such as "constructor" is unknown rather than a JS function.
+const INTERVAL_UNITS: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   year: 'YEAR', years: 'YEAR', quarter: 'QUARTER', quarters: 'QUARTER', month: 'MONTH', months: 'MONTH',
   week: 'WEEK', weeks: 'WEEK', day: 'DAY', days: 'DAY', hour: 'HOUR', hours: 'HOUR',
   minute: 'MINUTE', minutes: 'MINUTE', second: 'SECOND', seconds: 'SECOND',
-};
+});
 
 const CAST_TYPES: Array<[RegExp, string | null]> = [
   [/^(?:UNSIGNED|SIGNED)(?:\s+INT(?:EGER)?)?$/i, 'INTEGER'],
@@ -63,9 +117,16 @@ const CAST_TYPES: Array<[RegExp, string | null]> = [
   [/^BIT$/i, null],
 ];
 
-function castTarget(type: string): { sqlite: string } | { fn: string } | { passthrough: true } | null {
+type CastTarget = { sqlite: string } | { fn: string } | { passthrough: true } | { round: number } | { chars: number };
+
+function castTarget(type: string): CastTarget | null {
   const trimmed = type.trim();
   if (/^BOOL(?:EAN)?$/i.test(trimmed)) return { fn: 'QT_BOOLEAN' };
+  // DECIMAL(p, s) rounds to s places in every vendor; CHAR(n) / VARCHAR(n) cut the text to n characters.
+  const scaled = trimmed.match(/^(?:DECIMAL|DEC|NUMERIC|NUMBER|MONEY|SMALLMONEY)\s*\(\s*\d+\s*,\s*(\d+)\s*\)$/i);
+  if (scaled) return { round: Number(scaled[1]) };
+  const sized = trimmed.match(/^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$/i) ?? trimmed.match(/^N?VARCHAR2\s*\(\s*(\d+)(?:\s+(?:CHAR|BYTE))?\s*\)$/i);
+  if (sized) return { chars: Number(sized[1]) };
   if (/^DATE$/i.test(trimmed)) return { fn: 'DATE' };
   if (/^(?:DATETIME2?|TIMESTAMP|TIMESTAMPTZ|SMALLDATETIME)(?:\s*\(\s*\d+\s*\))?(?:\s+with(?:out)?\s+time\s+zone)?$/i.test(trimmed)) return { fn: 'DATETIME' };
   if (/^TIME(?:\s*\(\s*\d+\s*\))?(?:\s+with(?:out)?\s+time\s+zone)?$/i.test(trimmed)) return { fn: 'TIME' };
@@ -73,6 +134,26 @@ function castTarget(type: string): { sqlite: string } | { fn: string } | { passt
     if (pattern.test(trimmed)) return sqlite === null ? { passthrough: true } : { sqlite };
   }
   return null;
+}
+
+/** The SQLite expression that performs a translated cast of `expr`. */
+function castReplacement(target: CastTarget, expr: string): string {
+  if ('fn' in target) return `${target.fn}(${expr})`;
+  if ('passthrough' in target) return `(${expr})`;
+  if ('round' in target) return `ROUND(CAST(${expr} AS REAL), ${target.round})`;
+  if ('chars' in target) return `SUBSTR(CAST(${expr} AS TEXT), 1, ${target.chars})`;
+  return `CAST(${expr} AS ${target.sqlite})`;
+}
+
+/**
+ * Add a trailing clause (LIMIT n) before a closing semicolon or a trailing
+ * `-- comment`, which would otherwise swallow it.
+ */
+function appendClause(sql: string, clause: string): string {
+  const masked = maskSql(sql);
+  let end = masked.length;
+  while (end > 0 && /[\s;]/.test(masked[end - 1])) end--;
+  return `${sql.slice(0, end)} ${clause}${sql.slice(end).replace(/^\s*;/, '')}`;
 }
 
 /** "3", "-3", "(n)" or an expression → a SQL expression string. */
@@ -136,8 +217,7 @@ export function translateCasts(input: string, note: (from: string, to: string) =
     if (/^(?:INTEGER|REAL|TEXT|BLOB)$/i.test(typeText)) return null;
     const target = castTarget(typeText);
     if (!target) fail(`SQLite has no ${typeText} type. Cast to INTEGER, REAL, NUMERIC or TEXT instead.`);
-    const replacement =
-      'fn' in target ? `${target.fn}(${expr})` : 'passthrough' in target ? `(${expr})` : `CAST(${expr} AS ${target.sqlite})`;
+    const replacement = castReplacement(target, expr);
     note(`CAST(x AS ${typeText})`, replacement.replace(expr, 'x'));
     return replacement;
   });
@@ -166,8 +246,11 @@ function nullSortExpression(sql: string, scopeStart: number, orderStart: number,
   return alias && alias.index !== undefined ? column.slice(alias.index + alias[0].length).trim() : column;
 }
 
-export function translateQuery(input: string): Translation {
+export function translateQuery(input: string, options: TranslateOptions = {}): Translation {
+  const profile = dialectProfile(options.dialect);
   const notes: DialectNote[] = [];
+  const features = new Set<CompatFeature>();
+  let topWithTies: number | undefined;
   const seen = new Set<string>();
   const note = (from: string, to: string) => {
     const key = `${from}→${to}`;
@@ -187,14 +270,61 @@ export function translateQuery(input: string): Translation {
   }
 
   // --- Literals and comments ------------------------------------------------------
-  if (/\\'/.test(sql) && hasUnterminatedLiteral(sql) && !hasUnterminatedLiteral(sql, { backslashEscapes: true })) {
+  // The profile decides the lexical rules whose meaning differs between vendors.
+  const backslashes =
+    profile.backslashEscapes === 'always'
+      ? sql.includes(String.fromCharCode(92))
+      : profile.backslashEscapes === 'auto'
+        && /\\'/.test(sql) && hasUnterminatedLiteral(sql) && !hasUnterminatedLiteral(sql, { backslashEscapes: true });
+  const quotedStrings: string[] = [];
+  if (profile.doubleQuotedStrings) {
+    const converted = readDoubleQuotedAsStrings(sql, backslashes);
+    if (converted.sql !== sql) {
+      sql = converted.sql;
+      quotedStrings.push(...converted.strings);
+      note('"text"', "'text' (a string in MySQL / MariaDB, not a name; names use `backticks`)");
+    }
+  }
+  if (backslashes) {
     sql = convertBackslashEscapes(sql);
     note("'It\\'s'", "'It''s'");
   }
   if (/(?<![\w"`\]])[Ee]'/.test(sql)) sql = convertEscapeStringLiterals(sql);
-  sql = convertHashComments(sql);
+  // MySQL, MariaDB and PostgreSQL treat a backslash in a LIKE pattern as the
+  // escape character without saying so; SQLite needs the ESCAPE clause.
+  if (profile.likeBackslashEscape && sql.includes(String.fromCharCode(92))) {
+    // One reading of the text finds every pattern; the clauses are then added together.
+    const masked = maskSql(sql);
+    const ESCAPE_AHEAD = /\s*ESCAPE\b/iy;
+    const ends: number[] = [];
+    for (const like of masked.matchAll(/\bLIKE\s+'/gi)) {
+      const quote = (like.index ?? 0) + like[0].length - 1;
+      const end = masked.indexOf("'", quote + 1);
+      if (end === -1) break;
+      ESCAPE_AHEAD.lastIndex = end + 1;
+      if (!sql.slice(quote, end + 1).includes(String.fromCharCode(92)) || ESCAPE_AHEAD.test(masked)) continue;
+      ends.push(end + 1);
+    }
+    if (ends.length) {
+      let out = '';
+      let last = 0;
+      for (const end of ends) {
+        out += `${sql.slice(last, end)} ESCAPE '\\'`;
+        last = end;
+      }
+      sql = out + sql.slice(last);
+      note("LIKE 'a\\_b'", "LIKE 'a\\_b' ESCAPE '\\' (SQLite has no default escape character)");
+    }
+  }
+  if (profile.hashComments) sql = convertHashComments(sql);
+  else if (convertHashComments(sql) !== sql) {
+    fail(`# starts a comment in MySQL and MariaDB, not in ${profile.label}. Write -- for a comment to the end of the line.`);
+  }
   if (sql.includes('[')) {
-    const converted = convertBracketIdentifiers(sql);
+    if (!profile.bracketIdentifiers && /\[[^\]]*\]/.test(maskSql(sql))) {
+      fail(`[bracketed] names are SQL Server syntax, not ${profile.label}. Quote the name with double quotes ("name") or write it bare.`);
+    }
+    const converted = profile.bracketIdentifiers ? convertBracketIdentifiers(sql) : sql;
     if (converted !== sql) {
       note('[name]', '"name"');
       sql = converted;
@@ -206,27 +336,140 @@ export function translateQuery(input: string): Translation {
     sql = next;
     return changed;
   };
+  // MySQL and MariaDB read || as logical OR unless PIPES_AS_CONCAT is set. It
+  // has OR's precedence there too, so the plain keyword is the same expression.
+  // Done before any rewrite below can introduce a || of its own.
+  if (profile.pipesAreOr && rewrite(/\|\|/g, ' OR ')) {
+    note('a || b', `a OR b (in ${profile.label}, || means OR and returns 1 or 0; join text with CONCAT(a, b))`);
+  }
   // A GO line pasted along with the query from SSMS is a batch separator, not SQL.
   if (rewrite(/\s*\n\s*GO\s*;?\s*$/i, '')) note('GO', '(batch separator, dropped)');
   if (rewrite(/(?<![\w"`\]])N(?=')/g, '')) note("N'text'", "'text'");
   if (rewrite(/\b(?:DATE|TIME|TIMESTAMP)\s+(?=')/gi, '')) note("DATE '2024-01-01'", "'2024-01-01'");
+  // PostgreSQL casts: expr::type. The masked copy is patched alongside the text
+  // (a replacement is whole tokens, so its mask is its own), which keeps a long
+  // select list of casts linear instead of re-reading the query for each one.
+  if (sql.includes('::')) {
+    // Consume a complete type, including multiword names and precision, while
+    // leaving aliases and subsequent clauses outside the cast.
+    const CAST = /::\s*((?:(?:TIMESTAMP|TIME)\b(?:\s*\(\s*\d+\s*\))?(?:\s+WITH(?:OUT)?\s+TIME\s+ZONE)?|DOUBLE\s+PRECISION\b|CHAR(?:ACTER)?\s+VARYING\b|(?:SIGNED|UNSIGNED)\b(?:\s+INT(?:EGER)?\b)?|[A-Za-z_]\w*)(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)/gi;
+    let masked = maskSql(sql);
+    let from = 0;
+    for (;;) {
+      CAST.lastIndex = from;
+      const cast = CAST.exec(masked);
+      if (!cast) break;
+      const start = operandStart(masked, cast.index);
+      if (start === cast.index) fail('A ::type cast needs a value on its left, for example price::integer.');
+      const expr = sql.slice(start, cast.index).trim();
+      const typeText = cast[1].trim();
+      const target = castTarget(typeText);
+      if (!target) fail(`SQLite has no ${typeText} type. Cast to INTEGER, REAL, NUMERIC or TEXT instead.`);
+      const replacement = castReplacement(target, expr);
+      const end = cast.index + cast[0].length;
+      sql = `${sql.slice(0, start)}${replacement}${sql.slice(end)}`;
+      masked = `${masked.slice(0, start)}${maskSql(replacement)}${masked.slice(end)}`;
+      // Resume at the replacement: it is the operand of a chained cast (a::int::text).
+      from = start;
+      note(`${expr}::${typeText}`, replacement);
+    }
+  }
+
   // Date arithmetic with an unmistakable date operand: PostgreSQL and Oracle
   // subtract two dates to a day count and add days to a date, while SQLite
   // would subtract the numeric prefixes of the text ('2025-01-15' - '2025-01-01' = 0).
   // A bare column (hired_on + 30) cannot be told from a number here and is left alone.
-  for (let guard = 0; guard < 100; guard++) {
-    const masked = maskSql(sql);
-    const isDateOperand = (text: string) =>
-      /^'\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?'$/.test(text) ||
-      /^(?:CURRENT_DATE|CURRENT_TIMESTAMP|SYSDATE)$/i.test(text) ||
-      /^(?:NOW|CURDATE|GETDATE|SYSDATETIME|DATE|DATETIME)\s*\(/i.test(text);
-    const isName = (text: string) => /^[A-Za-z_"`][\w."`]*$/.test(text) && !/^(?:INTERVAL|AND|OR|NOT|IS|IN|LIKE|BETWEEN|AS|FROM|WHERE)$/i.test(text);
-    const isInteger = (text: string) => /^-?\d+$/.test(text);
-    let done = true;
-    for (const op of masked.matchAll(/[+-]/g)) {
-      const at = op.index ?? 0;
-      const leftStart = operandStart(masked, at);
-      const rightEnd = operandEnd(masked, at + 1);
+  // One pass over the operators, patching the masked copy with each rewrite.
+  // Keep products together: date + 2 * 3 adds six days, not two days followed
+  // by multiplying SQLite's numeric conversion of the returned date text.
+  if (/[+-]/.test(sql)) {
+    let masked = maskSql(sql);
+    const ungroup = (text: string) => {
+      while (text.startsWith('(') && matchingParen(maskSql(text), 0) === text.length - 1) text = text.slice(1, -1).trim();
+      return text;
+    };
+    const isDateOperand = (text: string) => {
+      text = ungroup(text);
+      if (/^'\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?'$/.test(text) ||
+        /^(?:CURRENT_DATE|CURRENT_TIMESTAMP|SYSDATE)$/i.test(text)) return true;
+      const call = /^(?:NOW|CURDATE|GETDATE|SYSDATETIME|DATE|DATETIME|DATE_ADD|DATE_SUB)\s*\(/i.exec(text);
+      return !!call && matchingParen(maskSql(text), call[0].length - 1) === text.length - 1;
+    };
+    const isName = (text: string) => /^[A-Za-z_"`][\w."`]*$/.test(text) && !/^(?:INTERVAL|AND|OR|NOT|IS|IN|LIKE|BETWEEN|AS|FROM|WHERE|CASE|WHEN|THEN|ELSE|END|SELECT)$/i.test(text);
+    const isDayCount = (text: string) => {
+      text = ungroup(text);
+      if (/^[+-]?\d+$/.test(text)) return true;
+      // Numeric arithmetic may use columns, but a bare column after subtraction
+      // keeps the existing date-column interpretation. A caller can make a day
+      // count explicit with ::integer. Do not guess at arbitrary function types.
+      if (/^CAST\s*\([\s\S]+\s+AS\s+INTEGER\s*\)$/i.test(text)) return true;
+      return /^[\w\s.+*/%()-]+$/.test(text) && /[+*/%-]/.test(text) &&
+        !/[A-Za-z_]\w*\s*\(/.test(text) && !/\b(?:SELECT|CASE|WHEN|THEN|ELSE|END|INTERVAL)\b/i.test(text);
+    };
+    const scalarEnd = (start: number) => {
+      const first = masked.slice(start).match(/^\s*[+-]*\s*CASE\b/i);
+      if (!first) return operandEnd(masked, start);
+      const keywords = /\b(CASE|END)\b/gi;
+      keywords.lastIndex = start + first[0].length;
+      let depth = 1;
+      for (let token = keywords.exec(masked); token; token = keywords.exec(masked)) {
+        depth += token[1].toUpperCase() === 'CASE' ? 1 : -1;
+        if (!depth) return keywords.lastIndex;
+      }
+      return start;
+    };
+    const productStart = (end: number) => {
+      let start = operandProductStart(masked, end);
+      // The shared scanner reads END as an identifier. Recover the complete
+      // CASE, including nested CASE branches, before rewriting its arithmetic.
+      while (/^END\b/i.test(masked.slice(start))) {
+        const keywords = [...masked.slice(0, start).matchAll(/\b(CASE|END)\b/gi)];
+        let depth = 1;
+        let found = false;
+        for (let i = keywords.length - 1; i >= 0; i--) {
+          depth += keywords[i][1].toUpperCase() === 'END' ? 1 : -1;
+          if (!depth) { start = keywords[i].index!; found = true; break; }
+        }
+        if (!found) return end;
+        let before = start;
+        while (before > 0 && /\s/.test(masked[before - 1])) before--;
+        if (before === 0 || !/[*/%]/.test(masked[before - 1])) break;
+        const left = operandProductStart(masked, before - 1);
+        if (left === before - 1) break;
+        start = left;
+      }
+      return start;
+    };
+    const productEnd = (start: number) => {
+      let end = scalarEnd(start);
+      if (end === start) return start;
+      for (;;) {
+        let next = end;
+        while (/\s/.test(masked[next] ?? '') && next < masked.length) next++;
+        if (!/[*/%]/.test(masked[next] ?? '')) return end;
+        const rhs = scalarEnd(next + 1);
+        if (rhs === next + 1) return end;
+        end = rhs;
+      }
+    };
+    // With a known date, PostgreSQL's + takes a scalar integer day count.
+    // Keep the entire expression: CASE, casts, subqueries and nested date
+    // differences are valid counts. INTERVAL has its own rewrite below.
+    const isAddedDayCount = (text: string) => {
+      if (isDateOperand(text) || /^\s*INTERVAL\b/i.test(maskSql(text))) return false;
+      return isDayCount(text) || isName(ungroup(text)) || /^\s*(?:[('"`+\d-]|CASE\b|[A-Za-z_]\w*\s*\()/i.test(text);
+    };
+    const OPERATOR = /[+-]/g;
+    let from = 0;
+    // Every step either moves past an operator or rewrites one away; the bound is a backstop.
+    for (let guard = 0; guard < 100_000; guard++) {
+      OPERATOR.lastIndex = from;
+      const op = OPERATOR.exec(masked);
+      if (!op) break;
+      const at = op.index;
+      from = at + 1;
+      const leftStart = productStart(at);
+      const rightEnd = productEnd(at + 1);
       if (leftStart === at || rightEnd === at + 1) continue;
       const left = sql.slice(leftStart, at).trim();
       const right = sql.slice(at + 1, rightEnd).trim();
@@ -234,10 +477,10 @@ export function translateQuery(input: string): Translation {
       const leftDate = isDateOperand(left);
       const rightDate = isDateOperand(right);
       let replacement: string | null = null;
-      if (leftDate && isInteger(right)) {
+      if (leftDate && (isDayCount(right) || (sign === '+' && isAddedDayCount(right)))) {
         replacement = `${sign === '-' ? 'DATE_SUB' : 'DATE_ADD'}(${left}, ${right}, 'DAY')`;
         note(`date ${sign} n`, `${sign === '-' ? 'DATE_SUB' : 'DATE_ADD'}(date, n, 'DAY')`);
-      } else if (sign === '+' && rightDate && isInteger(left)) {
+      } else if (sign === '+' && rightDate && isAddedDayCount(left)) {
         replacement = `DATE_ADD(${right}, ${left}, 'DAY')`;
         note('n + date', "DATE_ADD(date, n, 'DAY')");
       } else if (sign === '-' && ((leftDate && (rightDate || isName(right))) || (rightDate && isName(left)))) {
@@ -245,11 +488,13 @@ export function translateQuery(input: string): Translation {
         note('date - date', "DATEDIFF('day', earlier, later) (SQLite would subtract the numbers inside the text)");
       }
       if (!replacement) continue;
+      const replacementMask = maskSql(replacement);
       sql = `${sql.slice(0, leftStart)}${replacement}${sql.slice(rightEnd)}`;
-      done = false;
-      break;
+      masked = `${masked.slice(0, leftStart)}${replacementMask}${masked.slice(rightEnd)}`;
+      // Resume at the rewritten call so operators inside its arguments are still
+      // read. The call's own commas separate them, so none can match again.
+      from = leftStart;
     }
-    if (done) break;
   }
   if (rewrite(/(?<![\w.])\.(?=\d)/g, '0.')) note('.5', '0.5');
 
@@ -276,15 +521,13 @@ export function translateQuery(input: string): Translation {
   if (/\bWITH\s+ROLLUP\b|\b(?:ROLLUP|CUBE|GROUPING\s+SETS)\s*\(/i.test(masked0)) {
     fail('ROLLUP / CUBE totals are not supported by SQLite. Run a second query with UNION ALL for the grand total.');
   }
-  if (/\bFILTER\s*\(\s*WHERE\b/i.test(masked0)) {
-    fail('FILTER (WHERE ...) on an aggregate is not supported in visual mode. Use SUM(CASE WHEN condition THEN 1 ELSE 0 END) or COUNT(CASE WHEN condition THEN 1 END) instead.');
+  if (/\bFILTER\s*\(\s*WHERE\b/i.test(masked0)) features.add('filter');
+  if (/\bOVER\s*\(/i.test(masked0) || /\bOVER\s+[A-Za-z_]\w*/i.test(masked0)) features.add('window');
+  if (/\bWINDOW\s+(?:[A-Za-z_]\w*|"[^"]+"|`[^`]+`)\s+AS\s*\(/i.test(masked0) || /\bOVER\s+(?!\()[A-Za-z_"`[]/i.test(masked0)) {
+    sql = inlineNamedWindows(sql, note);
+    features.add('named-window');
   }
-  if (/\bWINDOW\s+\w+\s+AS\s*\(/i.test(masked0)) {
-    fail('Named WINDOW clauses are not supported in visual mode. Write the OVER (...) specification inline.');
-  }
-  if (/\bOVER\s*\([^)]*\b(?:ROWS|RANGE|GROUPS)\s+(?:BETWEEN|UNBOUNDED|CURRENT|\d)/i.test(masked0)) {
-    fail('Window frames (ROWS BETWEEN ...) are not supported in visual mode. Use OVER (PARTITION BY ... ORDER BY ...) without a frame.');
-  }
+  if (/\bOVER\s*\([^)]*\b(?:ROWS|RANGE|GROUPS)\b/i.test(maskSql(sql))) features.add('window-frame');
   if (/^\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\b[\s\S]*?\bINTO\s+(?:"[^"]*"|#{0,2}\w+)\s+FROM\b/i.test(masked0)) {
     fail('SELECT ... INTO creates a table in SQL Server. Trace the SELECT on its own here; new tables belong in the schema script (SCHEMA button).');
   }
@@ -350,13 +593,45 @@ export function translateQuery(input: string): Translation {
   }
 
   // --- Whole-statement forms -------------------------------------------------------
-  const top = maskSql(sql).match(/^(\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\s+(?:DISTINCT\s+)?)TOP\s*\(?\s*(\d+)\s*\)?(?:\s+WITH\s+TIES)?\s+/i);
+  const top = maskSql(sql).match(/^(\s*(?:WITH\b[\s\S]*?\)\s*)?SELECT\s+(?:(DISTINCT)\s+)?)TOP\s*\(?\s*(\d+)\s*\)?(\s+WITH\s+TIES)?\s+/i);
   if (top) {
-    const count = top[2];
+    const count = top[3];
     sql = sql.slice(0, top[1].length) + sql.slice(top[0].length);
-    if (!/\bLIMIT\b/i.test(maskSql(sql))) {
-      sql = `${sql.replace(/;?\s*$/, '')} LIMIT ${count}`;
+    if (top[4]) {
+      // WITH TIES keeps every row that ranks with row n; a bare LIMIT would drop them.
+      if (top[2]) fail('TOP n WITH TIES combined with DISTINCT is not supported. Remove DISTINCT, or rank the distinct rows in a subquery first.');
+      if (/\b(?:LIMIT|OFFSET|FETCH)\b/i.test(maskSql(sql))) fail('TOP n WITH TIES cannot be combined with LIMIT, OFFSET or FETCH.');
+      topWithTies = Number(count);
+      features.add('top-with-ties');
+      note(`TOP ${count} WITH TIES`, `RANK() OVER (ORDER BY ...) <= ${count} in a subquery (ties with row ${count} are kept)`);
+    } else {
+      if (/\b(?:LIMIT|OFFSET|FETCH)\b/i.test(maskSql(sql))) fail(`TOP ${count} cannot be combined with LIMIT, OFFSET or FETCH. Keep one way of limiting the rows.`);
+      sql = appendClause(sql, `LIMIT ${count}`);
+      note(`TOP ${count}`, `LIMIT ${count}`);
     }
+  }
+  // TOP inside a subquery, CTE or derived table: the LIMIT belongs at the end of that scope.
+  for (let guard = 0; guard < 50; guard++) {
+    const masked = maskSql(sql);
+    const nested = masked.match(/\bSELECT\s+(?:DISTINCT\s+)?TOP\s*\(?\s*(\d+)\s*\)?(\s+WITH\s+TIES)?\s+/i);
+    if (!nested || nested.index === undefined) break;
+    if (nested[2]) fail('TOP n WITH TIES is supported only in the outer SELECT. In a subquery, rank the rows with RANK() OVER (ORDER BY ...) and filter on the rank.');
+    let open = -1;
+    let depth = 0;
+    for (let i = nested.index - 1; i >= 0; i--) {
+      if (masked[i] === ')') depth++;
+      else if (masked[i] === '(' && depth-- === 0) {
+        open = i;
+        break;
+      }
+    }
+    const close = open === -1 ? -1 : matchingParen(masked, open);
+    if (close === -1) fail('TOP must directly follow the SELECT it limits.');
+    const count = nested[1];
+    const topStart = nested.index + nested[0].search(/\bTOP\b/i);
+    const topEnd = nested.index + nested[0].length;
+    if (/\b(?:LIMIT|OFFSET|FETCH)\b/i.test(masked.slice(topEnd, close))) fail(`TOP ${count} cannot be combined with LIMIT, OFFSET or FETCH. Keep one way of limiting the rows.`);
+    sql = `${sql.slice(0, topStart)}${sql.slice(topEnd, close).trimEnd()} LIMIT ${count}${sql.slice(close)}`;
     note(`TOP ${count}`, `LIMIT ${count}`);
   }
   if (rewrite(/\bOFFSET\s+(\d+)\s+ROWS?\s+FETCH\s+(?:FIRST|NEXT)\s+(\d+)\s+ROWS?\s+ONLY\b/gi, (_, match) => `LIMIT ${match[2]} OFFSET ${match[1]}`)) {
@@ -476,16 +751,63 @@ export function translateQuery(input: string): Translation {
     };
     const alone = /\s*\bWHERE\s+ROWNUM\s*(<=|<)\s*(\d+)(?=\s*$|\s*;|\s+ORDER\b)/i;
     const trailing = /\s+AND\s+ROWNUM\s*(<=|<)\s*(\d+)(?=\s*$|\s*;|\s+ORDER\b|\s+GROUP\b)/i;
+    // Oracle numbers rows before ORDER BY sorts them, so ROWNUM next to a
+    // same-scope ORDER BY is not the sorted top n. Only the nested form is exact.
+    if (/\bROWNUM\s*(?:<=|<)\s*\d+\s+ORDER\s+BY\b/i.test(maskSql(sql))) {
+      fail('ROWNUM is applied before ORDER BY in Oracle, so WHERE ROWNUM <= n ... ORDER BY does not return the sorted top n. Write SELECT * FROM (SELECT ... ORDER BY ...) t WHERE ROWNUM <= n, or use FETCH FIRST n ROWS ONLY.');
+    }
+    // A row limit on a change has no SQLite spelling (LIMIT there is a compile-time option this build lacks).
+    if (/^\s*(?:DELETE|UPDATE)\b/i.test(maskSql(sql)) && /\bROWNUM\b/i.test(maskSql(sql))) {
+      fail('ROWNUM in a DELETE or UPDATE is not supported here: SQLite cannot limit the rows a change touches. Name the rows by key instead, for example DELETE FROM t WHERE id IN (SELECT id FROM t ORDER BY id FETCH FIRST n ROWS ONLY).');
+    }
     if (alone.test(maskSql(sql))) rewrite(alone, (_, match) => readLimit(match));
     else if (trailing.test(maskSql(sql))) rewrite(trailing, (_, match) => readLimit(match));
     if (limit !== null) {
-      if (!/\bLIMIT\b/i.test(maskSql(sql))) sql = `${sql.replace(/;?\s*$/, '')} LIMIT ${limit}`;
+      if (!/\bLIMIT\b/i.test(maskSql(sql))) sql = appendClause(sql, `LIMIT ${limit}`);
       note('ROWNUM <= n', `LIMIT ${limit}`);
     }
   }
 
   // --- Operators -------------------------------------------------------------------
-  if (rewrite(/\bILIKE\b/gi, 'LIKE')) note('ILIKE', 'LIKE (SQLite LIKE already ignores case for ASCII letters)');
+  // Every vendor changes the case of letters in any alphabet; SQLite's LOWER and
+  // UPPER only change A to Z. LCASE / UCASE are the emulated functions that do.
+  // (Replacing LOWER itself would break indexes and generated columns built on it.)
+  if (profile.unicodeText && /\b(?:LOWER|UPPER)\s*\(/i.test(maskSql(sql))) {
+    sql = rewriteCalls(sql, ['LOWER', 'UPPER'], (call) => {
+      const replacement = call.name.toUpperCase() === 'LOWER' ? 'LCASE' : 'UCASE';
+      note(`${call.name.toUpperCase()}(x)`, `${replacement}(x) (changes the case of letters in every alphabet; SQLite's ${call.name.toUpperCase()} only changes A to Z)`);
+      return `${replacement}(${call.inner})`;
+    });
+  }
+  if (profile.caseSensitiveLike) {
+    // LIKE compares letter case in this profile (the runtime switches SQLite's
+    // LIKE to match), so ILIKE has to fold both sides itself.
+    let masked = maskSql(sql);
+    const hasLike = /\bLIKE\b/i.test(masked);
+    const ILIKE = /\b(NOT\s+)?ILIKE\b/gi;
+    let from = 0;
+    for (;;) {
+      ILIKE.lastIndex = from;
+      const ilike = ILIKE.exec(masked);
+      if (!ilike) break;
+      const operatorEnd = ilike.index + ilike[0].length;
+      const leftStart = valueStart(masked, ilike.index);
+      const rightEnd = valueEnd(masked, operatorEnd);
+      if (leftStart === ilike.index || rightEnd === operatorEnd) {
+        fail("ILIKE needs a value on each side, as in name ILIKE 'a%'. For anything more involved, write LOWER(a) LIKE LOWER(b).");
+      }
+      const left = sql.slice(leftStart, ilike.index).trim();
+      const right = sql.slice(operatorEnd, rightEnd).trim();
+      // LCASE is the lower-casing that covers every alphabet; SQLite's own LOWER only changes A to Z.
+      const replacement = `LCASE(${left}) ${ilike[1] ? 'NOT ' : ''}LIKE LCASE(${right})`;
+      sql = `${sql.slice(0, leftStart)}${replacement}${sql.slice(rightEnd)}`;
+      masked = `${masked.slice(0, leftStart)}${maskSql(replacement)}${masked.slice(rightEnd)}`;
+      // Resume at the rewrite: an ILIKE inside one of its operands is still to do.
+      from = leftStart;
+      note('a ILIKE b', `LCASE(a) LIKE LCASE(b) (LIKE compares letter case in ${profile.label} mode, so both sides are lower-cased)`);
+    }
+    if (hasLike) note('LIKE', `LIKE, comparing letter case as ${profile.label} does ('A%' does not match 'apple')`);
+  } else if (rewrite(/\bILIKE\b/gi, 'LIKE')) note('ILIKE', 'LIKE (SQLite LIKE already ignores case for ASCII letters)');
   if (rewrite(/\bRLIKE\b/gi, 'REGEXP')) note('RLIKE', 'REGEXP');
   if (rewrite(/\bIS\s+NOT\s+DISTINCT\s+FROM\b/gi, 'IS')) note('IS NOT DISTINCT FROM', 'IS');
   if (rewrite(/\bIS\s+DISTINCT\s+FROM\b/gi, 'IS NOT')) note('IS DISTINCT FROM', 'IS NOT');
@@ -506,29 +828,58 @@ export function translateQuery(input: string): Translation {
     const STRING_FUNCTION = /^(?:UPPER|LOWER|UCASE|LCASE|LEFT|RIGHT|SUBSTRING|SUBSTR|MID|CONCAT|CONCAT_WS|TRIM|LTRIM|RTRIM|REPLACE|REVERSE|REPEAT|REPLICATE|LPAD|RPAD|INITCAP|FORMAT|STR|CHAR|NCHAR|CHR|SPACE|STUFF|TO_CHAR|DATE_FORMAT|DATENAME|MONTHNAME|DAYNAME|GROUP_CONCAT|STRING_AGG|QUOTENAME|TRANSLATE)\s*\(/i;
     const TEXT_CAST = /^(?:CAST\s*\([\s\S]*\bAS\s+N?(?:VAR)?CHAR(?:ACTER)?\b|CONVERT\s*\(\s*N?(?:VAR)?CHAR(?:ACTER)?\b|CAST\s*\([\s\S]*\bAS\s+(?:N?TEXT|STRING)\s*\))/i;
     const stringy = (text: string) => text.startsWith("'") || STRING_FUNCTION.test(text) || TEXT_CAST.test(text);
-    for (let guard = 0; guard < 200; guard++) {
+    if (profile.plusConcatenation !== 'never' && sql.includes('+')) {
+      // Every + is read once against one snapshot of the text. The set of joins
+      // then grows until it stops changing (a + next to a join is a join), and
+      // all of them are applied together: no limit on how many, and no
+      // re-reading of the query for each one.
       const masked = maskSql(sql);
-      let found: number | null = null;
+      const INTERVAL_AHEAD = /\s*INTERVAL\b/iy;
+      const pluses: Array<{ at: number; leftStart: number; rightEnd: number; stringy: boolean }> = [];
       for (const plus of masked.matchAll(/\+/g)) {
         const at = plus.index ?? 0;
         // PostgreSQL date + INTERVAL uses a quoted date operand too. It must
         // reach the interval translator without becoming string concatenation.
-        if (/^\s*INTERVAL\b/i.test(masked.slice(at + 1))) continue;
+        INTERVAL_AHEAD.lastIndex = at + 1;
+        if (INTERVAL_AHEAD.test(masked)) continue;
         const leftStart = operandStart(masked, at);
         const rightEnd = operandEnd(masked, at + 1);
         if (leftStart === at || rightEnd === at + 1) continue;
-        const left = sql.slice(leftStart, at).trim();
-        const right = sql.slice(at + 1, rightEnd).trim();
-        const joinedBefore = /\|\|\s*$/.test(masked.slice(0, leftStart));
-        const joinedAfter = /^\s*\|\|/.test(masked.slice(rightEnd));
-        if (stringy(left) || stringy(right) || joinedBefore || joinedAfter) {
-          found = at;
-          break;
+        pluses.push({ at, leftStart, rightEnd, stringy: stringy(sql.slice(leftStart, at).trim()) || stringy(sql.slice(at + 1, rightEnd).trim()) });
+      }
+      const joined = new Set<number>();
+      const joinBefore = (index: number) => {
+        let i = index;
+        while (i > 0 && /\s/.test(masked[i - 1])) i--;
+        return (i >= 2 && masked[i - 1] === '|' && masked[i - 2] === '|') || (i >= 1 && joined.has(i - 1));
+      };
+      const joinAfter = (index: number) => {
+        let i = index;
+        while (i < masked.length && /\s/.test(masked[i])) i++;
+        return masked.startsWith('||', i) || joined.has(i);
+      };
+      const backwards = [...pluses].reverse();
+      for (let changed = true; changed;) {
+        changed = false;
+        // Both directions per round, so a chain settles in one round whichever end starts it.
+        for (const order of [pluses, backwards]) {
+          for (const plus of order) {
+            if (joined.has(plus.at) || !(plus.stringy || joinBefore(plus.leftStart) || joinAfter(plus.rightEnd))) continue;
+            joined.add(plus.at);
+            changed = true;
+          }
         }
       }
-      if (found === null) break;
-      sql = `${sql.slice(0, found)}||${sql.slice(found + 1)}`;
-      note("'text' + column", "'text' || column (SQLite's + adds numbers)");
+      if (joined.size) {
+        let out = '';
+        let last = 0;
+        for (const at of [...joined].sort((a, b) => a - b)) {
+          out += `${sql.slice(last, at)}||`;
+          last = at + 1;
+        }
+        sql = out + sql.slice(last);
+        note("'text' + column", "'text' || column (SQLite's + adds numbers)");
+      }
     }
   }
 
@@ -558,25 +909,6 @@ export function translateQuery(input: string): Translation {
     const replacement = kind === 'DIV' ? `CAST((${left}) / ${right} AS INTEGER)` : `MOD(${left}, ${right})`;
     sql = `${sql.slice(0, leftStart)}${replacement}${sql.slice(rightEnd)}`;
     note(`a ${kind} b`, kind === 'DIV' ? 'CAST(a / b AS INTEGER)' : "MOD(a, b) (SQLite's a % b works on whole numbers only)");
-  }
-
-  // PostgreSQL casts: expr::type
-  for (;;) {
-    const masked = maskSql(sql);
-    // Consume a complete type, including multiword names and precision, while
-    // leaving aliases and subsequent clauses outside the cast.
-    const cast = masked.match(/::\s*((?:(?:TIMESTAMP|TIME)\b(?:\s*\(\s*\d+\s*\))?(?:\s+WITH(?:OUT)?\s+TIME\s+ZONE)?|DOUBLE\s+PRECISION\b|CHAR(?:ACTER)?\s+VARYING\b|(?:SIGNED|UNSIGNED)\b(?:\s+INT(?:EGER)?\b)?|[A-Za-z_]\w*)(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)/i);
-    if (!cast || cast.index === undefined) break;
-    const start = operandStart(masked, cast.index);
-    if (start === cast.index) fail('A ::type cast needs a value on its left, for example price::integer.');
-    const expr = sql.slice(start, cast.index).trim();
-    const typeText = cast[1].trim();
-    const target = castTarget(typeText);
-    if (!target) fail(`SQLite has no ${typeText} type. Cast to INTEGER, REAL, NUMERIC or TEXT instead.`);
-    const replacement =
-      'fn' in target ? `${target.fn}(${expr})` : 'passthrough' in target ? `(${expr})` : `CAST(${expr} AS ${target.sqlite})`;
-    sql = `${sql.slice(0, start)}${replacement}${sql.slice(cast.index + cast[0].length)}`;
-    note(`${expr}::${typeText}`, replacement);
   }
 
   // --- Interval arithmetic ----------------------------------------------------------
@@ -631,16 +963,24 @@ export function translateQuery(input: string): Translation {
     return replacement;
   });
   sql = rewriteCalls(sql, ['SUBSTRING', 'SUBSTR'], (call) => {
-    const lengthOnly = call.inner.match(/^([\s\S]+?)\s+FOR\s+([\s\S]+)$/i);
-    if (lengthOnly && !/\bFROM\b/i.test(maskSql(call.inner)) && call.args.length === 1) {
+    // Keywords are located in the masked text so FROM / FOR inside a string argument are not clauses.
+    const masked = maskSql(call.inner);
+    const part = (start: number, end: number) => call.inner.slice(start, end).trim();
+    const lengthOnly = masked.match(/^([\s\S]+?)\s+FOR\s+([\s\S]+)$/i);
+    if (lengthOnly && !/\bFROM\b/i.test(masked) && call.args.length === 1) {
       note('SUBSTRING(s FOR n)', 'SUBSTR(s, 1, n)');
-      return `SUBSTR(${lengthOnly[1].trim()}, 1, ${lengthOnly[2].trim()})`;
+      return `SUBSTR(${part(0, lengthOnly[1].length)}, 1, ${part(call.inner.length - lengthOnly[2].length, call.inner.length)})`;
     }
-    const match = call.inner.match(/^([\s\S]+?)\s+FROM\s+([\s\S]+?)(?:\s+FOR\s+([\s\S]+))?$/i);
-    if (!match || call.args.length !== 1) return null;
-    const replacement = `SUBSTR(${match[1].trim()}, ${match[2].trim()}${match[3] ? `, ${match[3].trim()}` : ''})`;
+    if (call.args.length !== 1) return null;
+    const from = masked.match(/\s+FROM\s+/i);
+    if (!from || from.index === undefined) return null;
+    const forKw = masked.slice(from.index + from[0].length).match(/\s+FOR\s+/i);
+    const forAt = forKw && forKw.index !== undefined ? from.index + from[0].length + forKw.index : null;
+    const s = part(0, from.index);
+    const a = part(from.index + from[0].length, forAt ?? call.inner.length);
+    const n = forAt !== null && forKw ? part(forAt + forKw[0].length, call.inner.length) : null;
     note('SUBSTRING(s FROM a FOR n)', 'SUBSTR(s, a, n)');
-    return replacement;
+    return `SUBSTR(${s}, ${a}${n ? `, ${n}` : ''})`;
   });
   sql = rewriteCalls(sql, ['TRIM'], (call) => {
     const match = call.inner.match(/^\s*(?:(BOTH|LEADING|TRAILING)\s+)?(?:('(?:''|[^'])*'|"(?:""|[^"])*")\s+)?FROM\s+([\s\S]+)$/i);
@@ -656,10 +996,11 @@ export function translateQuery(input: string): Translation {
     return `TRIM(${call.inner})`;
   });
   sql = rewriteCalls(sql, ['POSITION'], (call) => {
-    const match = call.inner.match(/^([\s\S]+?)\s+IN\s+([\s\S]+)$/i);
-    if (!match || call.args.length !== 1) return null;
+    // IN is located in the masked text so the word inside a string argument is not the keyword.
+    const inKw = maskSql(call.inner).match(/\s+IN\s+/i);
+    if (!inKw || inKw.index === undefined || call.args.length !== 1) return null;
     note('POSITION(needle IN s)', 'INSTR(s, needle)');
-    return `INSTR(${match[2].trim()}, ${match[1].trim()})`;
+    return `INSTR(${call.inner.slice(inKw.index + inKw[0].length).trim()}, ${call.inner.slice(0, inKw.index).trim()})`;
   });
   // Oracle LISTAGG and SQL Server STRING_AGG put the ordering outside the
   // aggregate. SQLite accepts the same ordering inside GROUP_CONCAT.
@@ -701,11 +1042,15 @@ export function translateQuery(input: string): Translation {
       ordering = inner.slice(order.index + order[0].length).trim();
       inner = inner.slice(0, order.index);
     }
-    if (!sep && !order && name === 'GROUP_CONCAT') return null;
     const args = splitTopLevel(inner);
+    // MySQL / MariaDB: every argument is a value and the separator is always the SEPARATOR clause.
+    // Elsewhere GROUP_CONCAT(a, b) keeps SQLite's reading, where b is the separator.
+    const joinsValues = name === 'GROUP_CONCAT' && (args.length > 2 || (profile.groupConcatJoinsValues && args.length > 1));
+    if (!sep && !order && name === 'GROUP_CONCAT' && !joinsValues) return null;
     if (!args.length) return null;
     let value = args[0];
-    if (sep || (name === 'GROUP_CONCAT' && args.length > 2)) {
+    if (joinsValues && !sep) note('GROUP_CONCAT(a, b)', "GROUP_CONCAT(a || b) (MySQL joins both values of each row; the separator stays ',')");
+    if (sep || joinsValues) {
       // MySQL concatenates all value arguments for each row before aggregation.
       // A NULL in any value argument skips the whole row.
       const distinct = value.match(/^DISTINCT\s+/i);
@@ -743,13 +1088,27 @@ export function translateQuery(input: string): Translation {
     return `${call.name}(${call.args[0].trim()}, ${call.args[1].trim()}, 'DAY')`;
   });
   sql = rewriteCalls(sql, ['LOCATE'], (call) => (call.args.length === 2 ? `LOCATE(${call.args.join(', ')}, 1)` : null));
+  // sql.js stores one JavaScript callback per function name, so normalize the
+  // optional argument instead of registering two callbacks with the same name.
+  sql = rewriteCalls(sql, ['CHARINDEX'], (call) => (call.args.length === 2 ? `CHARINDEX(${call.args.join(', ')}, 1)` : null));
   sql = rewriteCalls(sql, ['LPAD', 'RPAD'], (call) => (call.args.length === 2 ? `${call.name}(${call.args.join(', ')}, ' ')` : null));
   sql = rewriteCalls(sql, ['TO_CHAR', 'TO_DATE'], (call) => (call.args.length === 1 ? `${call.name}(${call.args[0]}, NULL)` : null));
   sql = rewriteCalls(sql, ['TRUNC'], (call) => (call.args.length === 1 ? `TRUNC(${call.args[0]}, 0)` : null));
   sql = rewriteCalls(sql, ['WEEK'], (call) => (call.args.length === 1 ? `WEEK(${call.args[0]}, 0)` : null));
   sql = rewriteCalls(sql, ['GREATEST', 'LEAST'], (call) => {
-    const replacement = call.name.toUpperCase() === 'GREATEST' ? 'MAX' : 'MIN';
-    note(`${call.name.toUpperCase()}(a, b)`, `${replacement}(a, b) (SQLite's multi-argument MAX / MIN)`);
+    const name = call.name.toUpperCase();
+    const replacement = name === 'GREATEST' ? 'MAX' : 'MIN';
+    const args = call.args.map((arg) => arg.trim());
+    // With one argument SQLite's MAX / MIN would be the aggregate, not the value itself.
+    if (args.length === 1) return `(${args[0]})`;
+    if (profile.greatestSkipsNull && args.length > 1) {
+      // PostgreSQL and SQL Server ignore NULL arguments; SQLite's scalar MAX / MIN
+      // return NULL when any argument is NULL. Each argument falls back to the
+      // others, so a NULL never takes part and all-NULL still gives NULL.
+      note(`${name}(a, b)`, `${replacement}(COALESCE(a, b), COALESCE(b, a)) (${profile.label} skips NULL arguments; SQLite's ${replacement} would return NULL)`);
+      return `${replacement}(${args.map((arg, index) => `COALESCE(${[arg, ...args.filter((_, other) => other !== index)].join(', ')})`).join(', ')})`;
+    }
+    note(`${name}(a, b)`, `${replacement}(a, b) (SQLite's multi-argument MAX / MIN)`);
     return `${replacement}(${call.inner})`;
   });
   sql = rewriteCalls(sql, ['FORMAT'], (call) => {
@@ -803,9 +1162,11 @@ export function translateQuery(input: string): Translation {
     const branches: string[] = [];
     for (let i = 0; i < rest.length; i += 2) {
       const search = rest[i];
-      branches.push(/^NULL$/i.test(search) ? `WHEN ${subject} IS NULL THEN ${rest[i + 1]}` : `WHEN ${subject} = ${search} THEN ${rest[i + 1]}`);
+      // DECODE treats any two NULL values as equal, including values returned
+      // by expressions. SQLite's IS comparison has that same NULL behavior.
+      branches.push(`WHEN (${subject}) IS (${search}) THEN ${rest[i + 1]}`);
     }
-    note('DECODE(x, a, r1, b, r2, default)', 'CASE WHEN x = a THEN r1 WHEN x = b THEN r2 ELSE default END');
+    note('DECODE(x, a, r1, b, r2, default)', 'CASE WHEN x IS a THEN r1 WHEN x IS b THEN r2 ELSE default END (NULL values match)');
     return `CASE ${branches.join(' ')}${fallback !== null && fallback !== undefined ? ` ELSE ${fallback}` : ''} END`;
   });
 
@@ -853,7 +1214,84 @@ export function translateQuery(input: string): Translation {
   // trace renders the specification back without it (tidyWindowSql).
   rewrite(/\bOVER\s*\(\s*(?!PARTITION\b)/gi, 'OVER (PARTITION BY NULL ');
 
-  return { sql: wrapIntegerCompatCalls(sql).trim(), notes };
+  return { sql: wrapIntegerCompatCalls(sql).trim(), notes, quotedStrings, features: [...features], topWithTies };
+}
+
+const WINDOW_SPEC_START = /^\s*(?:PARTITION\b|ORDER\b|ROWS\b|RANGE\b|GROUPS\b|$)/i;
+
+/**
+ * Resolve `WINDOW name AS (...)` definitions by writing each specification
+ * inline where `OVER name` uses it. Names are scoped to their own SELECT:
+ * nested queries are resolved first, so an `OVER name` left in a scope without
+ * a matching definition is an error rather than a reference to an outer one.
+ */
+function inlineNamedWindows(input: string, note: (from: string, to: string) => void): string {
+  const resolveScope = (text: string): string => {
+    const outerMasked = maskSql(text);
+    // Nothing to resolve here or below: leave the text alone (keeps deep nesting linear).
+    if (!/\bWINDOW\s/i.test(outerMasked) && !/\bOVER\s+(?!\()[A-Za-z_"`]/i.test(outerMasked)) return text;
+    // Nested SELECT scopes first (derived tables, subqueries, CTE bodies), each
+    // exactly once: the scan jumps past a resolved scope, and the recursive call
+    // handles whatever is nested inside it.
+    let sql = '';
+    const opensScope = /\(\s*(?=SELECT\b|WITH\b)/iy;
+    let i = 0;
+    while (i < text.length) {
+      opensScope.lastIndex = i;
+      if (text[i] === '(' && opensScope.test(outerMasked)) {
+        const close = matchingParen(outerMasked, i);
+        if (close !== -1) {
+          sql += `(${resolveScope(text.slice(i + 1, close))})`;
+          i = close + 1;
+          continue;
+        }
+      }
+      sql += text[i];
+      i++;
+    }
+
+    // This scope's WINDOW clause: WINDOW w AS (...), w2 AS (...).
+    const definitions = new Map<string, string>();
+    const masked = maskSql(sql);
+    const clause = topLevelMatches(masked, /\bWINDOW\s+/gi)[0];
+    if (clause && clause.index !== undefined) {
+      let cursor = clause.index + clause[0].length;
+      for (;;) {
+        const head = masked.slice(cursor).match(/^\s*([A-Za-z_]\w*|"[^"]+"|`[^`]+`)\s+AS\s*\(/i);
+        if (!head) fail('A WINDOW clause lists definitions as WINDOW name AS (PARTITION BY ... ORDER BY ...).');
+        const open = cursor + head[0].length - 1;
+        const close = matchingParen(masked, open);
+        if (close === -1) fail('A WINDOW definition is missing its closing parenthesis.');
+        const name = unquoteIdent(head[1]).toLowerCase();
+        const spec = sql.slice(open + 1, close).trim();
+        if (!WINDOW_SPEC_START.test(maskSql(spec))) {
+          fail(`WINDOW ${head[1]} AS (${spec.split(/\s+/)[0]} ...) builds on another named window. Window inheritance is not supported; repeat the full PARTITION BY / ORDER BY specification instead.`);
+        }
+        if (definitions.has(name)) fail(`The window name ${head[1]} is defined twice in one WINDOW clause.`);
+        definitions.set(name, spec);
+        cursor = close + 1;
+        const comma = masked.slice(cursor).match(/^\s*,/);
+        if (!comma) break;
+        cursor += comma[0].length;
+      }
+      sql = `${sql.slice(0, clause.index).replace(/\s+$/, '')} ${sql.slice(cursor).replace(/^\s+/, '')}`.replace(/\s+$/, '');
+    }
+
+    // Uses: OVER name, and the unsupported OVER (name ORDER BY ...) inheritance.
+    const inherits = maskSql(sql).match(/\bOVER\s*\(\s*([A-Za-z_]\w*)\s+(?:PARTITION|ORDER|ROWS|RANGE|GROUPS)\b/i);
+    if (inherits && !/^(?:PARTITION|ORDER|ROWS|RANGE|GROUPS)$/i.test(inherits[1])) {
+      fail(`OVER (${inherits[1]} ...) builds on the named window ${inherits[1]}. Window inheritance is not supported; write the full specification inside OVER (...).`);
+    }
+    sql = replaceOutsideLiterals(sql, /\bOVER\s+(?!\()([A-Za-z_]\w*|"[^"]+"|`[^`]+`)\b/gi, (_original, match) => {
+      const name = unquoteIdent(match[1]).toLowerCase();
+      const spec = definitions.get(name);
+      if (spec === undefined) fail(`OVER ${match[1]} refers to a window that is not defined. Add WINDOW ${match[1]} AS (...) after the query's HAVING clause, or write OVER (...) inline.`);
+      note(`OVER ${match[1]}`, `OVER (${spec})`);
+      return `OVER (${spec})`;
+    });
+    return sql;
+  };
+  return resolveScope(input);
 }
 
 /** Which kind of statement a query is, judged from its first keyword (comments skipped). */

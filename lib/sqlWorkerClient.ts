@@ -1,7 +1,7 @@
 'use client';
 
 import type { SchemaDef } from './schemas';
-import type { LoadedSchema, QueryRun } from './sqlRuntime';
+import type { LoadedSchema, QueryOptions, QueryRun } from './sqlRuntime';
 import type { SqlWorkerCheckpoint, SqlWorkerRequest, SqlWorkerResponse } from './sqlWorkerProtocol';
 
 /** A worker failure; schema builds may name the statement that failed. */
@@ -19,7 +19,7 @@ const QUERY_DEADLINE_MS = 10_000;
 const LOAD_DEADLINE_MS = 15_000;
 type SqlWorkerPayload =
   | { operation: 'loadSchema'; def: SchemaDef; savedBytes?: Uint8Array }
-  | { operation: 'runQuery'; sql: string };
+  | { operation: 'runQuery'; sql: string; options?: QueryOptions };
 const pending = new Map<
   number,
   { resolve: (value: LoadedSchema | QueryRun) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
@@ -117,6 +117,7 @@ export function loadSchemaInWorker(def: SchemaDef, savedBytes?: Uint8Array): Pro
   return request<LoadedSchema>({ operation: 'loadSchema', def, savedBytes });
 }
 
-export function runQueryInWorker(sql: string): Promise<QueryRun> {
-  return request<QueryRun>({ operation: 'runQuery', sql });
+/** Run one statement; the options are snapshotted here so a later dialect change cannot reach a queued request. */
+export function runQueryInWorker(sql: string, options: QueryOptions = {}): Promise<QueryRun> {
+  return request<QueryRun>({ operation: 'runQuery', sql, options: { ...options } });
 }
