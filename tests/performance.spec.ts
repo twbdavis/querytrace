@@ -100,13 +100,14 @@ test('hidden Unicode values preserve canvas column widths when selected', async 
   await page.getByLabel('SQL query editor').fill("SELECT id, label, 'AFTER' AS marker FROM PERF_UNICODE ORDER BY id DESC");
   await page.getByRole('button', { name: 'RUN', exact: true }).first().click();
   await page.getByRole('tab').last().click();
-  const overlap = await page.locator('[data-result-row="0"]').evaluate((row) => {
+  const firstRow = page.locator('[data-result-row="0"]');
+  const overlap = await firstRow.evaluate((row) => {
     const range = document.createRange();
     range.selectNodeContents(row.children[1]);
     return range.getBoundingClientRect().right > row.children[2].getBoundingClientRect().left + 0.5;
   });
   expect(overlap, 'wide fallback glyphs fit their result column').toBe(false);
-  await page.locator('[data-result-row="0"]').click();
+  await firstRow.getByRole('cell', { name: '500', exact: true }).click();
   await expect(card.locator('[data-table-row="500"]')).toBeVisible();
   expect(await card.evaluate((element) => (element as HTMLElement).offsetWidth)).toBe(width);
   await page.screenshot({ path: testInfo.outputPath('unicode-row-selected.png') });
