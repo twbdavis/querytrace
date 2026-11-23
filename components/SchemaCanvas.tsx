@@ -37,10 +37,8 @@ const LEGEND: Array<{ swatch: string; name: string; desc: string }> = [
 ];
 
 function StateLegend() {
-  // Expanded by default only where there's room to spare; a chip elsewhere.
-  const [open, setOpen] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 1536px)').matches
-  );
+  // A chip until opened: the canvas gets the room first.
+  const [open, setOpen] = useState(false);
   return (
     <div className="rounded-md border border-line-strong bg-panel font-data text-[10px]">
       <button

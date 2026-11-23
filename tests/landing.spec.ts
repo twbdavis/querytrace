@@ -135,7 +135,7 @@ test('a failed scene download keeps the landing page and tracer links usable', a
     // otherwise context teardown can dispose their responses mid-handler.
     await page.unrouteAll({ behavior: 'wait' });
   }
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
+  await page.getByRole('main').getByRole('link', { name: 'Open the tracer' }).first().click();
   await expect(page).toHaveURL(/\/trace$/);
   await expect(page.getByLabel('SQL query editor')).toBeVisible();
 });
@@ -193,7 +193,16 @@ test('homepage opens the tracer and runs a selected lesson with the QueryTrace t
   // The hero scene (a still frame under reduced motion, or the static join without WebGL).
   await expect(page.getByRole('img', { name: /joined on VENUE_ID/ })).toBeVisible();
 
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open the tracer' }).click();
+  const menu = page.getByRole('button', { name: 'Page menu' });
+  const pages = page.getByRole('navigation', { name: 'Pages' });
+  await menu.press('Enter');
+  const home = pages.getByRole('link', { name: 'Home' });
+  await expect(home).toHaveAttribute('aria-current', 'page');
+  await home.press('Escape');
+  await expect(menu).toBeFocused();
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await menu.click();
+  await pages.getByRole('link', { name: 'Tracer' }).click();
   await expect(page).toHaveURL(/\/trace$/);
   await expect(page).toHaveTitle('QueryTrace');
   await expect(page.getByLabel('SQL query editor')).toBeVisible();

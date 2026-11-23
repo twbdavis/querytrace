@@ -94,10 +94,9 @@ const FLIGHT_DUR = 0.95;
 const RESULT_REVEAL_DUR = 0.22;
 const FLIGHT_FADE_DUR = 0.18;
 const LIGHT_DUR = 0.3;
-const FLASH_DUR = 0.6;
 const PULSE_PERIOD = 1.4;
 const T_HOLD = MATCH_START + (MATCHES.length - 1) * MATCH_GAP + SPARK_DUR + FLIGHT_DUR + RESULT_REVEAL_DUR + FLIGHT_FADE_DUR;
-/** The sequence freezes here, once the last flash has faded. */
+/** The sequence freezes here, once the last row has settled. */
 export const T_END = T_HOLD + 1.2;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -819,25 +818,22 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
   /* ---- per-frame update ---- */
 
   const litEdge = new Color(accents.active).multiplyScalar(1.8);
-  const flashEdge = new Color(accents.pulse).multiplyScalar(3);
   const idleEdge = new Color(lines.default);
   const resultEdge = new Color(accents.result).multiplyScalar(1.6);
   const litS = new Float32Array(SCREENING.rows.length);
   const liftS = new Float32Array(SCREENING.rows.length);
   const litV = new Float32Array(VENUE.rows.length);
   const liftV = new Float32Array(VENUE.rows.length);
-  const flashV = new Float32Array(VENUE.rows.length);
   const landed = new Float32Array(MATCHES.length);
-  const landFlash = new Float32Array(MATCHES.length);
 
-  function paintRow(slab: Slab, lit: number, lift: number, flash: number, selecting: number) {
+  function paintRow(slab: Slab, lit: number, lift: number, selecting: number) {
     slab.overlay.opacity = 0.28 * lit;
     for (const cell of slab.selectCells) cell.opacity = 0.2 * lit * selecting;
     if (slab.bar) slab.bar.opacity = lit;
     if (slab.keyCell) slab.keyCell.opacity = 0.16 * lit;
     // The row in motion glows hardest; settled lit rows keep a softer outline.
+    // No burst on arrival: the lift and the glow are the whole event.
     _color.lerpColors(idleEdge, litEdge, lit * (0.4 + 0.6 * lift));
-    if (flash > 0) _color.lerp(flashEdge, flash * 0.7);
     slab.edge.color.copy(_color);
     // poseSlab has already placed the slab this frame; the lift rides on top.
     slab.group.position.z += lift * 0.12;
@@ -901,7 +897,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
     }
 
     // Matches: lights, lifts, sparks, flights, result rows.
-    litS.fill(0); liftS.fill(0); litV.fill(0); liftV.fill(0); flashV.fill(0); landed.fill(0); landFlash.fill(0);
+    litS.fill(0); liftS.fill(0); litV.fill(0); liftV.fill(0); landed.fill(0);
     let glowIndex = PULSES * (1 + TRAIL);
     MATCHES.forEach(([si, vi], i) => {
       const start = MATCH_START + i * MATCH_GAP;
@@ -911,9 +907,7 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
       liftS[si] = Math.max(liftS[si], bell((t - start) / 0.9));
       litV[vi] = Math.max(litV[vi], easeOutCubic((t - arrive) / LIGHT_DUR));
       liftV[vi] = Math.max(liftV[vi], bell((t - arrive) / 0.8));
-      flashV[vi] = Math.max(flashV[vi], bell((t - arrive) / FLASH_DUR));
       landed[i] = smootherstep((t - land) / RESULT_REVEAL_DUR);
-      landFlash[i] = bell((t - land) / 0.8);
 
       // Spark along the wire.
       const curve = sparkCurves[i];
@@ -946,8 +940,8 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
         flight.sides.opacity = k;
       }
     });
-    screening.rows.forEach((slab, ri) => paintRow(slab, litS[ri], liftS[ri], 0, selecting));
-    venue.rows.forEach((slab, ri) => paintRow(slab, litV[ri], liftV[ri], flashV[ri], selecting));
+    screening.rows.forEach((slab, ri) => paintRow(slab, litS[ri], liftS[ri], selecting));
+    venue.rows.forEach((slab, ri) => paintRow(slab, litV[ri], liftV[ri], selecting));
 
     // The result header settles before the first cells reach their row.
     const firstLand = smootherstep((t - T_PROJECT) / 0.7);
@@ -960,8 +954,8 @@ export function createJoinScene(canvas: HTMLCanvasElement, opts: JoinSceneOption
       // one another. The flying cells provide the row's entrance motion.
       slab.group.position.copy(slab.rest);
       setSlabOpacity(slab, landed[i]);
-      slab.overlay.opacity = 0.22 * landFlash[i];
-      _color.lerpColors(idleEdge, resultEdge, Math.min(1, landed[i] * (0.4 + 0.6 * landFlash[i])));
+      // The row settles straight into its resting outline; no burst on landing.
+      _color.lerpColors(idleEdge, resultEdge, landed[i] * 0.4);
       slab.edge.color.copy(_color);
     });
     _color.lerpColors(idleEdge, resultEdge, 0.5 * firstLand);

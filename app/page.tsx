@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import { LESSONS, type Lesson } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
 import { Hero } from '@/components/landing/Hero';
+import { PageMenu } from '@/components/landing/PageMenu';
 import { Reveal } from '@/components/landing/Reveal';
 import PoweredByPlatmatics from '@/components/badge/PoweredByPlatmatics';
 import s from '@/components/landing/landing.module.css';
@@ -43,15 +44,7 @@ export default function LandingPage() {
       <script dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }} />
 
       <header className={s.top}>
-        <Link href="/" className={`${s.mark} ${s.inner}`} aria-label="QueryTrace home">
-          <svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-            <path d="M12 16h40M12 32h24M12 48h40" fill="none" stroke="currentColor" strokeWidth="6" strokeLinecap="square" />
-            <rect x="42" y="27" width="10" height="10" fill="#5eead4" />
-          </svg>
-        </Link>
-        <nav aria-label="Primary">
-          <Link href="/trace" className={s.topLink}>Open the tracer</Link>
-        </nav>
+        <PageMenu />
       </header>
 
       <main id="main">
@@ -69,7 +62,6 @@ export default function LandingPage() {
         <section className={s.section} aria-labelledby="lessons-title" id="lessons">
           <div className={s.inner}>
             <Reveal className={s.wide}>
-              <p className={s.eyebrow}>Lessons</p>
               <h2 id="lessons-title" className={s.heading}>Nineteen lessons.</h2>
               <p className={s.prose}>
                 Each lesson is one query over a small fictional dataset.
@@ -99,7 +91,6 @@ export default function LandingPage() {
             <Reveal className={s.wide}>
               <div className={s.schema}>
                 <div>
-                  <p className={s.eyebrow}>Schema</p>
                   <h2 id="schema-title" className={s.heading}>Your own schema works too.</h2>
                   <ul className={s.facts}>
                     {FACTS.map((fact) => (
