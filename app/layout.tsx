@@ -1,17 +1,15 @@
 import type { Metadata, Viewport } from 'next';
-import { Space_Grotesk, Space_Mono } from 'next/font/google';
+import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
-const ui = Space_Grotesk({
+const ui = Geist({
   subsets: ['latin'],
-  weight: ['400', '500', '700'],
   variable: '--font-ui',
   display: 'swap',
 });
 
-const data = Space_Mono({
+const data = Geist_Mono({
   subsets: ['latin'],
-  weight: ['400', '700'],
   variable: '--font-data',
   display: 'swap',
 });

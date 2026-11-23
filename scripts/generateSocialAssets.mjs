@@ -37,7 +37,7 @@ const theme = {
 const fontLinks = `
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=block" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;700&family=Geist+Mono:wght@400;700&display=block" rel="stylesheet">
 `;
 
 /** The mark from app/icon.svg, scalable. */
@@ -65,9 +65,9 @@ function miniTable({ title, rows, x, y, width }) {
   return `
     <div style="position: absolute; left: ${x}px; top: ${y}px; width: ${width}px;
                 background: ${theme.node}; border: 1px solid ${theme.lineStrong};
-                border-radius: 8px; overflow: hidden; font-family: 'Space Mono', monospace;
+                border-radius: 8px; overflow: hidden; font-family: 'Geist Mono', monospace;
                 font-size: 15px; box-shadow: 0 18px 45px rgba(0,0,0,0.45);">
-      <div style="background: ${theme.nodeHeader}; color: ${theme.ink}; font-family: 'Space Grotesk', sans-serif;
+      <div style="background: ${theme.nodeHeader}; color: ${theme.ink}; font-family: 'Geist', sans-serif;
                   font-weight: 700; font-size: 13px; letter-spacing: 0.18em; padding: 8px 12px;">${title}</div>
       <div style="padding: 4px 0;">${rowHtml}</div>
     </div>`;
@@ -94,22 +94,22 @@ const ogHtml = `<!doctype html>
 
   <div style="position: absolute; left: 72px; top: 64px; display: flex; align-items: center; gap: 22px;">
     ${logoMark(76, 14)}
-    <div style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 42px;
+    <div style="font-family: 'Geist', sans-serif; font-weight: 700; font-size: 42px;
                 letter-spacing: 0.22em; color: ${theme.ink};">QUERY<span style="color: ${theme.active};">TRACE</span></div>
   </div>
 
   <div style="position: absolute; left: 72px; top: 216px; width: 720px;">
-    <div style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 57px;
+    <div style="font-family: 'Geist', sans-serif; font-weight: 700; font-size: 57px;
                 line-height: 1.16; white-space: nowrap; color: ${theme.ink};">
       Watch SQL queries<br>execute, <span style="color: ${theme.result};">step by step</span>
     </div>
-    <div style="margin-top: 28px; font-family: 'Space Grotesk', sans-serif; font-size: 27px;
+    <div style="margin-top: 28px; font-family: 'Geist', sans-serif; font-size: 27px;
                 line-height: 1.45; color: ${theme.inkDim};">
       Joins pulse, filters fade, groups collapse,<br>all on live tables in your browser.
     </div>
   </div>
 
-  <div style="position: absolute; left: 72px; bottom: 56px; font-family: 'Space Mono', monospace;
+  <div style="position: absolute; left: 72px; bottom: 56px; font-family: 'Geist Mono', monospace;
               font-size: 22px; color: ${theme.inkMute};">
     www.querytrace.<span style="color: ${theme.result};">net</span>
   </div>

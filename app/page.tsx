@@ -1,5 +1,4 @@
 import Link from 'next/link';
-import localFont from 'next/font/local';
 import type { CSSProperties } from 'react';
 import { LESSONS, type Lesson } from '@/lib/lessons';
 import { schemaById } from '@/lib/schemas';
@@ -7,16 +6,6 @@ import { Hero } from '@/components/landing/Hero';
 import { Reveal } from '@/components/landing/Reveal';
 import PoweredByPlatmatics from '@/components/badge/PoweredByPlatmatics';
 import s from '@/components/landing/landing.module.css';
-
-/* Switzer, self-hosted: the font CSP allows same-origin files only. */
-const text = localFont({
-  src: [
-    { path: '../public/fonts/switzer-400.woff2', weight: '400', style: 'normal' },
-    { path: '../public/fonts/switzer-500.woff2', weight: '500', style: 'normal' },
-  ],
-  variable: '--font-text',
-  display: 'swap',
-});
 
 const REPO_URL = 'https://github.com/twbdavis/querytrace';
 
@@ -50,7 +39,7 @@ function Action({ i }: { i?: number }) {
 export default function LandingPage() {
   const year = new Date().getFullYear();
   return (
-    <div className={`${text.variable} ${s.page}`}>
+    <div className={s.page}>
       <script dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }} />
 
       <header className={s.top}>

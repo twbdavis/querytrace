@@ -12,9 +12,9 @@ import type { TableSpec } from './joinData';
  */
 
 export interface Fonts {
-  /** CSS font-family list for data (Space Mono on the site). */
+  /** CSS font-family list for data (Geist Mono on the site). */
   data: string;
-  /** CSS font-family list for UI text (Space Grotesk on the site). */
+  /** CSS font-family list for UI text (Geist on the site). */
   ui: string;
 }
 
