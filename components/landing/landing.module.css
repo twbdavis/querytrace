@@ -31,7 +31,7 @@
   padding: 0 var(--edge);
   background: var(--ground);
   color: var(--ink);
-  font-family: var(--font-text), 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-ui), 'Helvetica Neue', Arial, sans-serif;
   font-size: var(--step-body);
   line-height: 1.5;
   letter-spacing: -0.01em;

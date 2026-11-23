@@ -50,7 +50,7 @@ const blueprintTheme = EditorView.theme(
     '&.cm-focused': { outline: 'none' },
     '.cm-scroller': {
       overflow: 'auto',
-      fontFamily: 'var(--font-data), Space Mono, monospace',
+      fontFamily: 'var(--font-data), Geist Mono, monospace',
       lineHeight: '19px',
     },
     '.cm-content': { minHeight: '100%', padding: '10px 0 0', caretColor: accents.active },
@@ -64,7 +64,7 @@ const blueprintTheme = EditorView.theme(
       backgroundColor: surfaces.nodeHeader,
       border: `1px solid ${lines.default}`,
       color: text.primary,
-      fontFamily: 'var(--font-data), Space Mono, monospace',
+      fontFamily: 'var(--font-data), Geist Mono, monospace',
       fontSize: '11px',
     },
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
