@@ -58,8 +58,8 @@ export default function LandingPage() {
         <section className={s.hero} aria-labelledby="headline">
           <Hero
             title={
-              <h1 id="headline" className={s.headline} data-rise style={{ '--i': 0 } as CSSProperties}>
-                Watch a query run.
+              <h1 id="headline" className={s.wordmark} data-rise style={{ '--i': 0 } as CSSProperties}>
+                QUERY<span className={s.wordmarkTrace}>TRACE</span>
               </h1>
             }
             action={<Action i={3} />}

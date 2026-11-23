@@ -128,7 +128,7 @@ test('a failed scene download keeps the landing page and tracer links usable', a
     await page.goto('/');
     await expectStaticJoin(page, screenshotRequests);
     expect(blocked).toBe(true);
-    await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'QUERYTRACE' })).toBeVisible();
   } finally {
     // Only the landing scene download is under test. Drain active fetch/body
     // handlers before navigation starts loading the tracer's worker chunks;
@@ -152,7 +152,7 @@ test('a scene rendering failure falls back without replacing the homepage', asyn
   await expect(page.locator('[data-mode] canvas')).toHaveCSS('opacity', '1', { timeout: sceneReadyTimeout });
   await page.evaluate(() => { window.__querytraceRenderFailure = true; });
   await expectStaticJoin(page, screenshotRequests);
-  await expect(page.getByRole('heading', { name: 'Watch a query run.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'QUERYTRACE' })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -189,7 +189,7 @@ test('homepage opens the tracer and runs a selected lesson with the QueryTrace t
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
   await expect(page).toHaveTitle('QueryTrace');
-  await expect(page.getByRole('heading', { name: 'Watch a query run.', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'QUERYTRACE', level: 1 })).toBeVisible();
   // The hero scene (a still frame under reduced motion, or the static join without WebGL).
   await expect(page.getByRole('img', { name: /joined on VENUE_ID/ })).toBeVisible();
 
@@ -202,7 +202,7 @@ test('homepage opens the tracer and runs a selected lesson with the QueryTrace t
   // Enter through a lesson link after the default schema has already loaded,
   // ensuring the route prepares the lesson's different database and runs it.
   await page.goBack();
-  await expect(page.getByRole('heading', { name: 'Watch a query run.', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'QUERYTRACE', level: 1 })).toBeVisible();
   await page.getByRole('link', { name: '1. Choose result columns', exact: false }).click();
   await expect(page).toHaveURL(/\/trace\?lesson=projection$/);
   await expect(page).toHaveTitle('QueryTrace');

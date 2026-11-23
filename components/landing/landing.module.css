@@ -211,13 +211,18 @@
   pointer-events: none;
 }
 
-.headline {
+/* The two-tone QUERYTRACE wordmark from the tracer's top bar, scaled to the
+   headline step. The tracked caps read as a mark, not a sentence. */
+.wordmark {
   font-size: var(--step-head);
-  font-weight: 500;
+  font-weight: 700;
   line-height: 1.2;
-  letter-spacing: -0.03em;
-  max-width: 24ch;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
+
+.wordmarkTrace { color: var(--accent); }
 
 .actions {
   display: flex;
