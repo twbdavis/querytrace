@@ -32,7 +32,7 @@
   },
   "dependencies": {
     "@codemirror/lang-sql": "^6.10.0",
-    "@xyflow/react": "^12.12.1",
+    "@xyflow/react": "^13.0.2",
     "codemirror": "^6.0.2",
     "next": "16.4.6",
     "node-sql-parser": "^5.4.0",
